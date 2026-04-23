@@ -1,0 +1,10 @@
+.env
+*.pyc
+__pycache__/
+.venv/
+venv/
+access_token.txt
+*.log
+.pytest_cache/
+*.db
+instruments.csv
