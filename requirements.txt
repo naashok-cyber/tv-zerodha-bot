@@ -1,0 +1,25 @@
+# P0-a — pinned 2026-04-25
+# To install: .venv\Scripts\pip install -r requirements.txt
+# To repin:   .venv\Scripts\pip freeze > requirements.txt
+
+# Runtime
+pydantic==2.13.3
+pydantic-core==2.46.3
+pydantic-settings==2.14.0
+SQLAlchemy==2.0.49
+python-dotenv==1.2.2
+tzdata==2026.2
+
+# Runtime transitive
+annotated-types==0.7.0
+greenlet==3.4.0
+typing-inspection==0.4.2
+typing_extensions==4.15.0
+
+# Test
+pytest==8.4.2
+colorama==0.4.6
+iniconfig==2.3.0
+packaging==26.2
+pluggy==1.6.0
+Pygments==2.20.0

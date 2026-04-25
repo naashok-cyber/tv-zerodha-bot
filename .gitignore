@@ -8,3 +8,6 @@ access_token.txt
 .pytest_cache/
 *.db
 instruments.csv
+data/
+*.enc
+.claude/
