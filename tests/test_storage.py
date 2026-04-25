@@ -33,6 +33,7 @@ EXPECTED_TABLES = {
     "sessions",
     "strike_decisions",
     "errors",
+    "instruments",
 }
 
 

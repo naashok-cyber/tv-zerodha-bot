@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime
+from datetime import date, datetime
 
 from sqlalchemy import (
     Boolean,
+    Date,
     DateTime,
     Float,
     ForeignKey,
@@ -22,6 +23,24 @@ from app.config import get_settings
 
 class Base(DeclarativeBase):
     pass
+
+
+class Instrument(Base):
+    """Kite instruments master — refreshed daily from api.kite.trade/instruments."""
+
+    __tablename__ = "instruments"
+
+    instrument_token: Mapped[int] = mapped_column(Integer, primary_key=True)
+    exchange_token: Mapped[int] = mapped_column(Integer, nullable=False)
+    tradingsymbol: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    expiry: Mapped[date | None] = mapped_column(Date, nullable=True)
+    strike: Mapped[float | None] = mapped_column(Float, nullable=True)
+    tick_size: Mapped[float] = mapped_column(Float, nullable=False)
+    lot_size: Mapped[int] = mapped_column(Integer, nullable=False)
+    instrument_type: Mapped[str] = mapped_column(String(8), nullable=False)
+    segment: Mapped[str] = mapped_column(String(16), nullable=False)
+    exchange: Mapped[str] = mapped_column(String(8), nullable=False)
 
 
 class Alert(Base):
