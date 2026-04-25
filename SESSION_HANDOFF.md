@@ -1,24 +1,22 @@
-# Session Handoff — 2026-04-25
+# Session Handoff — 2026-04-25 (night)
 
-## State: P0-b complete. P0-c not started.
+## State: P0-c complete. P0-d not started.
 
 ---
 
-## Last Completed Phase: P0-b
+## Last Completed Phase: P0-c
 
-**Files added / modified in P0-b (committed as part of this session):**
+**Files added / modified in P0-c (committed as `40fc24b`):**
 
 | File | Status |
 |---|---|
-| `app/auth.py` | new — IP allowlist, HMAC verify, token-bucket rate limiter |
-| `app/kite_session.py` | new — Fernet encryption, PBKDF2 key derivation, TokenStaleError, OAuth callback |
-| `tests/test_auth.py` | new — 33 tests; IP matrix, HMAC edge cases, rate-limit trip |
-| `tests/test_kite_session.py` | new — 22 tests; token round-trip, age checks, OAuth callback |
-| `app/config.py` | modified — added SECRET_KEY, PBKDF2_ITERATIONS, WEBHOOK_RATE_LIMIT_PER_MINUTE |
-| `.env.example` | modified — added encryption and rate-limit fields |
-| `requirements.txt` | modified — pinned kiteconnect==5.2.0, cryptography==47.0.0 + transitive deps |
+| `app/symbol_mapper.py` | new — resolve(), resolve_underlying(), round_to_tick(), list_strikes(), list_expiries(), refresh_instruments() |
+| `app/storage.py` | modified — added Instrument SQLAlchemy model (Date expiry, nullable strike) |
+| `tests/test_symbol_mapper.py` | new — 17 tests; all 6 resolution cases, Oct/Nov/Dec encoding, MCX continuous, tick rounding, list helpers |
+| `tests/fixtures/instruments_sample.csv` | new — 20-row fixture (NIFTY weekly/monthly/FUT, BANKNIFTY, RELIANCE, CRUDEOIL, NATURALGAS, GOLDM) |
+| `tests/test_storage.py` | modified — added "instruments" to EXPECTED_TABLES set |
 
-**Test result:** 111 passed, 0 failed, 3.63s (Python 3.11.9, pytest 8.4.2)
+**Test result:** 128 passed, 0 failed, 2.72s (Python 3.11.9, pytest 8.4.2)
 
 ---
 
@@ -46,122 +44,174 @@
 | HMAC verify | `hmac.compare_digest` on plaintext secret in JSON payload | P0-b |
 | Salt storage | Per-install random 16-byte salt at `data/access_token.salt` | P0-b |
 | Rate limiter | In-process token bucket (not slowapi; no ASGI dep yet) | P0-b |
-| PBKDF2 iterations | **100,000** (current) — see note below | P0-b |
+| PBKDF2 iterations | **100,000** (current) — bump to 600,000 queued, not yet applied | P0-b |
+| round_to_tick | ROUND_HALF_UP — revisit if NSE rejects half-tick boundaries | P0-c |
 
 ---
 
-## PBKDF2 Iterations — Queued Change
+## PBKDF2 Iterations — Still Queued
 
-**Status: NOT YET APPLIED.**
-
-User asked at end of session whether the bump to **600,000** was applied or queued.
-It was queued — the value in `app/config.py` and `.env.example` is currently `100_000`.
-
-**Action on resume:** if you want 600,000, run:
-```
-# In app/config.py, change:
-PBKDF2_ITERATIONS: int = 100_000
-# to:
-PBKDF2_ITERATIONS: int = 600_000
-
-# In .env.example, change:
-PBKDF2_ITERATIONS=100000
-# to:
-PBKDF2_ITERATIONS=600000
-```
-Note: higher iterations slow the daily-login callback by ~500ms on a t3.small (acceptable).
-All existing kite_session tests use `PBKDF2_ITERATIONS=1` so no test changes needed.
+Value in `app/config.py` and `.env.example` is still `100_000`.
+To apply: change both to `600_000`. Test suite uses `PBKDF2_ITERATIONS=1` — no test changes needed.
 
 ---
 
 ## Current Commit State
 
 ```
-git log --oneline (after this session's commits):
+git log --oneline:
 
-<commit-hash>  P0-b: auth, kite_session, tests
-4946265        P0-a: config and storage modules with tests
-724ea14        Pause point: handoff and resume notes
-d5497e6        Initial: spec files and prototype
+40fc24b  P0-c: symbol_mapper module with Instrument model and tests
+8cda702  P0-b: auth and kite_session modules with tests
+4946265  P0-a: config and storage modules with tests
+724ea14  Pause point: handoff and resume notes
+d5497e6  Initial: spec files and prototype
 ```
 
 ---
 
-## Next Phase: P0-c
+## Budget Status
 
-**Scope: `app/symbol_mapper.py` + `tests/test_symbol_mapper.py`**
-
-The user will provide a detailed instruction block on resume (same format as P0-b).
-The known requirements from v1/v2/v3 specs are captured below as the working spec.
+- Session used: ~88%
+- Week used: ~47% (week resets **2026-04-28 / Monday**)
+- **Resume rule: do not start P0-d until session resets (3:20 am tonight) OR week is fresh Monday.**
 
 ---
 
-### P0-c Working Spec (from v1 §5 + v2 §1/§2 + v3 P0)
+## Next Phase: P0-d
 
-#### symbol_mapper.py responsibilities
+**Scope: `app/orders.py` + `app/watcher.py`**
 
-1. **Instruments download**
-   - Download `https://api.kite.trade/instruments` (CSV, ~40 MB) into the local SQLite
-     `instruments` table at 08:30 IST daily (triggered by scheduler; manually callable).
-   - Columns to store: `instrument_token`, `exchange_token`, `tradingsymbol`, `name`,
-     `expiry`, `strike`, `tick_size`, `lot_size`, `instrument_type`, `segment`, `exchange`.
+---
 
-2. **`resolve_underlying(tv_ticker) -> Underlying`** (v2 addition)
-   - Returns a structured object: `{name, segment, is_natural_gas, spot_source}`.
-   - Used by the signal router to decide whether to trade an option or a future.
-   - NATURALGAS detection: match `name` in `settings.NATURAL_GAS_NAMES` — never a
-     string-match on the raw TV ticker.
+### P0-d Working Spec (from v1 §6 + v3 §3)
 
-3. **`resolve(tv_ticker, tv_exchange, hint=None) -> KiteInstrument`** (v1 core)
-   Covers these cases:
+#### orders.py responsibilities
 
-   | TradingView input | Kite result | Notes |
-   |---|---|---|
-   | `NSE:RELIANCE` | `RELIANCE` on NSE | strip prefix |
-   | `NSE:NIFTY` (index) | not orderable — resolve via hint | needs `hint.instrument: FUT or OPT` |
-   | `NSE:BANKNIFTY` | same | |
-   | FUT monthly | `NIFTY26JANFUT` on NFO | format: SYMBOL+YY+MMM+FUT |
-   | OPT weekly | `NIFTY2611323500CE` on NFO | format: SYMBOL+YY+M+DD+STRIKE+CE/PE |
-   | OPT monthly | `NIFTY26JAN23500CE` on NFO | format: SYMBOL+YY+MMM+STRIKE+CE/PE |
-   | `MCX:CRUDEOIL1!` | `CRUDEOIL<YY><MON>FUT` on MCX | resolve continuous → near-month |
-   | NATURALGAS | near-month FUT on MCX | routes to future, not option |
+1. **`place_entry(kite, instrument, alert, session) -> str | None`**
+   - Builds and places the entry order via `kite.place_order()`.
+   - `variety="regular"` always (no bracket orders — discontinued by Zerodha).
+   - Order types:
+     - `MARKET` → `order_type="MARKET"`, `market_protection=-1` (mandatory from 1 Apr 2026; reject locally if missing from config).
+     - `LIMIT` → `order_type="LIMIT"`, `price=tick_rounded_limit`.
+     - `SL-M` → `order_type="SL-M"`, `trigger_price=tick_rounded_trigger`, `market_protection=-1`.
+     - `SL` → `order_type="SL"`, both `price` and `trigger_price` tick-rounded.
+   - All prices rounded via `symbol_mapper.round_to_tick()` using `Decimal`; never `float`.
+   - `product=settings.PRODUCT_TYPE` (NRML throughout).
+   - Quantity: `floor(CAPITAL_PER_TRADE / ltp / instrument.lot_size) * instrument.lot_size`; if quantity < lot_size, log to errors table and return `None`.
+   - Writes an `Order` row to the DB (`dry_run=settings.DRY_RUN`).
+   - In `DRY_RUN=True`: skips `kite.place_order()` entirely; `Order.kite_order_id` is `None`.
+   - Returns `kite_order_id` (or `None` in DRY_RUN / failure).
 
-4. **Index aliasing for `kite.ltp()` / `kite.quote()`**
-   Hard-coded dict (these do not appear in instruments master):
-   ```python
-   {"NIFTY": "NSE:NIFTY 50", "BANKNIFTY": "NSE:NIFTY BANK", "FINNIFTY": "NSE:NIFTY FIN SERVICE"}
-   ```
+2. **`place_gtt_oco(kite, instrument, position, fill_price, session) -> int | None`**
+   - Called **only** after entry order status is COMPLETE (from watcher postback).
+   - Recomputes SL and target from **actual fill price** (not the original alert price):
+     - `sl_dist = fill_price * settings.SL_PREMIUM_PCT`
+     - `sl_price = fill_price - sl_dist` (for long/buy options)
+     - `target_price = fill_price + settings.RR_RATIO * sl_dist`
+     - All three prices tick-rounded.
+   - `sl_trigger = sl_price`, `target_trigger = target_price` (triggers == limit prices for options; no slippage buffer needed for now).
+   - `last_price`: fetch via `kite.ltp(f"{exchange}:{tradingsymbol}")` — mandatory field that sets trigger direction.
+   - GTT OCO payload:
+     ```python
+     order_dict = [
+         {"exchange": ex, "tradingsymbol": ts, "transaction_type": "SELL",
+          "quantity": qty, "order_type": "LIMIT",
+          "product": product, "price": sl_price},       # leg 1 = stoploss
+         {"exchange": ex, "tradingsymbol": ts, "transaction_type": "SELL",
+          "quantity": qty, "order_type": "LIMIT",
+          "product": product, "price": target_price},   # leg 2 = target
+     ]
+     kite.place_gtt(
+         trigger_type=kite.GTT_TYPE_OCO,
+         tradingsymbol=ts, exchange=ex,
+         trigger_values=[sl_trigger, target_trigger],
+         last_price=ltp,
+         orders=order_dict,
+     )
+     ```
+   - Leg ordering matters: SL must be leg 0, target leg 1 (Kite convention).
+   - Writes a `Gtt` row; updates the `Position` row with `gtt_id`.
+   - In `DRY_RUN=True`: skips `kite.place_gtt()`; `Gtt.kite_gtt_id` is `None`.
+   - Returns `kite_gtt_id` (or `None` in DRY_RUN / failure).
 
-5. **Tick-size rounding** — `round_to_tick(price, tick_size) -> Decimal`
-   Use `Decimal`, never `float`. NSE options tick = 0.05; MCX varies.
+3. **`cancel_gtt(kite, gtt_id, session) -> None`**
+   - Calls `kite.delete_gtt(gtt_id)`; updates `Gtt.status = "CANCELLED"` in DB.
+   - In DRY_RUN: skips the API call; still updates DB.
 
-6. **Lot-size enforcement** — quantity must be a multiple of `lot_size`; round down, never up.
+4. **`square_off(kite, instrument, position, session) -> str | None`**
+   - Called on EXIT alert or intraday squareoff job.
+   - Cancels any active GTT for the position, then places a MARKET order (opposite side).
+   - `market_protection=-1` required.
+   - Returns `kite_order_id`.
 
-7. **Expiry selection** (`expiry_resolver.py` is P1, but symbol_mapper needs the table) —
-   Derive distinct expiries per underlying from the instruments table; the resolver will
-   consume them.
+5. **Exponential backoff wrapper**
+   - Retry on: `kiteconnect.exceptions.NetworkException`, HTTP 429 (rate limit).
+   - No retry on: `InputException`, `TokenException` — these are permanent; log to errors table and send Telegram alert (no-op if token missing).
+   - Config: `BACKOFF_MAX_TRIES=5`, `BACKOFF_INITIAL_WAIT_SECS=1.0` (already in config.py), exponential with jitter.
 
-8. **Fallback** — if resolution fails: log to `errors` table, send Telegram alert (no-op if
-   token missing), return `None` (caller maps to HTTP 422).
+#### watcher.py responsibilities
 
-#### Test requirements for P0-c
+1. **`OrderWatcher`** class wrapping `KiteTicker`.
+   - `start(kite, session_manager)` — initialises KiteTicker with `api_key`, connects, registers callbacks.
+   - `subscribe(instrument_tokens)` / `unsubscribe(instrument_tokens)` — manage the live subscription list.
 
-- All offline; instruments table populated from a fixture CSV (no live network).
-- 20+ symbol-resolution cases: equity, FUT monthly, OPT weekly, OPT monthly, MCX, indices.
-- Tick-size rounding: verify `Decimal` arithmetic, not float.
-- Lot-size enforcement: quantity rounding down.
-- `resolve_underlying` correctly flags NATURALGAS variants as `is_natural_gas=True`.
-- Resolution failure returns `None` (no exception propagation to caller).
-- Index alias dict covers all four index names.
+2. **`on_order_update(ws, data)` callback**
+   - Fired by KiteTicker on every order status change (postback via websocket).
+   - Key transitions to handle:
+     - `status == "COMPLETE"` and order is an **entry order** →
+       1. Record `fill_price = data["average_price"]`, `fill_qty = data["filled_quantity"]`.
+       2. Update `Order` row in DB.
+       3. Call `place_gtt_oco(...)`.
+     - `status == "REJECTED"` or `"CANCELLED"` for an entry order →
+       1. Update `Order.status` in DB.
+       2. Write `AppError` row.
+       3. Send Telegram alert.
+     - `status == "COMPLETE"` and order is a **GTT leg** (SL or target) →
+       1. Write `ClosedTrade` row (fill_price = exit premium, compute PnL).
+       2. Update `Position` and `Gtt` rows.
+       3. Send Telegram fill notification.
 
-#### Rules (same as P0-a / P0-b)
+3. **`on_ticks(ws, ticks)` callback** (mark-to-market — stub only for P0-d)
+   - Stub that logs received ticks; full MTM logic is P1.
+   - Must subscribe to `instrument_token` values for all open positions (query DB on connect).
+
+4. **`on_connect` / `on_reconnect` / `on_close` / `on_error` callbacks**
+   - `on_connect`: subscribe to open-position tokens.
+   - `on_reconnect`: log reconnect attempt + count.
+   - `on_close`: log gracefully; do not raise.
+   - `on_error`: log; KiteTicker auto-reconnects.
+
+#### Test requirements for P0-d
+
+- All offline; KiteConnect + KiteTicker fully mocked.
+- **orders.py tests (~12):**
+  - `place_entry` MARKET: verify `market_protection=-1` present in call kwargs.
+  - `place_entry` LIMIT: verify `market_protection` is absent.
+  - `place_entry` SL-M: verify `market_protection=-1` present.
+  - Price tick-rounding: price passed to `place_order` is exact multiple of tick_size.
+  - DRY_RUN: `place_order` not called; `Order` row written with `dry_run=True`, `kite_order_id=None`.
+  - Sub-lot quantity → returns None, writes AppError row.
+  - GTT OCO payload: SL is leg 0, target is leg 1; `trigger_type == GTT_TYPE_OCO`; both prices tick-rounded; `last_price` fetched via `kite.ltp()`.
+  - GTT DRY_RUN: `place_gtt` not called; `Gtt` row written.
+  - `cancel_gtt`: `delete_gtt` called with correct id; DB row updated.
+  - Backoff on NetworkException: retried up to MAX_TRIES.
+  - No retry on InputException: single attempt, error logged.
+- **watcher.py tests (~5):**
+  - `on_order_update` COMPLETE entry → `place_gtt_oco` called once.
+  - `on_order_update` REJECTED entry → AppError written, GTT not placed.
+  - `on_order_update` COMPLETE GTT leg → ClosedTrade written.
+  - `on_connect` → `subscribe()` called with open-position tokens from DB.
+  - `on_ticks` stub → does not raise.
+
+#### Rules (same as P0-a / P0-b / P0-c)
 - `_env_file=None` in test settings
 - Type hints everywhere
-- IST timezone awareness for any expiry date logic
+- IST timezone awareness for any time-of-day logic
 - No live network in any test
 - Stop after pytest is green
 - Show test output and any decisions beyond spec
-- Do NOT start P0-d until user approves P0-c
+- Do NOT start P0-e until user approves P0-d
 
 ---
 
@@ -170,26 +220,27 @@ The known requirements from v1/v2/v3 specs are captured below as the working spe
 1. Open PowerShell, `cd C:\Users\srias\tv-zerodha-bot`
 2. Confirm Python: `py -3.11 --version`
 3. Activate venv: `.\.venv\Scripts\Activate.ps1`
-4. Confirm tests still pass: `.\.venv\Scripts\pytest -v`
+4. Confirm tests still pass: `.\.venv\Scripts\pytest -q`
 5. Start Claude Code: `claude`
-6. Open this file and the v1/v2/v3 specs if Claude doesn't have context.
-7. Tell Claude: **"Resume from SESSION_HANDOFF.md. Apply PBKDF2=600000 if approved,
-   then proceed with P0-c."** (or skip the PBKDF2 change and go straight to P0-c).
+6. Tell Claude: **"Resume from SESSION_HANDOFF.md. Proceed with P0-d."**
+   (Apply PBKDF2=600,000 first if you want — it's still queued.)
 
 ---
 
-## Proposed Full File Tree (reference — unchanged from P0-a handoff)
+## Proposed Full File Tree (reference — unchanged)
 
 ```
 tv-zerodha-bot/
 ├── app/
 │   ├── main.py, auth.py, config.py, kite_session.py   ← P0-a/b done
-│   ├── symbol_mapper.py                                ← P0-c
+│   ├── symbol_mapper.py                                ← P0-c done
+│   ├── orders.py, watcher.py                           ← P0-d next
 │   ├── expiry_resolver.py, greeks.py, strike_selector.py  ← P1
-│   ├── risk.py, orders.py, watcher.py                 ← P0 (remaining)
-│   ├── storage.py, notifier.py, scheduler.py          ← P0-a done / P2
+│   ├── risk.py                                         ← P0 (remaining)
+│   ├── storage.py, notifier.py, scheduler.py           ← P0-a done / P2
 │   └── templates/  (dashboard.html, positions.html, history.html)
 ├── tests/
+│   └── fixtures/instruments_sample.csv
 ├── infra/  (Terraform)
 ├── pinescript/
 ├── simulation_mode.py
