@@ -124,8 +124,14 @@ class Settings(BaseSettings):
     NIFTY_FREEZE_QTY: int = 1800         # exchange single-order limit; slice via iceberg above this
     BANKNIFTY_FREEZE_QTY: int = 900
 
+    # ── Encryption (token-at-rest) ────────────────────────────────────────────
+    # Random 32+ char string; used to derive Fernet key via PBKDF2 for access_token encryption.
+    SECRET_KEY: str = ""
+    PBKDF2_ITERATIONS: int = 100_000   # increase for slower hardware; never go below 100k in prod
+
     # ── Rate limiting & retry ─────────────────────────────────────────────────
     MAX_OPS: int = 10                    # Kite API cap; above requires SEBI algo registration
+    WEBHOOK_RATE_LIMIT_PER_MINUTE: int = 60  # per-IP token bucket capacity for inbound webhooks
     BACKOFF_MAX_TRIES: int = 5
     BACKOFF_INITIAL_WAIT_SECS: float = 1.0
 
