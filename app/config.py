@@ -88,8 +88,13 @@ class Settings(BaseSettings):
     OPTION_EXPIRY_RULE: ExpiryRule = ExpiryRule.NEAREST_WEEKLY
     MIN_DAYS_TO_EXPIRY_INDEX: int = 1
     MIN_DAYS_TO_EXPIRY_STOCK: int = 3
-    SKIP_EXPIRY_DAY_CUTOFF_HOUR: int = 14    # IST; roll expiry if on expiry day past this time
+    WEEKLY_INDICES: list[str] = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"]
+    SKIP_EXPIRY_DAY_CUTOFF_HOUR: int = 14    # legacy; superseded by SKIP_EXPIRY_CUTOFF_NSE
     SKIP_EXPIRY_DAY_CUTOFF_MINUTE: int = 30
+    SKIP_EXPIRY_CUTOFF_NSE: str = "14:30"    # HH:MM IST; roll NSE expiry after this time
+    SKIP_EXPIRY_CUTOFF_MCX: str = "22:00"    # HH:MM IST; roll MCX expiry after this time
+    SESSION_CLOSE_NSE: str = "15:30"         # HH:MM IST; used for time_to_expiry in greeks
+    SESSION_CLOSE_MCX: str = "23:30"
     SL_PREMIUM_PCT: float = 0.30             # Option A: SL if premium drops 30%
     USE_DELTA_TRANSLATED_SL: bool = False    # Option B: translate underlying SL via delta
     MIN_OPTION_PREMIUM_INDEX: float = 5.0    # ₹; sub-₹5 index options are illiquid

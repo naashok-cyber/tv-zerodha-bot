@@ -201,7 +201,7 @@ class StrikeDecision(Base):
     __tablename__ = "strike_decisions"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    alert_id: Mapped[int] = mapped_column(ForeignKey("alerts.id"), nullable=False, index=True)
+    alert_id: Mapped[int | None] = mapped_column(ForeignKey("alerts.id"), nullable=True, index=True)
     underlying: Mapped[str] = mapped_column(String(32), nullable=False)
     expiry: Mapped[str] = mapped_column(String(16), nullable=False)   # ISO date, e.g. "2026-05-01"
     flag: Mapped[str] = mapped_column(String(1), nullable=False)      # "c" or "p"
