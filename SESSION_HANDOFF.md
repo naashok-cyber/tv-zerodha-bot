@@ -1,10 +1,28 @@
 # Session Handoff — 2026-04-26
 
-## State: P0-d complete. P0-e not started.
+## State: P0-e complete. P0 is done (pending risk.py decision). P1 not started.
 
 ---
 
-## Last Completed Phase: P0-d
+## Last Completed Phase: P0-e
+
+**Files added in P0-e (committed as `f0564bc`):**
+
+| File | Status |
+|---|---|
+| `app/webhook_models.py` | new — TradingViewAlert, Action enum, OrderType enum; strict extra="forbid"; "time" alias for tv_time; idempotency_key() method |
+| `app/main.py` | new — FastAPI app with lifespan, 7 endpoints, background task, idempotency TTLCache |
+| `tests/test_main.py` | new — 11 tests: auth, persistence, idempotency, NG routing, DRY_RUN log, callback, healthz, dashboard |
+| `requirements.txt` | updated — added fastapi, starlette, uvicorn, httpx, cachetools and transitive deps |
+
+**Test result:** 160 passed, 0 failed
+
+**Key design decisions made in P0-e:**
+- `_SessionFactory` is a module-level global set in lifespan; tests inject via monkeypatch BEFORE entering TestClient context so lifespan skips DB init — allows background tasks to share the same in-memory DB as route handlers (requires `StaticPool`)
+- HTTPBasic `auto_error=False` on dashboard: no auth prompt when `DASHBOARD_PASSWORD=""` (dev mode); enforces credentials otherwise
+- `_idempotency_cache` is module-level TTLCache; tests replace it with a fresh instance via monkeypatch to prevent cross-test state
+- Lifespan creates `OrderWatcher()` but does NOT start it (no Kite token available at cold boot); watcher start is deferred to P1 when the first entry fires
+- Background task stages (P0-e): NG → "stub/P1", EXIT/TRAIL → "stub/P1", DRY_RUN → log, non-NG entry → "stub/P1"
 
 **Pre-flight commit (`65ae639`):** PBKDF2 iterations bumped 100k → 600k in `app/config.py` and `.env.example`.
 
@@ -69,6 +87,7 @@ To apply: change both to `600_000`. Test suite uses `PBKDF2_ITERATIONS=1` — no
 ```
 git log --oneline:
 
+f0564bc  P0-e: FastAPI main module wiring webhook + callback + dashboard
 5f97ea1  P0-d: orders and watcher modules with tests
 65ae639  security: bump PBKDF2 iterations to 600k per OWASP guidance
 c61ced6  Update handoff: pause after P0-c, P0-d next
@@ -87,9 +106,11 @@ c61ced6  Update handoff: pause after P0-c, P0-d next
 
 ---
 
-## Next Phase: P0-e
+## Next Phase: P1
 
-**Scope: `app/main.py` — FastAPI app, webhook handler, GTT wiring, squareoff job**
+**Scope:** Options pipeline wiring (strike selection, entry → GTT lifecycle), `risk.py`, `notifier.py`, scheduled jobs. Discuss with user before starting.
+
+**Open question before P1:** Is `app/risk.py` in scope for P0 (it appears in the proposed file tree)? If yes, it should be built before P1 pipeline wiring since it gates entry decisions.
 
 ---
 
