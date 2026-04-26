@@ -1,8 +1,8 @@
-# Session Handoff — 2026-04-26 (weekend pause)
+# Session Handoff — 2026-04-28 (pause after P1-b)
 
-## State: P0 complete. P1-a pre-flight done. Pine Script shipped. Resume Apr 28.
+## State: P0 + P1-a + P1-b complete. 199 tests passing. Resume P1-c after weekly reset.
 
-**Resume rule: do NOT start P1-a coding until the weekly budget resets on 2026-04-28 morning.**
+**Resume rule: do NOT start P1-c until weekly budget resets. Next window: 2026-04-28 02:30 IST.**
 
 ---
 
@@ -12,14 +12,12 @@
 |---|---|---|
 | P1-a pre-flight | `e30e4b7` | scipy, py_vollib, py_lets_be_rational installed & sanity-tested |
 | Pine Script library | `744b4d8` | `pinescript/alert_emitter.pine`, `example_strategy.pine`, `README.md` |
-
-**P1-a pre-flight result:** `delta('c', 100, 100, 0.1, 0.05, 0.2)` → `0.5441` (correct BSM value; user's "~0.53" was approximate). All three libs resolved from existing venv wheels — no build from source needed.
-
-**Pine Script:** `AlertEmitter` library + 9/21 EMA crossover strategy. JSON schema in `alert_emitter.pine` matches `app/webhook_models.py` exactly (`tv_ticker`, `tv_exchange`, `action`, `order_type`, `entry_price`, `stop_loss`, `sl_percent`, `atr`, `quantity_hint`, `product`, `"time"` alias → `{{timenow}}`, `bar_time`, `interval`). Nullable fields serialize to JSON `null`.
+| P1-a: greeks.py | `9d6af16` | BSM + Black-76 dispatchers; 17 tests |
+| P1-b: expiry_resolver + strike_selector | `6f60fa9` | Audit log, guardrails, tie-breaker; 22 tests |
 
 ---
 
-## P0 Build Summary
+## Full Build Summary
 
 | Phase | Commit | Key files | Cumulative tests |
 |---|---|---|---|
@@ -29,14 +27,21 @@
 | PBKDF2 600k | `65ae639` | config.py, .env.example | 128 |
 | P0-d | `5f97ea1` | orders.py, watcher.py | 149 |
 | P0-e | `f0564bc` | main.py, webhook_models.py | 160 |
+| P1-a pre-flight | `e30e4b7` | requirements.txt | 160 |
+| Pine Script | `744b4d8` | pinescript/ | 160 |
+| P1-a | `9d6af16` | greeks.py | 177 |
+| P1-b | `6f60fa9` | expiry_resolver.py, strike_selector.py | 199 |
 
-**160 tests passing. P0 is complete.**
+**199 tests passing. 18 commits on master.**
 
 ---
 
-## Current Commit State (15 commits on master)
+## Current Commit State
 
 ```
+6f60fa9 P1-b: expiry resolver and strike selector with audit log
+9d6af16 P1-a: greeks module with BSM and Black-76 dispatchers
+c8a039c Weekend pause: P0 + P1 pre-flight + Pine Script done
 744b4d8 Pine Script alert emitter library and example strategy
 e30e4b7 P1-a pre-flight: install Greeks libraries
 55051f4 P0 milestone: handoff updated, P1 deferred to fresh week
@@ -87,69 +92,78 @@ d5497e6 Initial: spec files and prototype
 | GTT leg order | SL = leg 0, target = leg 1 (Kite convention) | P0-d |
 | risk.py | Absorbed into P1-d (after strike_selector) | P0-e |
 | Greeks libs | py_vollib 1.0.1 + py_lets_be_rational 1.0.1 + scipy 1.17.1 | P1-a pre-flight |
+| BSM for NSE | `py_vollib.black_scholes_merton`; q comes LAST in delta signature | P1-a |
+| Black-76 for MCX | `py_vollib.black`; IV has r-before-t; delta has t-before-r | P1-a |
+| B76 IV naming | py_vollib calls it "discounted_option_price" but accepts raw price | P1-a |
+| StrikeDecision.alert_id | Nullable — select_strike usable without a live Alert row | P1-b |
+| Session close times | NSE 15:30 IST, MCX 23:30 IST (for time_to_expiry calc) | P1-b |
+| Expiry cutoffs | NSE 14:30 IST, MCX 22:00 IST (skip-expiry-day roll) | P1-b |
+| Missing depth | Skip spread check with warning; do NOT reject the strike | P1-b |
+| Chunking | kite.quote() calls chunked at 500 instruments; path untested >500 | P1-b |
 
 ---
 
-## Open Items Carrying Into P1
+## Open Items Carrying Into P1-c
 
 1. **Watcher startup (deferred from P0-e):** `OrderWatcher` is created in lifespan but NOT
-   started (no Kite token at cold boot). Wire `watcher.start()` inside `handle_callback()` in
-   `kite_session.py` — the moment the daily token lands is the natural hook. Do this in P1-a
-   or wherever it fits first.
+   started. Wire `watcher.start()` inside `handle_callback()` the moment the daily token lands.
+   **Do this first in P1-c before any pipeline wiring.**
 
-2. **Background task stubs (main.py `_process_alert`):** All non-trivial paths currently log
-   "not wired in P0-e, deferred to P1". P1-f replaces these stubs with the real
-   greeks → expiry → strike → risk → entry flow.
+2. **Background task stubs (`_process_alert` in main.py):** All non-trivial paths log
+   "not wired". P1-c replaces these stubs with the real signal-routing flow.
 
-3. **risk.py (P1-d):** Premium-based sizing and daily/consecutive loss caps both depend on the
-   strike selector returning a real option. Do not write risk.py before strike_selector.py.
+3. **risk.py (now part of P1-c scope):** Premium-based sizing and loss-cap guards are needed
+   inline in P1-c pipeline; do NOT write as a separate module first — inline them or co-locate.
+
+See `app/TECH_DEBT.md` for tracked deferred issues.
 
 ---
 
-## Next Phase: P1-a — greeks.py
+## Next Phase: P1-c — Signal routing + risk guards
 
-### What P1-a covers
+### What P1-c covers
 
-- **IV back-solver**: given market premium + strike + expiry → implied volatility (brentq /
-  Newton root-find on BSM/Black-76 price)
-- **Black-Scholes delta** for NSE index & equity options (European; use BSM with continuous
-  dividend yield for index carry)
-- **Black-76 delta** for MCX commodity options (futures-based underlier; Black's 1976 model)
-- Thin wrapper so callers pass an `Instrument` + `ltp` + `spot/futures_price` and get back
-  a `GreeksResult(delta, gamma, theta, iv)`
+**Signal routing in `_process_alert` (main.py):**
+- BUY signal → buy CE option (resolve_expiry → select_strike → place_entry)
+- SELL signal → buy PE option (same flow, flag="PE")
+- NATURALGAS → route to near-month future via `_resolve_continuous()` → `place_entry`
+- Wire `watcher.start()` in `handle_callback()` as first task
 
-### Pre-flight already done
+**Risk guards (inline, not a separate module until later):**
+- PREMIUM_BASED sizing: `quantity = floor(CAPITAL_PER_TRADE / (option_ltp * lot_size))`
+- Daily-loss cap: reject new entries if unrealised + realised loss today ≥ `effective_max_daily_loss`
+- Max trades per day: reject if `Alert` rows today ≥ `MAX_TRADES_PER_DAY`
+- Max open positions: reject if open `Position` count ≥ `MAX_OPEN_POSITIONS`
+- Consecutive-losses circuit breaker: reject if consecutive SL-hits ≥ `CONSECUTIVE_LOSSES_LIMIT`
 
-- scipy 1.17.1, py_vollib 1.0.1, py_lets_be_rational 1.0.1 installed and in requirements.txt.
-- Sanity test confirmed: `delta('c', 100, 100, 0.1, 0.05, 0.2)` → 0.5441 ✓
+**After the trade entry:**
+- Persist `Position` row
+- Place GTT OCO via `place_gtt_oco()`
+- Wire watcher to listen for fills on that order ID
 
-### Reference test values
+### Reference
 
-Delta validation reference values are in **v2 §9** of
-`tradingview_zerodha_bot_prompt_v2_options.md`. Read that section before writing tests — do
-not invent test deltas from scratch.
+Risk sizing spec: v2 §5, v3 §1 of `tradingview_zerodha_bot_prompt_v2_options.md`
+and `tradingview_zerodha_bot_prompt_v3_gap_analysis.md`.
 
-### P1 build order (subject to user approval at each step)
+### P1 remaining build order
 
 | Phase | Module | Key responsibility |
 |---|---|---|
-| P1-a | `greeks.py` | IV back-solver, BS delta (NSE), Black-76 delta (MCX) |
-| P1-b | `expiry_resolver.py` | Nearest weekly/monthly selection, day-cutoff logic |
-| P1-c | `strike_selector.py` | Delta-targeted strike, OI/spread/premium filters |
-| P1-d | `risk.py` | Premium sizing, daily loss cap, consecutive-loss circuit breaker |
-| P1-e | `notifier.py` | Telegram send, no-op fallback |
-| P1-f | Pipeline wiring | Replace `_process_alert` stubs; wire watcher GTT on EntryFilledEvent |
+| P1-c | main.py `_process_alert` + risk guards | Full signal-to-order pipeline |
+| P1-d | notifier.py | Telegram send, no-op fallback |
+| P1-e | Pipeline hardening | Error handling, Telegram alerts on every failure path |
 
 ---
 
-## What To Do When You Resume (Apr 28+)
+## What To Do When You Resume
 
 1. Open PowerShell, `cd C:\Users\srias\tv-zerodha-bot`
 2. Confirm Python: `py -3.11 --version`
 3. Activate venv: `.\.venv\Scripts\Activate.ps1`
-4. Confirm tests still pass: `.\.venv\Scripts\pytest -q` (expect 160 passed)
+4. Confirm tests still pass: `.\.venv\Scripts\pytest -q` (expect 199 passed)
 5. Start Claude Code: `claude`
-6. Tell Claude: **"Resume from SESSION_HANDOFF.md. Weekly budget reset. Proceed with P1-a."**
+6. Tell Claude: **"Resume from SESSION_HANDOFF.md. Weekly budget reset. Proceed with P1-c."**
 
 ---
 
@@ -162,12 +176,11 @@ tv-zerodha-bot/
 │   ├── auth.py, kite_session.py                          ← P0-b done
 │   ├── symbol_mapper.py                                  ← P0-c done
 │   ├── orders.py, watcher.py                             ← P0-d done
-│   ├── main.py, webhook_models.py                        ← P0-e done
-│   ├── greeks.py                                         ← P1-a next
-│   ├── expiry_resolver.py                                ← P1-b
-│   ├── strike_selector.py                                ← P1-c
-│   ├── risk.py                                           ← P1-d
-│   ├── notifier.py                                       ← P1-e
+│   ├── main.py, webhook_models.py                        ← P0-e done (stubs to fill in P1-c)
+│   ├── greeks.py                                         ← P1-a done
+│   ├── expiry_resolver.py, strike_selector.py            ← P1-b done
+│   ├── notifier.py                                       ← P1-d
+│   ├── TECH_DEBT.md                                      ← created this session
 │   └── templates/                                        ← P2
 ├── tests/
 │   └── fixtures/instruments_sample.csv
@@ -176,5 +189,5 @@ tv-zerodha-bot/
 ├── simulation_mode.py                                    ← P2
 ├── Dockerfile, docker-compose.yml, Caddyfile             ← P2
 ├── .env.example, requirements.txt, pyproject.toml
-└── .github/workflows/ci.yml                              ← P2
+└── .github/workflows/ci.yml                             ← P2
 ```
