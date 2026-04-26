@@ -99,6 +99,8 @@ class Settings(BaseSettings):
     MAX_SPREAD_PCT: float = 0.05             # 5% of LTP bid-ask limit
     SIZING_MODE: SizingMode = SizingMode.PREMIUM_BASED
     RISK_FREE_RATE: float = 0.065            # India 10-yr G-sec proxy for Black-Scholes / Black-76
+    DIVIDEND_YIELD_DEFAULT: float = 0.0     # q for all underlyings not in OVERRIDES
+    DIVIDEND_YIELD_OVERRIDES: dict[str, float] = {}  # per-symbol q; e.g. {"INFY": 0.025}
     NATURAL_GAS_NAMES: list[str] = ["NATURALGAS", "NATGASMINI"]  # route to future, not option
 
     # ── Breakeven & Trail (on option premium; future price for NATURALGAS) ────
