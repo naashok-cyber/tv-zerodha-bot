@@ -1,20 +1,22 @@
-# Session Handoff — 2026-04-26 (P0 complete)
+# Session Handoff — 2026-04-26 (P0 milestone)
 
-## State: P0 complete. 160 tests passing. P1 not started.
+## State: P0 fully complete. 160 tests passing. P1 deferred to fresh weekly bucket (Apr 28).
+
+**Resume rule: do NOT start P1-a until the weekly budget resets on 2026-04-28.**
 
 ---
 
 ## P0 Build Summary
 
-| Phase | Commit | Files | Tests |
+| Phase | Commit | Key files | Cumulative tests |
 |---|---|---|---|
-| P0-a | `4946265` | config.py, storage.py | 128 → 128 |
+| P0-a | `4946265` | config.py, storage.py | 128 |
 | P0-b | `8cda702` | auth.py, kite_session.py | 128 |
 | P0-c | `40fc24b` | symbol_mapper.py, Instrument model | 128 |
-| PBKDF2 bump | `65ae639` | config.py, .env.example (100k→600k) | 128 |
+| PBKDF2 600k | `65ae639` | config.py, .env.example | 128 |
 | P0-d | `5f97ea1` | orders.py, watcher.py | 149 |
 | P0-e | `f0564bc` | main.py, webhook_models.py | 160 |
-| Handoff | `e8a7e40` | SESSION_HANDOFF.md | — |
+| Handoff | `c0aceca` | SESSION_HANDOFF.md | — |
 
 ---
 
@@ -23,16 +25,18 @@
 ```
 git log --oneline:
 
-e8a7e40  Update handoff: P0-e complete, P0 done, P1 next
-f0564bc  P0-e: FastAPI main module wiring webhook + callback + dashboard
-5f97ea1  P0-d: orders and watcher modules with tests
-65ae639  security: bump PBKDF2 iterations to 600k per OWASP guidance
-c61ced6  Update handoff: pause after P0-c, P0-d next
-40fc24b  P0-c: symbol_mapper module with Instrument model and tests
-8cda702  P0-b: auth and kite_session modules with tests
-4946265  P0-a: config and storage modules with tests
-724ea14  Pause point: handoff and resume notes
-d5497e6  Initial: spec files and prototype
+c0aceca P0 complete: handoff updated for P1 entry
+e8a7e40 Update handoff: P0-e complete, P0 done, P1 next
+f0564bc P0-e: FastAPI main module wiring webhook + callback + dashboard
+0a84dec Update handoff: P0-d complete, P0-e next
+5f97ea1 P0-d: orders and watcher modules with tests
+65ae639 security: bump PBKDF2 iterations to 600k per OWASP guidance
+c61ced6 Update handoff: pause after P0-c, P0-d next
+40fc24b P0-c: symbol_mapper module with Instrument model and tests
+8cda702 P0-b: auth and kite_session modules with tests
+4946265 P0-a: config and storage modules with tests
+724ea14 Pause point: handoff and resume notes
+d5497e6 Initial: spec files and prototype
 ```
 
 ---
@@ -61,57 +65,87 @@ d5497e6  Initial: spec files and prototype
 | HMAC verify | `hmac.compare_digest` on plaintext secret in JSON payload | P0-b |
 | Salt storage | Per-install random 16-byte salt at `data/access_token.salt` | P0-b |
 | Rate limiter | In-process token bucket (not slowapi) | P0-b |
-| PBKDF2 iterations | **600,000** (applied in pre-flight before P0-d) | P0-d |
+| PBKDF2 iterations | **600,000** (applied pre-P0-d) | P0-d |
 | round_to_tick | ROUND_HALF_UP — revisit if NSE rejects half-tick boundaries | P0-c |
 | backoff_call | Max 3 retries, 1s base, 8s cap; retry NetworkException + code==429 | P0-d |
 | place_entry lot rejection | Raises ValueError (not silent None) | P0-d |
 | GTT leg order | SL = leg 0, target = leg 1 (Kite convention) | P0-d |
-| risk.py | Absorbed into P1 (P1-d); premium sizing needs real strike from selector | P0-e |
+| risk.py | Absorbed into P1-d (after strike_selector) | P0-e |
 
 ---
 
-## Open Notes Carrying Into P1
+## Open Items Carrying Into P1
 
-1. **Watcher startup**: `OrderWatcher` is created in lifespan but NOT started (no token at cold boot).
-   Wire `watcher.start()` inside `handle_callback()` in `kite_session.py` — the moment the daily
-   token lands is the right place to bring the websocket live. Do this in P1-a or wherever it fits
-   naturally.
+1. **Watcher startup (deferred from P0-e):** `OrderWatcher` is created in lifespan but NOT
+   started (no Kite token at cold boot). Wire `watcher.start()` inside `handle_callback()` in
+   `kite_session.py` — the moment the daily token lands is the natural hook. Do this in P1-a
+   or wherever it fits first.
 
-2. **risk.py in P1**: Will be P1-d (after greeks.py, expiry_resolver.py, strike_selector.py).
-   Premium-based sizing and daily/consecutive caps both depend on strike selector output and the
-   full order-placement path that P1 wires up.
+2. **Background task stubs (main.py `_process_alert`):** All non-trivial paths currently log
+   "not wired in P0-e, deferred to P1". P1-f replaces these stubs with the real
+   greeks → expiry → strike → risk → entry flow.
 
-3. **Background task stubs**: All non-trivial paths in `_process_alert` (main.py) currently log
-   "not wired in P0-e, deferred to P1". P1 replaces these stubs with real pipeline calls.
+3. **risk.py (P1-d):** Premium-based sizing and daily/consecutive loss caps both depend on the
+   strike selector returning a real option. Do not write risk.py before strike_selector.py.
 
 ---
 
 ## Next Phase: P1-a — greeks.py
 
-P1 build order (subject to approval at each phase):
-- **P1-a**: `app/greeks.py` — Black-Scholes / Black-76 delta, gamma, theta, IV solver
-- **P1-b**: `app/expiry_resolver.py` — nearest weekly/monthly selection with day-cutoff logic
-- **P1-c**: `app/strike_selector.py` — delta-targeted strike selection with OI/spread/premium filters
-- **P1-d**: `app/risk.py` — premium sizing, daily loss cap, consecutive-loss circuit breaker
-- **P1-e**: `app/notifier.py` — Telegram send with no-op fallback
-- **P1-f**: Pipeline wiring in `main.py` — replace stubs with real greeks→expiry→strike→risk→entry flow; wire watcher GTT placement on EntryFilledEvent
+### What P1-a covers
 
-Do NOT start P1-a until user approves.
+- **IV back-solver**: given market premium + strike + expiry → implied volatility (brentq /
+  Newton root-find on BSM/Black-76 price)
+- **Black-Scholes delta** for NSE index & equity options (European; use BSM with continuous
+  dividend yield for index carry)
+- **Black-76 delta** for MCX commodity options (futures-based underlier; Black's 1976 model)
+- Thin wrapper so callers pass an `Instrument` + `ltp` + `spot/futures_price` and get back
+  a `GreeksResult(delta, gamma, theta, iv)`
+
+### Dependencies to install before coding
+
+```
+.venv\Scripts\pip install scipy py_vollib py_lets_be_rational
+```
+
+- `py_vollib` and `py_lets_be_rational` contain C-extension wheels — expect pip to download
+  a pre-built wheel for Python 3.11 / win32 (or build from source if no wheel available).
+- If `py_vollib` wheel is unavailable for Python 3.11 on Windows, fall back to a pure
+  `scipy.optimize.brentq` + hand-rolled BSM implementation (note the decision).
+
+### Reference test values
+
+Delta validation reference values are in **v2 §9** of
+`tradingview_zerodha_bot_prompt_v2_options.md`. Read that section before writing tests — do
+not invent test deltas from scratch.
+
+### P1 build order (subject to user approval at each step)
+
+| Phase | Module | Key responsibility |
+|---|---|---|
+| P1-a | `greeks.py` | IV back-solver, BS delta (NSE), Black-76 delta (MCX) |
+| P1-b | `expiry_resolver.py` | Nearest weekly/monthly selection, day-cutoff logic |
+| P1-c | `strike_selector.py` | Delta-targeted strike, OI/spread/premium filters |
+| P1-d | `risk.py` | Premium sizing, daily loss cap, consecutive-loss circuit breaker |
+| P1-e | `notifier.py` | Telegram send, no-op fallback |
+| P1-f | Pipeline wiring | Replace `_process_alert` stubs; wire watcher GTT on EntryFilledEvent |
 
 ---
 
-## What To Do When You Resume
+## What To Do When You Resume (Apr 28+)
 
 1. Open PowerShell, `cd C:\Users\srias\tv-zerodha-bot`
 2. Confirm Python: `py -3.11 --version`
 3. Activate venv: `.\.venv\Scripts\Activate.ps1`
 4. Confirm tests still pass: `.\.venv\Scripts\pytest -q` (expect 160 passed)
-5. Start Claude Code: `claude`
-6. Tell Claude: **"Resume from SESSION_HANDOFF.md. Proceed with P1-a."**
+5. Install P1-a deps: `.\.venv\Scripts\pip install scipy py_vollib py_lets_be_rational`
+   - Note any wheel/build failures before starting to code
+6. Start Claude Code: `claude`
+7. Tell Claude: **"Resume from SESSION_HANDOFF.md. Weekly budget reset. Proceed with P1-a."**
 
 ---
 
-## Proposed Full File Tree (reference — updated)
+## Proposed Full File Tree (reference)
 
 ```
 tv-zerodha-bot/
@@ -126,7 +160,7 @@ tv-zerodha-bot/
 │   ├── strike_selector.py                                ← P1-c
 │   ├── risk.py                                           ← P1-d
 │   ├── notifier.py                                       ← P1-e
-│   └── templates/  (dashboard.html, positions.html, history.html)  ← P2
+│   └── templates/                                        ← P2
 ├── tests/
 │   └── fixtures/instruments_sample.csv
 ├── infra/  (Terraform)                                   ← P2
@@ -134,5 +168,5 @@ tv-zerodha-bot/
 ├── simulation_mode.py                                    ← P2
 ├── Dockerfile, docker-compose.yml, Caddyfile             ← P2
 ├── .env.example, requirements.txt, pyproject.toml
-└── .github/workflows/ci.yml                             ← P2
+└── .github/workflows/ci.yml                              ← P2
 ```
