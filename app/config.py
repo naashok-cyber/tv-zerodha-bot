@@ -127,7 +127,7 @@ class Settings(BaseSettings):
     # ── Encryption (token-at-rest) ────────────────────────────────────────────
     # Random 32+ char string; used to derive Fernet key via PBKDF2 for access_token encryption.
     SECRET_KEY: str = ""
-    PBKDF2_ITERATIONS: int = 100_000   # increase for slower hardware; never go below 100k in prod
+    PBKDF2_ITERATIONS: int = 600_000   # OWASP 2023 minimum; tune so derivation takes ~100ms on your hardware
 
     # ── Rate limiting & retry ─────────────────────────────────────────────────
     MAX_OPS: int = 10                    # Kite API cap; above requires SEBI algo registration
