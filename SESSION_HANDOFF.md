@@ -1,22 +1,30 @@
-# Session Handoff — 2026-04-25 (night)
+# Session Handoff — 2026-04-26
 
-## State: P0-c complete. P0-d not started.
+## State: P0-d complete. P0-e not started.
 
 ---
 
-## Last Completed Phase: P0-c
+## Last Completed Phase: P0-d
 
-**Files added / modified in P0-c (committed as `40fc24b`):**
+**Pre-flight commit (`65ae639`):** PBKDF2 iterations bumped 100k → 600k in `app/config.py` and `.env.example`.
+
+**Files added in P0-d (committed as `5f97ea1`):**
 
 | File | Status |
 |---|---|
-| `app/symbol_mapper.py` | new — resolve(), resolve_underlying(), round_to_tick(), list_strikes(), list_expiries(), refresh_instruments() |
-| `app/storage.py` | modified — added Instrument SQLAlchemy model (Date expiry, nullable strike) |
-| `tests/test_symbol_mapper.py` | new — 17 tests; all 6 resolution cases, Oct/Nov/Dec encoding, MCX continuous, tick rounding, list helpers |
-| `tests/fixtures/instruments_sample.csv` | new — 20-row fixture (NIFTY weekly/monthly/FUT, BANKNIFTY, RELIANCE, CRUDEOIL, NATURALGAS, GOLDM) |
-| `tests/test_storage.py` | modified — added "instruments" to EXPECTED_TABLES set |
+| `app/orders.py` | new — place_entry, place_gtt_oco, cancel_gtt, square_off, backoff_call |
+| `app/watcher.py` | new — OrderWatcher class, EntryFilledEvent dataclass, ticker_factory injection |
+| `tests/test_orders.py` | new — 15 tests covering market_protection, tick rounding, lot-size, GTT legs, backoff |
+| `tests/test_watcher.py` | new — 6 tests covering order-update callbacks, subscribe/unsubscribe, reconnect, ticks stub |
 
-**Test result:** 128 passed, 0 failed, 2.72s (Python 3.11.9, pytest 8.4.2)
+**Test result:** 149 passed, 0 failed (Python 3.11, pytest 8.4.2)
+
+**Key design decisions made in P0-d:**
+- `backoff_call` retries on `NetworkException` + any `KiteException` with `.code == 429`; raises immediately on `InputException` / `TokenException`; max 3 retries, base 1s, cap 8s
+- `place_entry` raises `ValueError` (not silent None) when qty is not a multiple of lot_size — caller responsible for error handling
+- `place_gtt_oco` takes `entry_side` param; exit legs always opposite; SL = leg 0, target = leg 1
+- `OrderWatcher` uses `watch_order(id)` / `unwatch_order(id)` to track pending entries; fires `EntryFilledEvent` via injected callback (actual GTT wiring deferred to P0-e)
+- No DB writes in orders.py / watcher.py — that coupling happens in P0-e (main.py / route handlers)
 
 ---
 
@@ -61,11 +69,12 @@ To apply: change both to `600_000`. Test suite uses `PBKDF2_ITERATIONS=1` — no
 ```
 git log --oneline:
 
+5f97ea1  P0-d: orders and watcher modules with tests
+65ae639  security: bump PBKDF2 iterations to 600k per OWASP guidance
+c61ced6  Update handoff: pause after P0-c, P0-d next
 40fc24b  P0-c: symbol_mapper module with Instrument model and tests
 8cda702  P0-b: auth and kite_session modules with tests
 4946265  P0-a: config and storage modules with tests
-724ea14  Pause point: handoff and resume notes
-d5497e6  Initial: spec files and prototype
 ```
 
 ---
@@ -78,9 +87,9 @@ d5497e6  Initial: spec files and prototype
 
 ---
 
-## Next Phase: P0-d
+## Next Phase: P0-e
 
-**Scope: `app/orders.py` + `app/watcher.py`**
+**Scope: `app/main.py` — FastAPI app, webhook handler, GTT wiring, squareoff job**
 
 ---
 
