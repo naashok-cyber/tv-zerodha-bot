@@ -1,8 +1,21 @@
-# Session Handoff — 2026-04-26 (P0 milestone)
+# Session Handoff — 2026-04-26 (weekend pause)
 
-## State: P0 fully complete. 160 tests passing. P1 deferred to fresh weekly bucket (Apr 28).
+## State: P0 complete. P1-a pre-flight done. Pine Script shipped. Resume Apr 28.
 
-**Resume rule: do NOT start P1-a until the weekly budget resets on 2026-04-28.**
+**Resume rule: do NOT start P1-a coding until the weekly budget resets on 2026-04-28 morning.**
+
+---
+
+## What Was Done This Session
+
+| Item | Commit | Notes |
+|---|---|---|
+| P1-a pre-flight | `e30e4b7` | scipy, py_vollib, py_lets_be_rational installed & sanity-tested |
+| Pine Script library | `744b4d8` | `pinescript/alert_emitter.pine`, `example_strategy.pine`, `README.md` |
+
+**P1-a pre-flight result:** `delta('c', 100, 100, 0.1, 0.05, 0.2)` → `0.5441` (correct BSM value; user's "~0.53" was approximate). All three libs resolved from existing venv wheels — no build from source needed.
+
+**Pine Script:** `AlertEmitter` library + 9/21 EMA crossover strategy. JSON schema in `alert_emitter.pine` matches `app/webhook_models.py` exactly (`tv_ticker`, `tv_exchange`, `action`, `order_type`, `entry_price`, `stop_loss`, `sl_percent`, `atr`, `quantity_hint`, `product`, `"time"` alias → `{{timenow}}`, `bar_time`, `interval`). Nullable fields serialize to JSON `null`.
 
 ---
 
@@ -16,15 +29,17 @@
 | PBKDF2 600k | `65ae639` | config.py, .env.example | 128 |
 | P0-d | `5f97ea1` | orders.py, watcher.py | 149 |
 | P0-e | `f0564bc` | main.py, webhook_models.py | 160 |
-| Handoff | `c0aceca` | SESSION_HANDOFF.md | — |
+
+**160 tests passing. P0 is complete.**
 
 ---
 
-## Current Commit State
+## Current Commit State (15 commits on master)
 
 ```
-git log --oneline:
-
+744b4d8 Pine Script alert emitter library and example strategy
+e30e4b7 P1-a pre-flight: install Greeks libraries
+55051f4 P0 milestone: handoff updated, P1 deferred to fresh week
 c0aceca P0 complete: handoff updated for P1 entry
 e8a7e40 Update handoff: P0-e complete, P0 done, P1 next
 f0564bc P0-e: FastAPI main module wiring webhook + callback + dashboard
@@ -71,6 +86,7 @@ d5497e6 Initial: spec files and prototype
 | place_entry lot rejection | Raises ValueError (not silent None) | P0-d |
 | GTT leg order | SL = leg 0, target = leg 1 (Kite convention) | P0-d |
 | risk.py | Absorbed into P1-d (after strike_selector) | P0-e |
+| Greeks libs | py_vollib 1.0.1 + py_lets_be_rational 1.0.1 + scipy 1.17.1 | P1-a pre-flight |
 
 ---
 
@@ -102,16 +118,10 @@ d5497e6 Initial: spec files and prototype
 - Thin wrapper so callers pass an `Instrument` + `ltp` + `spot/futures_price` and get back
   a `GreeksResult(delta, gamma, theta, iv)`
 
-### Dependencies to install before coding
+### Pre-flight already done
 
-```
-.venv\Scripts\pip install scipy py_vollib py_lets_be_rational
-```
-
-- `py_vollib` and `py_lets_be_rational` contain C-extension wheels — expect pip to download
-  a pre-built wheel for Python 3.11 / win32 (or build from source if no wheel available).
-- If `py_vollib` wheel is unavailable for Python 3.11 on Windows, fall back to a pure
-  `scipy.optimize.brentq` + hand-rolled BSM implementation (note the decision).
+- scipy 1.17.1, py_vollib 1.0.1, py_lets_be_rational 1.0.1 installed and in requirements.txt.
+- Sanity test confirmed: `delta('c', 100, 100, 0.1, 0.05, 0.2)` → 0.5441 ✓
 
 ### Reference test values
 
@@ -138,10 +148,8 @@ not invent test deltas from scratch.
 2. Confirm Python: `py -3.11 --version`
 3. Activate venv: `.\.venv\Scripts\Activate.ps1`
 4. Confirm tests still pass: `.\.venv\Scripts\pytest -q` (expect 160 passed)
-5. Install P1-a deps: `.\.venv\Scripts\pip install scipy py_vollib py_lets_be_rational`
-   - Note any wheel/build failures before starting to code
-6. Start Claude Code: `claude`
-7. Tell Claude: **"Resume from SESSION_HANDOFF.md. Weekly budget reset. Proceed with P1-a."**
+5. Start Claude Code: `claude`
+6. Tell Claude: **"Resume from SESSION_HANDOFF.md. Weekly budget reset. Proceed with P1-a."**
 
 ---
 
@@ -164,7 +172,7 @@ tv-zerodha-bot/
 ├── tests/
 │   └── fixtures/instruments_sample.csv
 ├── infra/  (Terraform)                                   ← P2
-├── pinescript/                                           ← P2
+├── pinescript/                                           ← done (alert emitter + EMA strategy)
 ├── simulation_mode.py                                    ← P2
 ├── Dockerfile, docker-compose.yml, Caddyfile             ← P2
 ├── .env.example, requirements.txt, pyproject.toml
