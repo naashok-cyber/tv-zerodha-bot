@@ -1,48 +1,39 @@
-# Session Handoff — 2026-04-26
+# Session Handoff — 2026-04-26 (P0 complete)
 
-## State: P0-e complete. P0 is done (pending risk.py decision). P1 not started.
+## State: P0 complete. 160 tests passing. P1 not started.
 
 ---
 
-## Last Completed Phase: P0-e
+## P0 Build Summary
 
-**Files added in P0-e (committed as `f0564bc`):**
+| Phase | Commit | Files | Tests |
+|---|---|---|---|
+| P0-a | `4946265` | config.py, storage.py | 128 → 128 |
+| P0-b | `8cda702` | auth.py, kite_session.py | 128 |
+| P0-c | `40fc24b` | symbol_mapper.py, Instrument model | 128 |
+| PBKDF2 bump | `65ae639` | config.py, .env.example (100k→600k) | 128 |
+| P0-d | `5f97ea1` | orders.py, watcher.py | 149 |
+| P0-e | `f0564bc` | main.py, webhook_models.py | 160 |
+| Handoff | `e8a7e40` | SESSION_HANDOFF.md | — |
 
-| File | Status |
-|---|---|
-| `app/webhook_models.py` | new — TradingViewAlert, Action enum, OrderType enum; strict extra="forbid"; "time" alias for tv_time; idempotency_key() method |
-| `app/main.py` | new — FastAPI app with lifespan, 7 endpoints, background task, idempotency TTLCache |
-| `tests/test_main.py` | new — 11 tests: auth, persistence, idempotency, NG routing, DRY_RUN log, callback, healthz, dashboard |
-| `requirements.txt` | updated — added fastapi, starlette, uvicorn, httpx, cachetools and transitive deps |
+---
 
-**Test result:** 160 passed, 0 failed
+## Current Commit State
 
-**Key design decisions made in P0-e:**
-- `_SessionFactory` is a module-level global set in lifespan; tests inject via monkeypatch BEFORE entering TestClient context so lifespan skips DB init — allows background tasks to share the same in-memory DB as route handlers (requires `StaticPool`)
-- HTTPBasic `auto_error=False` on dashboard: no auth prompt when `DASHBOARD_PASSWORD=""` (dev mode); enforces credentials otherwise
-- `_idempotency_cache` is module-level TTLCache; tests replace it with a fresh instance via monkeypatch to prevent cross-test state
-- Lifespan creates `OrderWatcher()` but does NOT start it (no Kite token available at cold boot); watcher start is deferred to P1 when the first entry fires
-- Background task stages (P0-e): NG → "stub/P1", EXIT/TRAIL → "stub/P1", DRY_RUN → log, non-NG entry → "stub/P1"
+```
+git log --oneline:
 
-**Pre-flight commit (`65ae639`):** PBKDF2 iterations bumped 100k → 600k in `app/config.py` and `.env.example`.
-
-**Files added in P0-d (committed as `5f97ea1`):**
-
-| File | Status |
-|---|---|
-| `app/orders.py` | new — place_entry, place_gtt_oco, cancel_gtt, square_off, backoff_call |
-| `app/watcher.py` | new — OrderWatcher class, EntryFilledEvent dataclass, ticker_factory injection |
-| `tests/test_orders.py` | new — 15 tests covering market_protection, tick rounding, lot-size, GTT legs, backoff |
-| `tests/test_watcher.py` | new — 6 tests covering order-update callbacks, subscribe/unsubscribe, reconnect, ticks stub |
-
-**Test result:** 149 passed, 0 failed (Python 3.11, pytest 8.4.2)
-
-**Key design decisions made in P0-d:**
-- `backoff_call` retries on `NetworkException` + any `KiteException` with `.code == 429`; raises immediately on `InputException` / `TokenException`; max 3 retries, base 1s, cap 8s
-- `place_entry` raises `ValueError` (not silent None) when qty is not a multiple of lot_size — caller responsible for error handling
-- `place_gtt_oco` takes `entry_side` param; exit legs always opposite; SL = leg 0, target = leg 1
-- `OrderWatcher` uses `watch_order(id)` / `unwatch_order(id)` to track pending entries; fires `EntryFilledEvent` via injected callback (actual GTT wiring deferred to P0-e)
-- No DB writes in orders.py / watcher.py — that coupling happens in P0-e (main.py / route handlers)
+e8a7e40  Update handoff: P0-e complete, P0 done, P1 next
+f0564bc  P0-e: FastAPI main module wiring webhook + callback + dashboard
+5f97ea1  P0-d: orders and watcher modules with tests
+65ae639  security: bump PBKDF2 iterations to 600k per OWASP guidance
+c61ced6  Update handoff: pause after P0-c, P0-d next
+40fc24b  P0-c: symbol_mapper module with Instrument model and tests
+8cda702  P0-b: auth and kite_session modules with tests
+4946265  P0-a: config and storage modules with tests
+724ea14  Pause point: handoff and resume notes
+d5497e6  Initial: spec files and prototype
+```
 
 ---
 
@@ -69,179 +60,43 @@
 | Telegram bot | Not yet created; stub in .env.example | session |
 | HMAC verify | `hmac.compare_digest` on plaintext secret in JSON payload | P0-b |
 | Salt storage | Per-install random 16-byte salt at `data/access_token.salt` | P0-b |
-| Rate limiter | In-process token bucket (not slowapi; no ASGI dep yet) | P0-b |
-| PBKDF2 iterations | **100,000** (current) — bump to 600,000 queued, not yet applied | P0-b |
+| Rate limiter | In-process token bucket (not slowapi) | P0-b |
+| PBKDF2 iterations | **600,000** (applied in pre-flight before P0-d) | P0-d |
 | round_to_tick | ROUND_HALF_UP — revisit if NSE rejects half-tick boundaries | P0-c |
+| backoff_call | Max 3 retries, 1s base, 8s cap; retry NetworkException + code==429 | P0-d |
+| place_entry lot rejection | Raises ValueError (not silent None) | P0-d |
+| GTT leg order | SL = leg 0, target = leg 1 (Kite convention) | P0-d |
+| risk.py | Absorbed into P1 (P1-d); premium sizing needs real strike from selector | P0-e |
 
 ---
 
-## PBKDF2 Iterations — Still Queued
+## Open Notes Carrying Into P1
 
-Value in `app/config.py` and `.env.example` is still `100_000`.
-To apply: change both to `600_000`. Test suite uses `PBKDF2_ITERATIONS=1` — no test changes needed.
+1. **Watcher startup**: `OrderWatcher` is created in lifespan but NOT started (no token at cold boot).
+   Wire `watcher.start()` inside `handle_callback()` in `kite_session.py` — the moment the daily
+   token lands is the right place to bring the websocket live. Do this in P1-a or wherever it fits
+   naturally.
 
----
+2. **risk.py in P1**: Will be P1-d (after greeks.py, expiry_resolver.py, strike_selector.py).
+   Premium-based sizing and daily/consecutive caps both depend on strike selector output and the
+   full order-placement path that P1 wires up.
 
-## Current Commit State
-
-```
-git log --oneline:
-
-f0564bc  P0-e: FastAPI main module wiring webhook + callback + dashboard
-5f97ea1  P0-d: orders and watcher modules with tests
-65ae639  security: bump PBKDF2 iterations to 600k per OWASP guidance
-c61ced6  Update handoff: pause after P0-c, P0-d next
-40fc24b  P0-c: symbol_mapper module with Instrument model and tests
-8cda702  P0-b: auth and kite_session modules with tests
-4946265  P0-a: config and storage modules with tests
-```
+3. **Background task stubs**: All non-trivial paths in `_process_alert` (main.py) currently log
+   "not wired in P0-e, deferred to P1". P1 replaces these stubs with real pipeline calls.
 
 ---
 
-## Budget Status
+## Next Phase: P1-a — greeks.py
 
-- Session used: ~88%
-- Week used: ~47% (week resets **2026-04-28 / Monday**)
-- **Resume rule: do not start P0-d until session resets (3:20 am tonight) OR week is fresh Monday.**
+P1 build order (subject to approval at each phase):
+- **P1-a**: `app/greeks.py` — Black-Scholes / Black-76 delta, gamma, theta, IV solver
+- **P1-b**: `app/expiry_resolver.py` — nearest weekly/monthly selection with day-cutoff logic
+- **P1-c**: `app/strike_selector.py` — delta-targeted strike selection with OI/spread/premium filters
+- **P1-d**: `app/risk.py` — premium sizing, daily loss cap, consecutive-loss circuit breaker
+- **P1-e**: `app/notifier.py` — Telegram send with no-op fallback
+- **P1-f**: Pipeline wiring in `main.py` — replace stubs with real greeks→expiry→strike→risk→entry flow; wire watcher GTT placement on EntryFilledEvent
 
----
-
-## Next Phase: P1
-
-**Scope:** Options pipeline wiring (strike selection, entry → GTT lifecycle), `risk.py`, `notifier.py`, scheduled jobs. Discuss with user before starting.
-
-**Open question before P1:** Is `app/risk.py` in scope for P0 (it appears in the proposed file tree)? If yes, it should be built before P1 pipeline wiring since it gates entry decisions.
-
----
-
-### P0-d Working Spec (from v1 §6 + v3 §3)
-
-#### orders.py responsibilities
-
-1. **`place_entry(kite, instrument, alert, session) -> str | None`**
-   - Builds and places the entry order via `kite.place_order()`.
-   - `variety="regular"` always (no bracket orders — discontinued by Zerodha).
-   - Order types:
-     - `MARKET` → `order_type="MARKET"`, `market_protection=-1` (mandatory from 1 Apr 2026; reject locally if missing from config).
-     - `LIMIT` → `order_type="LIMIT"`, `price=tick_rounded_limit`.
-     - `SL-M` → `order_type="SL-M"`, `trigger_price=tick_rounded_trigger`, `market_protection=-1`.
-     - `SL` → `order_type="SL"`, both `price` and `trigger_price` tick-rounded.
-   - All prices rounded via `symbol_mapper.round_to_tick()` using `Decimal`; never `float`.
-   - `product=settings.PRODUCT_TYPE` (NRML throughout).
-   - Quantity: `floor(CAPITAL_PER_TRADE / ltp / instrument.lot_size) * instrument.lot_size`; if quantity < lot_size, log to errors table and return `None`.
-   - Writes an `Order` row to the DB (`dry_run=settings.DRY_RUN`).
-   - In `DRY_RUN=True`: skips `kite.place_order()` entirely; `Order.kite_order_id` is `None`.
-   - Returns `kite_order_id` (or `None` in DRY_RUN / failure).
-
-2. **`place_gtt_oco(kite, instrument, position, fill_price, session) -> int | None`**
-   - Called **only** after entry order status is COMPLETE (from watcher postback).
-   - Recomputes SL and target from **actual fill price** (not the original alert price):
-     - `sl_dist = fill_price * settings.SL_PREMIUM_PCT`
-     - `sl_price = fill_price - sl_dist` (for long/buy options)
-     - `target_price = fill_price + settings.RR_RATIO * sl_dist`
-     - All three prices tick-rounded.
-   - `sl_trigger = sl_price`, `target_trigger = target_price` (triggers == limit prices for options; no slippage buffer needed for now).
-   - `last_price`: fetch via `kite.ltp(f"{exchange}:{tradingsymbol}")` — mandatory field that sets trigger direction.
-   - GTT OCO payload:
-     ```python
-     order_dict = [
-         {"exchange": ex, "tradingsymbol": ts, "transaction_type": "SELL",
-          "quantity": qty, "order_type": "LIMIT",
-          "product": product, "price": sl_price},       # leg 1 = stoploss
-         {"exchange": ex, "tradingsymbol": ts, "transaction_type": "SELL",
-          "quantity": qty, "order_type": "LIMIT",
-          "product": product, "price": target_price},   # leg 2 = target
-     ]
-     kite.place_gtt(
-         trigger_type=kite.GTT_TYPE_OCO,
-         tradingsymbol=ts, exchange=ex,
-         trigger_values=[sl_trigger, target_trigger],
-         last_price=ltp,
-         orders=order_dict,
-     )
-     ```
-   - Leg ordering matters: SL must be leg 0, target leg 1 (Kite convention).
-   - Writes a `Gtt` row; updates the `Position` row with `gtt_id`.
-   - In `DRY_RUN=True`: skips `kite.place_gtt()`; `Gtt.kite_gtt_id` is `None`.
-   - Returns `kite_gtt_id` (or `None` in DRY_RUN / failure).
-
-3. **`cancel_gtt(kite, gtt_id, session) -> None`**
-   - Calls `kite.delete_gtt(gtt_id)`; updates `Gtt.status = "CANCELLED"` in DB.
-   - In DRY_RUN: skips the API call; still updates DB.
-
-4. **`square_off(kite, instrument, position, session) -> str | None`**
-   - Called on EXIT alert or intraday squareoff job.
-   - Cancels any active GTT for the position, then places a MARKET order (opposite side).
-   - `market_protection=-1` required.
-   - Returns `kite_order_id`.
-
-5. **Exponential backoff wrapper**
-   - Retry on: `kiteconnect.exceptions.NetworkException`, HTTP 429 (rate limit).
-   - No retry on: `InputException`, `TokenException` — these are permanent; log to errors table and send Telegram alert (no-op if token missing).
-   - Config: `BACKOFF_MAX_TRIES=5`, `BACKOFF_INITIAL_WAIT_SECS=1.0` (already in config.py), exponential with jitter.
-
-#### watcher.py responsibilities
-
-1. **`OrderWatcher`** class wrapping `KiteTicker`.
-   - `start(kite, session_manager)` — initialises KiteTicker with `api_key`, connects, registers callbacks.
-   - `subscribe(instrument_tokens)` / `unsubscribe(instrument_tokens)` — manage the live subscription list.
-
-2. **`on_order_update(ws, data)` callback**
-   - Fired by KiteTicker on every order status change (postback via websocket).
-   - Key transitions to handle:
-     - `status == "COMPLETE"` and order is an **entry order** →
-       1. Record `fill_price = data["average_price"]`, `fill_qty = data["filled_quantity"]`.
-       2. Update `Order` row in DB.
-       3. Call `place_gtt_oco(...)`.
-     - `status == "REJECTED"` or `"CANCELLED"` for an entry order →
-       1. Update `Order.status` in DB.
-       2. Write `AppError` row.
-       3. Send Telegram alert.
-     - `status == "COMPLETE"` and order is a **GTT leg** (SL or target) →
-       1. Write `ClosedTrade` row (fill_price = exit premium, compute PnL).
-       2. Update `Position` and `Gtt` rows.
-       3. Send Telegram fill notification.
-
-3. **`on_ticks(ws, ticks)` callback** (mark-to-market — stub only for P0-d)
-   - Stub that logs received ticks; full MTM logic is P1.
-   - Must subscribe to `instrument_token` values for all open positions (query DB on connect).
-
-4. **`on_connect` / `on_reconnect` / `on_close` / `on_error` callbacks**
-   - `on_connect`: subscribe to open-position tokens.
-   - `on_reconnect`: log reconnect attempt + count.
-   - `on_close`: log gracefully; do not raise.
-   - `on_error`: log; KiteTicker auto-reconnects.
-
-#### Test requirements for P0-d
-
-- All offline; KiteConnect + KiteTicker fully mocked.
-- **orders.py tests (~12):**
-  - `place_entry` MARKET: verify `market_protection=-1` present in call kwargs.
-  - `place_entry` LIMIT: verify `market_protection` is absent.
-  - `place_entry` SL-M: verify `market_protection=-1` present.
-  - Price tick-rounding: price passed to `place_order` is exact multiple of tick_size.
-  - DRY_RUN: `place_order` not called; `Order` row written with `dry_run=True`, `kite_order_id=None`.
-  - Sub-lot quantity → returns None, writes AppError row.
-  - GTT OCO payload: SL is leg 0, target is leg 1; `trigger_type == GTT_TYPE_OCO`; both prices tick-rounded; `last_price` fetched via `kite.ltp()`.
-  - GTT DRY_RUN: `place_gtt` not called; `Gtt` row written.
-  - `cancel_gtt`: `delete_gtt` called with correct id; DB row updated.
-  - Backoff on NetworkException: retried up to MAX_TRIES.
-  - No retry on InputException: single attempt, error logged.
-- **watcher.py tests (~5):**
-  - `on_order_update` COMPLETE entry → `place_gtt_oco` called once.
-  - `on_order_update` REJECTED entry → AppError written, GTT not placed.
-  - `on_order_update` COMPLETE GTT leg → ClosedTrade written.
-  - `on_connect` → `subscribe()` called with open-position tokens from DB.
-  - `on_ticks` stub → does not raise.
-
-#### Rules (same as P0-a / P0-b / P0-c)
-- `_env_file=None` in test settings
-- Type hints everywhere
-- IST timezone awareness for any time-of-day logic
-- No live network in any test
-- Stop after pytest is green
-- Show test output and any decisions beyond spec
-- Do NOT start P0-e until user approves P0-d
+Do NOT start P1-a until user approves.
 
 ---
 
@@ -250,31 +105,34 @@ c61ced6  Update handoff: pause after P0-c, P0-d next
 1. Open PowerShell, `cd C:\Users\srias\tv-zerodha-bot`
 2. Confirm Python: `py -3.11 --version`
 3. Activate venv: `.\.venv\Scripts\Activate.ps1`
-4. Confirm tests still pass: `.\.venv\Scripts\pytest -q`
+4. Confirm tests still pass: `.\.venv\Scripts\pytest -q` (expect 160 passed)
 5. Start Claude Code: `claude`
-6. Tell Claude: **"Resume from SESSION_HANDOFF.md. Proceed with P0-d."**
-   (Apply PBKDF2=600,000 first if you want — it's still queued.)
+6. Tell Claude: **"Resume from SESSION_HANDOFF.md. Proceed with P1-a."**
 
 ---
 
-## Proposed Full File Tree (reference — unchanged)
+## Proposed Full File Tree (reference — updated)
 
 ```
 tv-zerodha-bot/
 ├── app/
-│   ├── main.py, auth.py, config.py, kite_session.py   ← P0-a/b done
-│   ├── symbol_mapper.py                                ← P0-c done
-│   ├── orders.py, watcher.py                           ← P0-d next
-│   ├── expiry_resolver.py, greeks.py, strike_selector.py  ← P1
-│   ├── risk.py                                         ← P0 (remaining)
-│   ├── storage.py, notifier.py, scheduler.py           ← P0-a done / P2
-│   └── templates/  (dashboard.html, positions.html, history.html)
+│   ├── config.py, storage.py                             ← P0-a done
+│   ├── auth.py, kite_session.py                          ← P0-b done
+│   ├── symbol_mapper.py                                  ← P0-c done
+│   ├── orders.py, watcher.py                             ← P0-d done
+│   ├── main.py, webhook_models.py                        ← P0-e done
+│   ├── greeks.py                                         ← P1-a next
+│   ├── expiry_resolver.py                                ← P1-b
+│   ├── strike_selector.py                                ← P1-c
+│   ├── risk.py                                           ← P1-d
+│   ├── notifier.py                                       ← P1-e
+│   └── templates/  (dashboard.html, positions.html, history.html)  ← P2
 ├── tests/
 │   └── fixtures/instruments_sample.csv
-├── infra/  (Terraform)
-├── pinescript/
-├── simulation_mode.py
-├── Dockerfile, docker-compose.yml, Caddyfile
+├── infra/  (Terraform)                                   ← P2
+├── pinescript/                                           ← P2
+├── simulation_mode.py                                    ← P2
+├── Dockerfile, docker-compose.yml, Caddyfile             ← P2
 ├── .env.example, requirements.txt, pyproject.toml
-└── .github/workflows/ci.yml
+└── .github/workflows/ci.yml                             ← P2
 ```
