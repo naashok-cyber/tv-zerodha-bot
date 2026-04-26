@@ -1,8 +1,22 @@
-# Pinned 2026-04-25 — P0-b
+# Pinned 2026-04-26 — P0-e
 # To install: .venv\Scripts\pip install -r requirements.txt
 # To repin:   .venv\Scripts\pip freeze > requirements.txt
 
 # ── Runtime ───────────────────────────────────────────────────────────────────
+# Web framework + ASGI server
+fastapi==0.136.1
+starlette==1.0.0
+uvicorn==0.46.0
+python-multipart==0.0.26
+anyio==4.13.0
+h11==0.16.0
+click==8.3.3
+httptools==0.7.1
+watchfiles==1.1.1
+websockets==16.0
+# Idempotency cache
+cachetools==7.0.6
+# Pydantic (settings + request validation)
 pydantic==2.13.3
 pydantic-core==2.46.3
 pydantic-settings==2.14.0
@@ -46,6 +60,9 @@ typing-inspection==0.4.2
 typing_extensions==4.15.0
 
 # ── Test ──────────────────────────────────────────────────────────────────────
+# httpx needed for FastAPI TestClient
+httpx==0.28.1
+httpcore==1.0.9
 pytest==8.4.2
 colorama==0.4.6
 iniconfig==2.3.0
