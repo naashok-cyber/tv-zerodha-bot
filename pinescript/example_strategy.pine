@@ -1,0 +1,52 @@
+//@version=6
+strategy("EMA Crossover Bot", overlay=true, default_qty_type=strategy.fixed, default_qty_value=1)
+
+// ── Library import ───────────────────────────────────────────────────────────
+// Replace "YourTVUsername" with your TradingView username after publishing
+// alert_emitter.pine as a library (Save As Library → Publish).
+import YourTVUsername/AlertEmitter/1 as ae
+
+// ── Inputs ───────────────────────────────────────────────────────────────────
+strategy_id = input.string("ema_crossover_v1", "Strategy ID")
+secret      = input.string("REPLACE_ME",        "Shared Secret")
+product     = input.string("NRML",              "Product (NRML/MIS/CNC)")
+sl_percent  = input.float(0.5,                  "SL %",            minval=0.01, step=0.05)
+fast_len    = input.int(9,                       "Fast EMA Length", minval=1)
+slow_len    = input.int(21,                      "Slow EMA Length", minval=2)
+
+// ── Indicators ───────────────────────────────────────────────────────────────
+fast_ema = ta.ema(close, fast_len)
+slow_ema = ta.ema(close, slow_len)
+atr14    = ta.atr(14)
+
+plot(fast_ema, "Fast EMA", color=color.blue)
+plot(slow_ema, "Slow EMA", color=color.orange)
+
+// ── Signals ──────────────────────────────────────────────────────────────────
+buy_signal  = ta.crossover(fast_ema, slow_ema)
+sell_signal = ta.crossunder(fast_ema, slow_ema)
+
+// ── Stop levels (absolute price) ─────────────────────────────────────────────
+sl_abs     = close * (sl_percent / 100)
+stop_long  = close - sl_abs
+stop_short = close + sl_abs
+
+// ── Strategy orders ──────────────────────────────────────────────────────────
+if buy_signal
+    strategy.close("Short")
+    strategy.entry("Long", strategy.long)
+
+if sell_signal
+    strategy.close("Long")
+    strategy.entry("Short", strategy.short)
+
+// ── Alerts ───────────────────────────────────────────────────────────────────
+if buy_signal
+    alert(
+         ae.emit_alert(strategy_id, "BUY",  "MARKET", close, sl_percent, atr14, stop_long,  int(na), product, secret),
+         alert.freq_once_per_bar_close)
+
+if sell_signal
+    alert(
+         ae.emit_alert(strategy_id, "SELL", "MARKET", close, sl_percent, atr14, stop_short, int(na), product, secret),
+         alert.freq_once_per_bar_close)

@@ -1,0 +1,51 @@
+//@version=6
+library("AlertEmitter", overlay=true)
+
+// emit_alert — returns a JSON string matching the TradingViewAlert schema in
+// app/webhook_models.py.  TV substitutes {{ticker}}, {{exchange}}, {{time}},
+// {{timenow}}, and {{interval}} at alert-fire time; all other values are
+// Pine-computed and embedded directly.
+//
+// Parameters
+//   strategy_id    — unique identifier for this strategy (routed on the bot side)
+//   action         — "BUY" | "SELL" | "EXIT" | "TRAIL"
+//   order_type     — "MARKET" | "LIMIT" | "SL" | "SL-M"  (pass na to omit)
+//   entry_price    — intended entry price; pass close for market orders
+//   sl_percent     — stop-loss as a percentage of entry (e.g. 0.5 for 0.5 %)
+//   atr            — ATR value for position-sizing reference (pass na to omit)
+//   stop_loss      — absolute stop-loss price (pass na to omit)
+//   quantity_hint  — suggested lot/qty override (pass int(na) to omit)
+//   product        — "NRML" | "MIS" | "CNC"
+//   secret         — must match HMAC_SHARED_SECRET in the bot's .env
+export emit_alert(
+     string strategy_id,
+     string action,
+     string order_type,
+     float  entry_price,
+     float  sl_percent,
+     float  atr,
+     float  stop_loss,
+     int    quantity_hint,
+     string product,
+     string secret) =>
+    ep  = na(entry_price)   ? "null" : str.tostring(entry_price,  "0.########")
+    sl  = na(stop_loss)     ? "null" : str.tostring(stop_loss,    "0.########")
+    slp = na(sl_percent)    ? "null" : str.tostring(sl_percent,   "0.########")
+    a   = na(atr)           ? "null" : str.tostring(atr,          "0.########")
+    qty = na(quantity_hint) ? "null" : str.tostring(quantity_hint)
+    ot  = na(order_type)    ? "null" : '"' + order_type + '"'
+    '{"secret":"'       + secret      + '",'  +
+    '"strategy_id":"'   + strategy_id + '",'  +
+    '"tv_ticker":"{{ticker}}",'               +
+    '"tv_exchange":"{{exchange}}",'           +
+    '"action":"'        + action      + '",'  +
+    '"order_type":'     + ot          + ','   +
+    '"entry_price":'    + ep          + ','   +
+    '"stop_loss":'      + sl          + ','   +
+    '"sl_percent":'     + slp         + ','   +
+    '"atr":'            + a           + ','   +
+    '"quantity_hint":'  + qty         + ','   +
+    '"product":"'       + product     + '",'  +
+    '"time":"{{timenow}}",'                   +
+    '"bar_time":"{{time}}",'                  +
+    '"interval":"{{interval}}"}'
