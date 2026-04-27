@@ -53,7 +53,7 @@ resource "google_compute_instance" "tv-zerodha-bot" {
 
     # Clone repository (replace URL with your actual repo)
     cd /opt
-    git clone https://github.com/YOUR_USERNAME/tv-zerodha-bot.git
+    git clone https://github.com/naashok-cyber/tv-zerodha-bot.git
     cd tv-zerodha-bot
 
     # Create data directory and .env from example
