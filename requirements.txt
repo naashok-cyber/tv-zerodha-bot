@@ -40,7 +40,6 @@ pyasn1==0.6.3
 pyasn1_modules==0.4.2
 pyOpenSSL==26.1.0
 python-dateutil==2.9.0.post0
-pywin32==311
 requests==2.33.1
 service-identity==24.2.0
 six==1.17.0
