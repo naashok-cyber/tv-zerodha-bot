@@ -14,11 +14,10 @@ from sqlalchemy.pool import StaticPool
 
 import app.state as state
 from app import scheduler as sched_module
-from app.config import IST, Settings
+from app.config import IST, UTC, Settings
 from app.main import app, get_current_settings, get_db_session
 from app.scheduler import daily_session_check, get_last_checked_at, make_scheduler
 from app.storage import Alert, Base, Instrument
-from app.webhook_models import Action, TradingViewAlert
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -77,18 +76,15 @@ def _make_factory(engine=None):
     return sessionmaker(bind=e, expire_on_commit=False)
 
 
-def _make_alert(action: Action = Action.BUY, tv_ticker: str = "NIFTY") -> TradingViewAlert:
-    return TradingViewAlert(
-        secret=_SECRET,
-        strategy_id="test_strat",
-        tv_ticker=tv_ticker,
-        tv_exchange="NSE",
+def _make_alert(action: str = "BUY", symbol: str = "NIFTY") -> AlertPayload:
+    return AlertPayload(
+        symbol=symbol,
         action=action,
-        product="NRML",
-        entry_price=19_500.0,
-        sl_percent=None,
-        time="2026-04-27T10:00:00",
-        bar_time="2026-04-27T09:45:00",
+        price=Decimal("19500"),
+        premium=None,
+        timeframe="5",
+        alert_id="sched_test_001",
+        timestamp=datetime(2026, 4, 27, 10, 0, 0, tzinfo=UTC),
     )
 
 
@@ -247,8 +243,9 @@ class TestAuthStatusEndpoint:
 import secrets as _secrets
 
 import app.main as main_module
-from app.main import _process_alert
 from app.expiry_resolver import ResolvedExpiry
+from app.main import _process_alert
+from app.schemas import AlertPayload
 
 
 def _seed_alert_row(session, tv_ticker: str = "NIFTY", suffix: str = "") -> Alert:

@@ -13,7 +13,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 import app.main as main_module
-from app.config import IST, Settings
+from app.config import IST, UTC, Settings
 from app.expiry_resolver import ResolvedExpiry
 from app.main import (
     _check_risk_guards,
@@ -23,9 +23,9 @@ from app.main import (
     get_current_settings,
     get_db_session,
 )
+from app.schemas import AlertPayload
 from app.storage import Alert, Base, ClosedTrade, Gtt, Instrument, Order, Position
 from app.watcher import EntryFilledEvent
-from app.webhook_models import Action, TradingViewAlert
 
 
 # ── Shared helpers ────────────────────────────────────────────────────────────
@@ -85,27 +85,24 @@ def _make_factory(engine=None):
 
 
 def _make_alert(
-    action: Action = Action.BUY,
-    tv_ticker: str = "NIFTY",
-    entry_price: float = 19_500.0,
-    sl_percent: float | None = None,
-) -> TradingViewAlert:
-    return TradingViewAlert(
-        secret=_SECRET,
-        strategy_id="test_strat",
-        tv_ticker=tv_ticker,
-        tv_exchange="NSE",
+    action: str = "BUY",
+    symbol: str = "NIFTY",
+    price: float = 19_500.0,
+    premium: float | None = None,
+) -> AlertPayload:
+    return AlertPayload(
+        symbol=symbol,
         action=action,
-        product="NRML",
-        entry_price=entry_price,
-        sl_percent=sl_percent,
-        time="2026-04-27T10:00:00",
-        bar_time="2026-04-27T09:45:00",
+        price=Decimal(str(price)),
+        premium=Decimal(str(premium)) if premium is not None else None,
+        timeframe="5",
+        alert_id="test_alert_001",
+        timestamp=datetime(2026, 4, 27, 10, 0, 0, tzinfo=UTC),
     )
 
 
-def _make_ng_alert(entry_price: float = 200.0, sl_percent: float | None = None) -> TradingViewAlert:
-    return _make_alert(Action.BUY, tv_ticker="NATURALGAS", entry_price=entry_price, sl_percent=sl_percent)
+def _make_ng_alert(price: float = 200.0) -> AlertPayload:
+    return _make_alert("BUY", symbol="NATURALGAS", price=price)
 
 
 def _seed_alert(session, tv_ticker="NIFTY", action="BUY", suffix: str = "") -> Alert:
@@ -250,7 +247,7 @@ def test_ng_sizing_math():
         patch("app.risk.daily_loss_remaining", return_value=Decimal("100000")),
     ):
         main_module._SessionFactory = factory
-        _process_alert(alert_id, _make_ng_alert(entry_price=200.0), s)
+        _process_alert(alert_id, _make_ng_alert(price=200.0), s)
 
     # DRY_RUN=True — place_entry not called; Order row carries the computed qty
     with factory() as session:
@@ -309,7 +306,7 @@ def test_ng_live_calls_place_entry_with_correct_args():
     ):
         mock_sm.return_value.get_kite.return_value = mock_kite
         main_module._SessionFactory = factory
-        _process_alert(alert_id, _make_ng_alert(entry_price=200.0), s)
+        _process_alert(alert_id, _make_ng_alert(price=200.0), s)
 
     mock_pe.assert_called_once()
     args = mock_pe.call_args.args
@@ -339,7 +336,7 @@ def test_ng_insufficient_capital_rejected(caplog):
     ):
         with caplog.at_level(logging.WARNING, logger="app.main"):
             main_module._SessionFactory = factory
-            _process_alert(alert_id, _make_ng_alert(entry_price=200.0), s)
+            _process_alert(alert_id, _make_ng_alert(price=200.0), s)
 
     mock_pe.assert_not_called()
     assert any("insufficient capital" in r.message.lower() for r in caplog.records)
@@ -380,7 +377,7 @@ def test_non_ng_buy_routes_to_ce():
     ):
         mock_sm.return_value.get_kite.return_value = mock_kite
         main_module._SessionFactory = factory
-        _process_alert(alert_id, _make_alert(Action.BUY, tv_ticker="NIFTY"), s)
+        _process_alert(alert_id, _make_alert("BUY", symbol="NIFTY"), s)
 
     assert mock_ss.call_args.args[2] == "CE"
 
@@ -407,7 +404,7 @@ def test_non_ng_sell_routes_to_pe():
     ):
         mock_sm.return_value.get_kite.return_value = mock_kite
         main_module._SessionFactory = factory
-        _process_alert(alert_id, _make_alert(Action.SELL, tv_ticker="NIFTY"), s)
+        _process_alert(alert_id, _make_alert("SELL", symbol="NIFTY"), s)
 
     assert mock_ss.call_args.args[2] == "PE"
 
@@ -435,7 +432,7 @@ def test_non_ng_sizing_math():
     ):
         mock_sm.return_value.get_kite.return_value = mock_kite
         main_module._SessionFactory = factory
-        _process_alert(alert_id, _make_alert(Action.BUY), s)
+        _process_alert(alert_id, _make_alert("BUY"), s)
 
     with factory() as session:
         order = session.query(Order).filter_by(alert_id=alert_id).first()
@@ -457,7 +454,7 @@ def test_non_ng_dry_run_skips_broker_calls():
         patch("app.main.place_entry") as mock_pe,
     ):
         main_module._SessionFactory = factory
-        _process_alert(alert_id, _make_alert(Action.BUY), s)
+        _process_alert(alert_id, _make_alert("BUY"), s)
 
     mock_ss.assert_not_called()
     mock_pe.assert_not_called()
@@ -497,7 +494,7 @@ def test_exit_cancel_before_squareoff():
     ):
         mock_sm.return_value.get_kite.return_value = mock_kite
         main_module._SessionFactory = factory
-        _process_alert(alert_id, _make_alert(Action.EXIT, tv_ticker="NIFTY"), s)
+        _process_alert(alert_id, _make_alert("EXIT", symbol="NIFTY"), s)
 
     assert "cancel_gtt" in call_order
     assert "square_off" in call_order
@@ -522,7 +519,7 @@ def test_exit_dry_run_skips_broker_calls():
         patch("app.main.square_off") as mock_so,
     ):
         main_module._SessionFactory = factory
-        _process_alert(alert_id, _make_alert(Action.EXIT, tv_ticker="NIFTY"), s)
+        _process_alert(alert_id, _make_alert("EXIT", symbol="NIFTY"), s)
 
     mock_cg.assert_not_called()
     mock_so.assert_not_called()
@@ -547,7 +544,7 @@ def test_trail_breakeven_trigger():
 
     with patch("app.main.modify_gtt") as mock_mg:
         main_module._SessionFactory = factory
-        _process_alert(alert_id, _make_alert(Action.TRAIL, tv_ticker="NIFTY", entry_price=130.0), s)
+        _process_alert(alert_id, _make_alert("TRAIL", symbol="NIFTY", premium=130.0), s)
 
     with factory() as session:
         pos = session.query(Position).first()
@@ -574,7 +571,7 @@ def test_trail_trail_trigger():
 
     with patch("app.main.modify_gtt"):
         main_module._SessionFactory = factory
-        _process_alert(alert_id, _make_alert(Action.TRAIL, tv_ticker="NIFTY", entry_price=145.0), s)
+        _process_alert(alert_id, _make_alert("TRAIL", symbol="NIFTY", premium=145.0), s)
 
     with factory() as session:
         pos = session.query(Position).first()
@@ -605,7 +602,7 @@ def test_trail_modify_gtt_called_with_correct_sl():
     ):
         mock_sm.return_value.get_kite.return_value = mock_kite
         main_module._SessionFactory = factory
-        _process_alert(alert_id, _make_alert(Action.TRAIL, tv_ticker="NIFTY", entry_price=130.0), s)
+        _process_alert(alert_id, _make_alert("TRAIL", symbol="NIFTY", premium=130.0), s)
 
     mock_mg.assert_called_once()
     kw = mock_mg.call_args.kwargs

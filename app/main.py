@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import logging
 import secrets
 from contextlib import asynccontextmanager
@@ -12,12 +11,11 @@ from typing import Any
 from cachetools import TTLCache
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, Response
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
-from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
 import app.risk as risk
 import app.state as state
-from app.auth import HMACError, IPBlockedError, RateLimitError, check_ip, check_rate_limit, verify_hmac
+from app.auth import IPBlockedError, RateLimitError, check_ip, check_rate_limit
 from app.config import IST, Settings, get_settings
 from app.expiry_resolver import NoEligibleExpiryError, resolve_expiry
 from app.kite_session import get_session_manager
@@ -26,8 +24,8 @@ from app.scheduler import daily_session_check, get_last_checked_at, make_schedul
 from app.storage import Alert, ClosedTrade, Gtt, Instrument, Order, Position, init_db
 from app.strike_selector import NoValidStrikeError, select_strike
 from app.symbol_mapper import resolve_underlying
+from app.schemas import AlertPayload
 from app.watcher import EntryFilledEvent, GttFilledEvent, OrderWatcher
-from app.webhook_models import Action, TradingViewAlert
 
 log = logging.getLogger(__name__)
 
@@ -330,23 +328,23 @@ def _get_client_ip(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 
-def _build_alert_row(alert_data: TradingViewAlert, raw: str, ikey: str) -> Alert:
+def _build_alert_row(payload: AlertPayload, raw: str, ikey: str) -> Alert:
     return Alert(
-        received_at=datetime.now(IST),
-        strategy_id=alert_data.strategy_id,
-        tv_ticker=alert_data.tv_ticker,
-        tv_exchange=alert_data.tv_exchange,
-        action=alert_data.action.value,
-        order_type=alert_data.order_type.value if alert_data.order_type else None,
-        entry_price=alert_data.entry_price,
-        stop_loss=alert_data.stop_loss,
-        sl_percent=alert_data.sl_percent,
-        atr=alert_data.atr,
-        quantity_hint=alert_data.quantity_hint,
-        product=alert_data.product,
-        tv_time=alert_data.tv_time,
-        bar_time=alert_data.bar_time,
-        interval=alert_data.interval,
+        received_at=payload.timestamp,
+        strategy_id=payload.alert_id,
+        tv_ticker=payload.symbol,
+        tv_exchange="",
+        action=payload.action,
+        order_type=None,
+        entry_price=float(payload.price),
+        stop_loss=None,
+        sl_percent=None,
+        atr=None,
+        quantity_hint=None,
+        product="NRML",
+        tv_time=payload.timestamp.isoformat(),
+        bar_time=None,
+        interval=payload.timeframe,
         idempotency_key=ikey,
         raw_payload=raw,
         processed=False,
@@ -355,15 +353,15 @@ def _build_alert_row(alert_data: TradingViewAlert, raw: str, ikey: str) -> Alert
 
 # ── Background task ───────────────────────────────────────────────────────────
 
-def _process_alert(alert_id: int, alert_data: TradingViewAlert, settings: Settings) -> None:
+def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) -> None:
     with _SessionFactory() as session:
         alert = session.get(Alert, alert_id)
         if alert is None:
             log.error("Alert %d not found in DB (background task)", alert_id)
             return
 
-        underlying = resolve_underlying(alert_data.tv_ticker, settings=settings)
-        now = datetime.now(IST)
+        underlying = resolve_underlying(alert_data.symbol, settings=settings)
+        now = alert_data.timestamp
         product = settings.PRODUCT_TYPE.value
 
         if state.SESSION_INVALID and not settings.DRY_RUN:
@@ -410,8 +408,8 @@ def _process_alert(alert_id: int, alert_data: TradingViewAlert, settings: Settin
                 session.commit()
                 return
 
-            sl_frac = Decimal(str(alert_data.sl_percent)) if alert_data.sl_percent else settings.SL_PERCENT
-            entry_px_d = Decimal(str(alert_data.entry_price)) if alert_data.entry_price else Decimal("0")
+            sl_frac = settings.SL_PERCENT
+            entry_px_d = alert_data.price
             sl_distance_d = entry_px_d * sl_frac
             sl_distance = float(sl_distance_d)
             target_distance = settings.RR_RATIO * sl_distance
@@ -473,7 +471,7 @@ def _process_alert(alert_id: int, alert_data: TradingViewAlert, settings: Settin
             return
 
         # ── EXIT ──────────────────────────────────────────────────────────────
-        if alert_data.action == Action.EXIT:
+        if alert_data.action == "EXIT":
             ts = underlying.name
             position = (
                 session.query(Position)
@@ -526,7 +524,7 @@ def _process_alert(alert_id: int, alert_data: TradingViewAlert, settings: Settin
             return
 
         # ── TRAIL ─────────────────────────────────────────────────────────────
-        if alert_data.action == Action.TRAIL:
+        if alert_data.action == "TRAIL":
             ts = underlying.name
             position = (
                 session.query(Position)
@@ -553,7 +551,7 @@ def _process_alert(alert_id: int, alert_data: TradingViewAlert, settings: Settin
 
             entry_premium = float(position.entry_premium)
             sl_risk = entry_premium * settings.SL_PREMIUM_PCT
-            current_premium = float(alert_data.entry_price) if alert_data.entry_price else entry_premium
+            current_premium = float(alert_data.premium) if alert_data.premium else entry_premium
 
             new_sl: float | None = None
             if current_premium >= entry_premium + settings.TRAIL_RR * sl_risk:
@@ -602,12 +600,12 @@ def _process_alert(alert_id: int, alert_data: TradingViewAlert, settings: Settin
             return
 
         # ── Non-NG options entry (BUY → CE, SELL → PE) ───────────────────────
-        flag = "CE" if alert_data.action == Action.BUY else "PE"
+        flag = "CE" if alert_data.action == "BUY" else "PE"
 
         if settings.DRY_RUN:
             log.info(
                 "Alert %d: DRY_RUN — would place %s %s option for %s (segment=%s)",
-                alert_id, alert_data.action.value, flag, underlying.name, underlying.segment,
+                alert_id, alert_data.action, flag, underlying.name, underlying.segment,
             )
             order = Order(
                 alert_id=alert_id,
@@ -719,6 +717,7 @@ def _process_alert(alert_id: int, alert_data: TradingViewAlert, settings: Settin
 
 @app.post("/webhook", status_code=202)
 async def webhook(
+    payload: AlertPayload,
     request: Request,
     background_tasks: BackgroundTasks,
     settings: Settings = Depends(get_current_settings),
@@ -736,30 +735,17 @@ async def webhook(
     except RateLimitError:
         raise HTTPException(status_code=429, detail="Rate limit exceeded")
 
-    try:
-        raw_bytes = await request.body()
-        raw_str = raw_bytes.decode()
-        body = json.loads(raw_str)
-        alert_data = TradingViewAlert.model_validate(body)
-    except (json.JSONDecodeError, ValidationError) as exc:
-        raise HTTPException(status_code=422, detail=str(exc))
-
-    try:
-        verify_hmac(alert_data.secret, expected_secret=settings.WEBHOOK_SECRET)
-    except HMACError:
-        raise HTTPException(status_code=401, detail="Invalid webhook secret")
-
-    ikey = alert_data.idempotency_key()
+    ikey = payload.alert_id
     if ikey in _idempotency_cache:
         return {"status": "duplicate"}
     _idempotency_cache[ikey] = True
 
-    alert_row = _build_alert_row(alert_data, raw_str, ikey)
+    alert_row = _build_alert_row(payload, payload.model_dump_json(), ikey)
     session.add(alert_row)
     session.commit()
     session.refresh(alert_row)
 
-    background_tasks.add_task(_process_alert, alert_row.id, alert_data, settings)
+    background_tasks.add_task(_process_alert, alert_row.id, payload, settings)
 
     return {"status": "queued", "alert_id": alert_row.id}
 

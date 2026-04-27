@@ -1,0 +1,115 @@
+// =============================================================================
+// TradingView → Zerodha Bot — Alert Message Template
+// =============================================================================
+//
+// USAGE
+// -----
+// 1. In TradingView, create an alert on your strategy or indicator.
+// 2. In the "Message" field, paste one of the templates below (choose the
+//    variant that matches the signal type: BUY, SELL, EXIT, or TRAIL).
+// 3. Set the webhook URL to:  https://<your-host>/webhook
+// 4. TradingView sends the JSON body as-is; the bot validates it against
+//    AlertPayload (Pydantic, extra="forbid") and returns 422 for any mismatch.
+//
+// FIELD REFERENCE
+// ---------------
+// symbol     — Instrument name the bot resolves (e.g. "NIFTY", "NATURALGAS").
+//              Must be uppercase, non-empty, ≤ 20 characters.
+//              {{ticker}} gives the chart's symbol; strip the exchange prefix
+//              in Pine Script if needed (e.g. syminfo.basevolume).
+//
+// action     — One of: BUY | SELL | EXIT | TRAIL  (hard-coded per template).
+//
+// price      — Current price at the time of the alert.
+//              {{close}} is the bar's closing price (most common choice).
+//              Must be > 0.
+//
+// premium    — Current option premium; REQUIRED for TRAIL alerts only.
+//              Use {{close}} when charting the option directly, or use a
+//              request.security() call in your strategy to pull option LTP.
+//
+// timeframe  — Chart interval in minutes ({{interval}} from TradingView).
+//              Stored for audit; not used in execution logic today.
+//
+// alert_id   — Unique identifier for this alert firing.
+//              {{timenow}} gives the current UNIX timestamp in milliseconds
+//              (as a number). The bot uses this as the idempotency key, so
+//              two firings within the same millisecond are treated as one.
+//
+// timestamp  — When the alert fired, in UTC ISO-8601.
+//              TradingView does not provide a built-in ISO formatter for
+//              {{timenow}}, so format the time in Pine Script using:
+//                  str.format_time(timenow, "yyyy-MM-dd'T'HH:mm:ss'+00:00'", "UTC")
+//              and pass it as the dynamic value (see Pine Script v5 example below).
+//              Alternatively, use a static literal like "{{time}}" but note
+//              {{time}} gives bar open time, not wall-clock time.
+//
+// =============================================================================
+
+
+// ── BUY (enter long via CE option or NATURALGAS future) ─────────────────────
+{
+    "symbol": "{{ticker}}",
+    "action": "BUY",
+    "price": {{close}},
+    "timeframe": "{{interval}}",
+    "alert_id": "{{timenow}}",
+    "timestamp": "{{timenow}}"
+}
+
+
+// ── SELL (enter short via PE option) ────────────────────────────────────────
+// {
+//     "symbol": "{{ticker}}",
+//     "action": "SELL",
+//     "price": {{close}},
+//     "timeframe": "{{interval}}",
+//     "alert_id": "{{timenow}}",
+//     "timestamp": "{{timenow}}"
+// }
+
+
+// ── EXIT (manual close of open position; bot cancels GTT and squares off) ───
+// {
+//     "symbol": "{{ticker}}",
+//     "action": "EXIT",
+//     "price": {{close}},
+//     "timeframe": "{{interval}}",
+//     "alert_id": "{{timenow}}",
+//     "timestamp": "{{timenow}}"
+// }
+
+
+// ── TRAIL (bar-close trail check; premium field is REQUIRED) ─────────────────
+// {{close}} here should be the current option premium, not the underlying price.
+// Chart the option contract directly when using this template.
+// {
+//     "symbol": "{{ticker}}",
+//     "action": "TRAIL",
+//     "price": {{close}},
+//     "premium": {{close}},
+//     "timeframe": "{{interval}}",
+//     "alert_id": "{{timenow}}",
+//     "timestamp": "{{timenow}}"
+// }
+
+
+// =============================================================================
+// PINE SCRIPT v5 — Dynamic timestamp example
+// =============================================================================
+// To send a proper ISO-8601 UTC timestamp, add this to your strategy/indicator
+// and include the output in a plotchar or alert message via Pine's alertcondition:
+//
+// //@version=5
+// strategy("My Strategy", overlay=true)
+//
+// iso_ts = str.format_time(timenow, "yyyy-MM-dd'T'HH:mm:ss'+00:00'", "UTC")
+//
+// buy_signal = ta.crossover(ta.ema(close, 9), ta.ema(close, 21))
+//
+// if buy_signal
+//     alert('{"symbol":"' + syminfo.ticker + '","action":"BUY","price":' +
+//           str.tostring(close) + ',"timeframe":"' + str.tostring(timeframe.period) +
+//           '","alert_id":"' + str.tostring(timenow) + '","timestamp":"' + iso_ts + '"}',
+//           alert.freq_once_per_bar_close)
+// =============================================================================

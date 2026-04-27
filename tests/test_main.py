@@ -52,16 +52,12 @@ def _make_session_factory():
 
 def _payload(**overrides) -> dict:
     base = {
-        "secret": _SECRET,
-        "strategy_id": "ema_v1",
-        "tv_ticker": "NIFTY2541722750CE",
-        "tv_exchange": "NSE",
+        "symbol": "NIFTY",
         "action": "BUY",
-        "order_type": "MARKET",
-        "product": "NRML",
-        "time": "2026-04-26T10:00:00",
-        "bar_time": "2026-04-26T09:45:00",
-        "interval": "5",
+        "price": 19500.0,
+        "timeframe": "5",
+        "alert_id": "tv_test_001",
+        "timestamp": "2026-04-26T10:00:00+00:00",
     }
     base.update(overrides)
     return base
@@ -104,19 +100,18 @@ def test_webhook_valid_payload_returns_202_and_persists_alert(client) -> None:
     with factory() as session:
         rows = session.query(Alert).all()
     assert len(rows) == 1
-    assert rows[0].tv_ticker == "NIFTY2541722750CE"
+    assert rows[0].tv_ticker == "NIFTY"
     assert rows[0].action == "BUY"
 
 
-def test_webhook_bad_hmac_returns_401(client) -> None:
+def test_webhook_invalid_price_returns_422(client) -> None:
     c, _ = client
     resp = c.post(
         "/webhook",
-        json=_payload(secret="wrong-secret"),
+        json=_payload(price=0),
         headers={"X-Forwarded-For": _TV_IP},
     )
-    assert resp.status_code == 401
-    assert "secret" in resp.json()["detail"].lower()
+    assert resp.status_code == 422
 
 
 def test_webhook_blocked_ip_returns_401(client) -> None:
@@ -166,7 +161,7 @@ def test_webhook_naturalgas_routes_to_ng_branch(client, caplog) -> None:
     with caplog.at_level(logging.INFO, logger="app.main"):
         resp = c.post(
             "/webhook",
-            json=_payload(tv_ticker="NATURALGAS1!", strategy_id="ng_strat", bar_time="2026-04-26T10:00:00"),
+            json=_payload(symbol="NATURALGAS", alert_id="ng_test_001"),
             headers={"X-Forwarded-For": _TV_IP},
         )
     assert resp.status_code == 202
@@ -180,7 +175,7 @@ def test_webhook_dry_run_logs_dry_run_message(client, caplog) -> None:
     with caplog.at_level(logging.INFO, logger="app.main"):
         resp = c.post(
             "/webhook",
-            json=_payload(strategy_id="dry_run_strat", bar_time="2026-04-26T10:15:00"),
+            json=_payload(alert_id="dry_test_001"),
             headers={"X-Forwarded-For": _TV_IP},
         )
     assert resp.status_code == 202

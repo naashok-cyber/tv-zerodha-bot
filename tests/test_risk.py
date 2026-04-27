@@ -335,17 +335,17 @@ def _seed_alert_row(session, tv_ticker: str = "NIFTY") -> Alert:
     return row
 
 
-def _alert_data(tv_ticker: str = "NIFTY") -> MagicMock:
-    from app.webhook_models import Action, TradingViewAlert
-    return TradingViewAlert(
-        secret="sec",
-        strategy_id="test",
-        tv_ticker=tv_ticker,
-        tv_exchange="NSE",
-        action=Action.BUY,
-        product="NRML",
-        time="2026-04-27T10:00:00",
-        bar_time="2026-04-27T09:45:00",
+def _alert_data(symbol: str = "NIFTY") -> "AlertPayload":
+    from decimal import Decimal
+    from app.config import UTC
+    from app.schemas import AlertPayload
+    return AlertPayload(
+        symbol=symbol,
+        action="BUY",
+        price=Decimal("19500"),
+        timeframe="5",
+        alert_id="risk_test_001",
+        timestamp=datetime(2026, 4, 27, 10, 0, 0, tzinfo=UTC),
     )
 
 
