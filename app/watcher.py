@@ -32,10 +32,15 @@ class OrderWatcher:
         self._ticker: Any = None
         self._subscribed_tokens: set[int] = set()
         self._watched_order_ids: set[str] = set()
+        self._started: bool = False
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
     def start(self, api_key: str, access_token: str) -> None:
+        if self._started:
+            log.warning("OrderWatcher.start() called but already started; ignoring")
+            return
+        self._started = True
         self._ticker = self._ticker_factory(api_key=api_key, access_token=access_token)
         self._ticker.on_connect = self.on_connect
         self._ticker.on_close = self.on_close

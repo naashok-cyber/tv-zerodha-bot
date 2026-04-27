@@ -5,6 +5,7 @@ import logging
 import secrets
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from math import floor
 from typing import Any
 
 from cachetools import TTLCache
@@ -15,20 +16,201 @@ from sqlalchemy.orm import Session
 
 from app.auth import HMACError, IPBlockedError, RateLimitError, check_ip, check_rate_limit, verify_hmac
 from app.config import IST, Settings, get_settings
+from app.expiry_resolver import NoEligibleExpiryError, resolve_expiry
 from app.kite_session import get_session_manager
-from app.storage import Alert, init_db
+from app.orders import cancel_gtt, modify_gtt, place_entry, place_gtt_oco, square_off
+from app.storage import Alert, ClosedTrade, Gtt, Instrument, Order, Position, init_db
+from app.strike_selector import NoValidStrikeError, select_strike
 from app.symbol_mapper import resolve_underlying
-from app.watcher import OrderWatcher
+from app.watcher import EntryFilledEvent, OrderWatcher
 from app.webhook_models import Action, TradingViewAlert
 
 log = logging.getLogger(__name__)
 
 # ── Module-level singletons ────────────────────────────────────────────────────
-# _SessionFactory is set in lifespan; tests inject a factory via monkeypatch before
-# the lifespan runs so the guard `if _SessionFactory is None` skips real DB init.
 _SessionFactory: Any = None
 _watcher: OrderWatcher | None = None
 _idempotency_cache: TTLCache = TTLCache(maxsize=10_000, ttl=86_400)
+
+# Keyed by kite_order_id; carries sl/target distances for the EntryFilledEvent callback.
+_pending_order_meta: dict[str, dict] = {}
+
+
+# ── Risk guard helpers ────────────────────────────────────────────────────────
+
+def _realised_loss_today(session: Any) -> float:
+    """Return the total realised loss (positive number) from ClosedTrade rows closed today IST."""
+    today_start = datetime.now(IST).replace(hour=0, minute=0, second=0, microsecond=0)
+    rows = (
+        session.query(ClosedTrade.pnl)
+        .filter(ClosedTrade.closed_at >= today_start, ClosedTrade.pnl < 0)
+        .all()
+    )
+    return abs(sum(r[0] for r in rows))
+
+
+def _open_position_count(session: Any) -> int:
+    return (
+        session.query(Position)
+        .outerjoin(ClosedTrade, Position.id == ClosedTrade.position_id)
+        .filter(ClosedTrade.id == None)  # noqa: E711
+        .count()
+    )
+
+
+def _trades_today_count(session: Any) -> int:
+    today_start = datetime.now(IST).replace(hour=0, minute=0, second=0, microsecond=0)
+    return (
+        session.query(Alert)
+        .filter(
+            Alert.action.in_(["BUY", "SELL"]),
+            Alert.processed == True,  # noqa: E712
+            Alert.received_at >= today_start,
+        )
+        .count()
+    )
+
+
+def _consecutive_losses(session: Any) -> int:
+    rows = (
+        session.query(ClosedTrade.exit_reason)
+        .order_by(ClosedTrade.closed_at.desc())
+        .all()
+    )
+    count = 0
+    for (reason,) in rows:
+        if reason == "SL_HIT":
+            count += 1
+        else:
+            break
+    return count
+
+
+def _check_risk_guards(session: Any, settings: Settings) -> tuple[bool, str]:
+    loss = _realised_loss_today(session)
+    if loss >= settings.effective_max_daily_loss:
+        return False, f"daily loss ₹{loss:.2f} >= limit ₹{settings.effective_max_daily_loss:.2f}"
+    trades = _trades_today_count(session)
+    if trades >= settings.MAX_TRADES_PER_DAY:
+        return False, f"trades today {trades} >= MAX_TRADES_PER_DAY {settings.MAX_TRADES_PER_DAY}"
+    positions = _open_position_count(session)
+    if positions >= settings.MAX_OPEN_POSITIONS:
+        return False, f"open positions {positions} >= MAX_OPEN_POSITIONS {settings.MAX_OPEN_POSITIONS}"
+    losses = _consecutive_losses(session)
+    if losses >= settings.CONSECUTIVE_LOSSES_LIMIT:
+        return False, f"consecutive losses {losses} >= CONSECUTIVE_LOSSES_LIMIT {settings.CONSECUTIVE_LOSSES_LIMIT}"
+    return True, ""
+
+
+# ── EntryFilledEvent callback ─────────────────────────────────────────────────
+
+def _on_entry_filled(event: EntryFilledEvent) -> None:
+    """Consume a fill event: persist Position, place GTT OCO."""
+    if _SessionFactory is None:
+        log.error("_on_entry_filled fired but _SessionFactory is None")
+        return
+    settings = get_settings()
+    with _SessionFactory() as session:
+        order = (
+            session.query(Order)
+            .filter(Order.kite_order_id == event.kite_order_id)
+            .first()
+        )
+        if order is None:
+            log.error("EntryFilledEvent: no Order row for kite_order_id=%s", event.kite_order_id)
+            return
+
+        now = datetime.now(IST)
+        order.status = "COMPLETE"
+        order.fill_price = event.fill_price
+        order.fill_qty = event.fill_qty
+        order.updated_at = now
+
+        meta = _pending_order_meta.pop(event.kite_order_id, {})
+        instrument_type = meta.get("instrument_type", "CE")
+
+        instrument = (
+            session.query(Instrument)
+            .filter(
+                Instrument.tradingsymbol == order.tradingsymbol,
+                Instrument.exchange == order.exchange,
+            )
+            .first()
+        )
+        if instrument is None:
+            log.error("_on_entry_filled: Instrument %s/%s not found", order.exchange, order.tradingsymbol)
+            session.commit()
+            return
+
+        fill_price = event.fill_price
+        if instrument_type == "FUT":
+            sl_distance = meta.get("sl_distance", fill_price * settings.FUTURES_SL_PCT)
+            target_distance = meta.get("target_distance", settings.RR_RATIO * sl_distance)
+            sl_price = fill_price - sl_distance
+            target_price = fill_price + target_distance
+        else:
+            risk = fill_price * settings.SL_PREMIUM_PCT
+            sl_price = fill_price - risk
+            target_price = fill_price + settings.RR_RATIO * risk
+
+        position = Position(
+            order_id=order.id,
+            exchange=order.exchange,
+            tradingsymbol=order.tradingsymbol,
+            underlying=meta.get("underlying", order.tradingsymbol),
+            instrument_type=instrument_type,
+            entry_premium=fill_price,
+            current_sl=sl_price,
+            quantity=event.fill_qty,
+            lot_size=instrument.lot_size,
+            opened_at=now,
+            last_updated_at=now,
+        )
+        session.add(position)
+        session.flush()  # get position.id
+
+        kite_gtt_id = None
+        if not settings.DRY_RUN:
+            from decimal import Decimal
+            kite_client = get_session_manager().get_kite()
+            kite_gtt_id = place_gtt_oco(
+                kite_client,
+                instrument,
+                event.fill_qty,
+                sl_trigger=Decimal(str(sl_price)),
+                sl_limit=Decimal(str(sl_price)),
+                target_trigger=Decimal(str(target_price)),
+                target_limit=Decimal(str(target_price)),
+                last_price=Decimal(str(fill_price)),
+                product=order.product,
+            )
+        else:
+            log.info(
+                "_on_entry_filled DRY_RUN: would place GTT OCO sl=%.4f target=%.4f for %s",
+                sl_price, target_price, order.tradingsymbol,
+            )
+
+        gtt = Gtt(
+            order_id=order.id,
+            kite_gtt_id=kite_gtt_id,
+            gtt_type="OCO",
+            exchange=order.exchange,
+            tradingsymbol=order.tradingsymbol,
+            sl_trigger=sl_price,
+            target_trigger=target_price,
+            sl_order_price=sl_price,
+            target_order_price=target_price,
+            last_price_at_placement=fill_price,
+            status="ACTIVE" if not settings.DRY_RUN else "DRY_RUN",
+            placed_at=now,
+            updated_at=now,
+            dry_run=settings.DRY_RUN,
+        )
+        session.add(gtt)
+        session.flush()  # get gtt.id
+
+        position.gtt_id = gtt.id
+        session.commit()
 
 
 # ── Lifespan ──────────────────────────────────────────────────────────────────
@@ -40,7 +222,7 @@ async def lifespan(app: FastAPI):
         from sqlalchemy.orm import sessionmaker
         engine = init_db(get_settings().DATABASE_URL)
         _SessionFactory = sessionmaker(bind=engine, expire_on_commit=False)
-    _watcher = OrderWatcher()
+    _watcher = OrderWatcher(on_entry_filled=_on_entry_filled)
     yield
 
 
@@ -126,34 +308,351 @@ def _process_alert(alert_id: int, alert_data: TradingViewAlert, settings: Settin
             return
 
         underlying = resolve_underlying(alert_data.tv_ticker, settings=settings)
+        now = datetime.now(IST)
+        product = settings.PRODUCT_TYPE.value
 
+        # ── NATURALGAS: near-month future entry ───────────────────────────────
         if underlying.is_natural_gas:
-            log.info("Alert %d: NG future path not wired in P0-e, deferred to P1", alert_id)
+            ok, reason = _check_risk_guards(session, settings)
+            if not ok:
+                log.warning("Alert %d: risk guard rejected NG entry: %s", alert_id, reason)
+                alert.processed = True
+                session.commit()
+                return
+
+            try:
+                resolved = resolve_expiry(
+                    underlying.name, session, instrument_type="FUT",
+                    segment=underlying.segment, now=now, settings=settings,
+                )
+            except NoEligibleExpiryError as exc:
+                log.error("Alert %d: NG expiry resolution failed: %s", alert_id, exc)
+                alert.processed = True
+                session.commit()
+                return
+
+            fut_instr = (
+                session.query(Instrument)
+                .filter(
+                    Instrument.name == underlying.name,
+                    Instrument.instrument_type == "FUT",
+                    Instrument.exchange == underlying.segment,
+                    Instrument.expiry == resolved.expiry_date,
+                )
+                .first()
+            )
+            if fut_instr is None:
+                log.error("Alert %d: NG FUT instrument not found for expiry %s", alert_id, resolved.expiry_date)
+                alert.processed = True
+                session.commit()
+                return
+
+            sl_frac = float(alert_data.sl_percent) if alert_data.sl_percent else settings.FUTURES_SL_PCT
+            entry_px = float(alert_data.entry_price) if alert_data.entry_price else 0.0
+            sl_distance = entry_px * sl_frac
+            target_distance = settings.RR_RATIO * sl_distance
+
+            loss_remaining = settings.effective_max_daily_loss - _realised_loss_today(session)
+            capital_risk = min(
+                settings.CAPITAL_PER_TRADE * settings.RISK_PER_TRADE_PCT / 100.0,
+                max(0.0, loss_remaining),
+            )
+            qty = (
+                floor(capital_risk / sl_distance / fut_instr.lot_size) * fut_instr.lot_size
+                if sl_distance > 0 else 0
+            )
+
+            if qty < fut_instr.lot_size:
+                log.warning("Alert %d: NG sizing — insufficient capital for 1 lot (qty=%d)", alert_id, qty)
+                alert.processed = True
+                session.commit()
+                return
+
+            kite_order_id = None
+            if not settings.DRY_RUN:
+                kite_client = get_session_manager().get_kite()
+                kite_order_id = place_entry(kite_client, fut_instr, "BUY", qty, "MARKET", product)
+            else:
+                log.info(
+                    "Alert %d: DRY_RUN — would place MARKET BUY %d lots %s (sl_dist=%.4f)",
+                    alert_id, qty // fut_instr.lot_size, fut_instr.tradingsymbol, sl_distance,
+                )
+
+            order = Order(
+                alert_id=alert_id,
+                kite_order_id=kite_order_id,
+                variety="regular",
+                exchange=fut_instr.exchange,
+                tradingsymbol=fut_instr.tradingsymbol,
+                transaction_type="BUY",
+                order_type="MARKET",
+                product=product,
+                quantity=qty,
+                status="PENDING" if not settings.DRY_RUN else "DRY_RUN",
+                placed_at=now,
+                updated_at=now,
+                dry_run=settings.DRY_RUN,
+            )
+            session.add(order)
+            session.flush()
+
+            if kite_order_id and _watcher is not None:
+                _pending_order_meta[kite_order_id] = {
+                    "instrument_type": "FUT",
+                    "sl_distance": sl_distance,
+                    "target_distance": target_distance,
+                    "order_db_id": order.id,
+                    "underlying": underlying.name,
+                    "dry_run": settings.DRY_RUN,
+                }
+                _watcher.watch_order(kite_order_id)
+
             alert.processed = True
             session.commit()
             return
 
-        if alert_data.action in (Action.EXIT, Action.TRAIL):
-            log.info("Alert %d: EXIT/TRAIL path not wired in P0-e, deferred to P1", alert_id)
+        # ── EXIT ──────────────────────────────────────────────────────────────
+        if alert_data.action == Action.EXIT:
+            ts = underlying.name
+            position = (
+                session.query(Position)
+                .outerjoin(ClosedTrade, Position.id == ClosedTrade.position_id)
+                .filter(Position.tradingsymbol == ts, ClosedTrade.id == None)  # noqa: E711
+                .first()
+            )
+            if position is None:
+                log.warning("Alert %d: EXIT — no open position found for %s", alert_id, ts)
+                alert.processed = True
+                session.commit()
+                return
+
+            gtt = (
+                session.query(Gtt)
+                .filter(Gtt.order_id == position.order_id, Gtt.status != "CANCELLED")
+                .first()
+            )
+            instrument = (
+                session.query(Instrument)
+                .filter(Instrument.tradingsymbol == ts, Instrument.exchange == position.exchange)
+                .first()
+            )
+
+            if not settings.DRY_RUN:
+                kite_client = get_session_manager().get_kite()
+                if gtt and gtt.kite_gtt_id:
+                    cancel_gtt(kite_client, gtt.kite_gtt_id)
+                if gtt:
+                    gtt.status = "CANCELLED"
+                if instrument:
+                    square_off(kite_client, instrument, position.quantity, product)
+            else:
+                log.info("Alert %d: DRY_RUN — would EXIT %s qty=%d", alert_id, ts, position.quantity)
+
+            ct = ClosedTrade(
+                position_id=position.id,
+                exchange=position.exchange,
+                tradingsymbol=position.tradingsymbol,
+                entry_premium=position.entry_premium,
+                exit_premium=0.0,
+                pnl=0.0,
+                exit_reason="MANUAL_EXIT",
+                opened_at=position.opened_at,
+                closed_at=now,
+            )
+            session.add(ct)
+            alert.processed = True
+            session.commit()
+            return
+
+        # ── TRAIL ─────────────────────────────────────────────────────────────
+        if alert_data.action == Action.TRAIL:
+            ts = underlying.name
+            position = (
+                session.query(Position)
+                .outerjoin(ClosedTrade, Position.id == ClosedTrade.position_id)
+                .filter(Position.tradingsymbol == ts, ClosedTrade.id == None)  # noqa: E711
+                .first()
+            )
+            if position is None:
+                log.warning("Alert %d: TRAIL — no open position for %s", alert_id, ts)
+                alert.processed = True
+                session.commit()
+                return
+
+            gtt = (
+                session.query(Gtt)
+                .filter(Gtt.order_id == position.order_id, Gtt.status == "ACTIVE")
+                .first()
+            )
+            instrument = (
+                session.query(Instrument)
+                .filter(Instrument.tradingsymbol == ts, Instrument.exchange == position.exchange)
+                .first()
+            )
+
+            entry_premium = float(position.entry_premium)
+            risk = entry_premium * settings.SL_PREMIUM_PCT
+            current_premium = float(alert_data.entry_price) if alert_data.entry_price else entry_premium
+
+            new_sl: float | None = None
+            if current_premium >= entry_premium + settings.TRAIL_RR * risk:
+                candidate_sl = current_premium - settings.TRAIL_DISTANCE_RR * risk
+                if candidate_sl > float(position.current_sl):
+                    new_sl = candidate_sl
+                    position.trail_active = True
+                    position.breakeven_moved = True
+                    position.current_sl = new_sl
+            elif (
+                current_premium >= entry_premium + settings.BREAKEVEN_RR * risk
+                and not position.breakeven_moved
+            ):
+                new_sl = entry_premium
+                position.breakeven_moved = True
+                position.current_sl = new_sl
+
+            if new_sl is not None and gtt is not None:
+                target_price = float(gtt.target_order_price)
+                if not settings.DRY_RUN and instrument is not None:
+                    kite_client = get_session_manager().get_kite()
+                    modify_gtt(
+                        kite_client,
+                        gtt.kite_gtt_id,
+                        sl_trigger=new_sl,
+                        sl_limit=new_sl,
+                        target_trigger=target_price,
+                        target_limit=target_price,
+                        last_price=current_premium,
+                        instrument=instrument,
+                        qty=position.quantity,
+                        product=product,
+                    )
+                else:
+                    log.info(
+                        "Alert %d: DRY_RUN TRAIL — would set SL=%.4f target=%.4f for %s",
+                        alert_id, new_sl, target_price, ts,
+                    )
+                gtt.sl_trigger = new_sl
+                gtt.sl_order_price = new_sl
+                gtt.modification_count += 1
+                gtt.updated_at = now
+
+            alert.processed = True
+            session.commit()
+            return
+
+        # ── Non-NG options entry (BUY → CE, SELL → PE) ───────────────────────
+        flag = "CE" if alert_data.action == Action.BUY else "PE"
+
+        ok, reason = _check_risk_guards(session, settings)
+        if not ok:
+            log.warning("Alert %d: risk guard rejected options entry: %s", alert_id, reason)
             alert.processed = True
             session.commit()
             return
 
         if settings.DRY_RUN:
             log.info(
-                "Alert %d: DRY_RUN — would place %s %s on %s (segment=%s)",
-                alert_id,
-                alert_data.action.value,
-                alert_data.tv_ticker,
+                "Alert %d: DRY_RUN — would place %s %s option for %s (segment=%s)",
+                alert_id, alert_data.action.value, flag, underlying.name, underlying.segment,
+            )
+            order = Order(
+                alert_id=alert_id,
+                kite_order_id=None,
+                variety="regular",
+                exchange=underlying.segment,
+                tradingsymbol=underlying.name,
+                transaction_type="BUY",
+                order_type="MARKET",
+                product=product,
+                quantity=0,
+                status="DRY_RUN",
+                placed_at=now,
+                updated_at=now,
+                dry_run=True,
+            )
+            session.add(order)
+            alert.processed = True
+            session.commit()
+            return
+
+        kite_client = get_session_manager().get_kite()
+        spot_quote = kite_client.quote(underlying.spot_source)
+        spot_ltp = float(spot_quote[underlying.spot_source]["last_price"])
+
+        try:
+            resolved = resolve_expiry(
+                underlying.name, session, instrument_type=flag,
+                segment=underlying.segment, now=now, settings=settings,
+            )
+        except NoEligibleExpiryError as exc:
+            log.error("Alert %d: expiry resolution failed: %s", alert_id, exc)
+            alert.processed = True
+            session.commit()
+            return
+
+        try:
+            selection = select_strike(
                 underlying.name,
-                underlying.segment,
+                resolved.expiry_date,
+                flag,
+                kite_client,
+                spot_ltp,
+                session,
+                alert_id=alert_id,
+                segment=underlying.segment,
+                target_delta=settings.TARGET_DELTA,
+                settings=settings,
+            )
+        except NoValidStrikeError as exc:
+            log.error("Alert %d: strike selection failed: %s", alert_id, exc)
+            alert.processed = True
+            session.commit()
+            return
+
+        lot_size = selection.instrument.lot_size
+        option_ltp = float(selection.option_ltp)
+        qty = floor(settings.CAPITAL_PER_TRADE / option_ltp / lot_size) * lot_size
+
+        if qty < lot_size:
+            log.warning(
+                "Alert %d: options sizing — 0 lots at ltp=%.4f CAPITAL=%.0f",
+                alert_id, option_ltp, settings.CAPITAL_PER_TRADE,
             )
             alert.processed = True
             session.commit()
             return
 
-        # Non-NG options entry — pipeline not yet wired
-        log.info("Alert %d: options pipeline not wired in P0-e, deferred to P1", alert_id)
+        kite_order_id = place_entry(
+            kite_client, selection.instrument, "BUY", qty, "MARKET", product
+        )
+
+        order = Order(
+            alert_id=alert_id,
+            kite_order_id=kite_order_id,
+            variety="regular",
+            exchange=selection.instrument.exchange,
+            tradingsymbol=selection.instrument.tradingsymbol,
+            transaction_type="BUY",
+            order_type="MARKET",
+            product=product,
+            quantity=qty,
+            status="PENDING",
+            placed_at=now,
+            updated_at=now,
+            dry_run=False,
+        )
+        session.add(order)
+        session.flush()
+
+        if kite_order_id and _watcher is not None:
+            _pending_order_meta[kite_order_id] = {
+                "instrument_type": flag,
+                "order_db_id": order.id,
+                "underlying": underlying.name,
+                "dry_run": False,
+            }
+            _watcher.watch_order(kite_order_id)
+
         alert.processed = True
         session.commit()
 
@@ -215,9 +714,12 @@ async def kite_callback(status: str = "unknown", request_token: str = "") -> Res
             detail=f"Kite callback failed: status={status!r}",
         )
     try:
-        get_session_manager().handle_callback(request_token)
+        access_token = get_session_manager().handle_callback(request_token)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Token exchange failed: {exc}")
+    settings = get_settings()
+    if _watcher is not None:
+        _watcher.start(api_key=settings.KITE_API_KEY, access_token=access_token)
     return Response(
         content="<html><body><h2>Login complete. You may close this window.</h2></body></html>",
         media_type="text/html",
@@ -264,7 +766,6 @@ async def positions(
     session: Session = Depends(get_db_session),
     _: None = Depends(_auth_guard),
 ) -> Response:
-    from app.storage import Position
     rows = session.query(Position).all()
     rows_html = "".join(
         f"<tr><td>{r.id}</td><td>{r.tradingsymbol}</td>"
@@ -286,7 +787,6 @@ async def history(
     session: Session = Depends(get_db_session),
     _: None = Depends(_auth_guard),
 ) -> Response:
-    from app.storage import ClosedTrade
     rows = session.query(ClosedTrade).order_by(ClosedTrade.closed_at.desc()).limit(50).all()
     rows_html = "".join(
         f"<tr><td>{r.id}</td><td>{r.tradingsymbol}</td>"

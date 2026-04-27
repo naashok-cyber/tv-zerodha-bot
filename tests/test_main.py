@@ -160,7 +160,7 @@ def test_webhook_unknown_field_returns_422(client) -> None:
 
 # ── Webhook: background task routing ─────────────────────────────────────────
 
-def test_webhook_naturalgas_logs_ng_stub(client, caplog) -> None:
+def test_webhook_naturalgas_routes_to_ng_branch(client, caplog) -> None:
     c, _ = client
     import logging
     with caplog.at_level(logging.INFO, logger="app.main"):
@@ -170,7 +170,8 @@ def test_webhook_naturalgas_logs_ng_stub(client, caplog) -> None:
             headers={"X-Forwarded-For": _TV_IP},
         )
     assert resp.status_code == 202
-    assert any("NG future path not wired" in r.message for r in caplog.records)
+    # NG branch is now wired; with no instruments in DB the expiry resolution fails gracefully
+    assert any("NG" in r.message or "NATURALGAS" in r.message for r in caplog.records)
 
 
 def test_webhook_dry_run_logs_dry_run_message(client, caplog) -> None:

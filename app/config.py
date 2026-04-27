@@ -107,6 +107,7 @@ class Settings(BaseSettings):
     DIVIDEND_YIELD_DEFAULT: float = 0.0     # q for all underlyings not in OVERRIDES
     DIVIDEND_YIELD_OVERRIDES: dict[str, float] = {}  # per-symbol q; e.g. {"INFY": 0.025}
     NATURAL_GAS_NAMES: list[str] = ["NATURALGAS", "NATGASMINI"]  # route to future, not option
+    FUTURES_SL_PCT: float = 0.005   # SL distance as fraction of price for NG near-month futures
 
     # ── Breakeven & Trail (on option premium; future price for NATURALGAS) ────
     # BUY CE at ₹100, SL_PREMIUM_PCT=30% → SL=₹70, risk=₹30:

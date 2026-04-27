@@ -170,6 +170,58 @@ def place_gtt_oco(
     return gtt_id
 
 
+def modify_gtt(
+    kite_client: Any,
+    gtt_id: int,
+    sl_trigger: float,
+    sl_limit: float,
+    target_trigger: float,
+    target_limit: float,
+    last_price: float,
+    instrument: Instrument,
+    qty: int,
+    product: str,
+    exit_side: str = "SELL",
+) -> int | None:
+    """Modify an existing GTT OCO order in place.
+
+    Uses the same OCO condition structure as place_gtt_oco.
+    Returns gtt_id on success.
+    """
+    order_dict = [
+        {
+            "exchange": instrument.exchange,
+            "tradingsymbol": instrument.tradingsymbol,
+            "transaction_type": exit_side,
+            "quantity": qty,
+            "order_type": "LIMIT",
+            "product": product,
+            "price": sl_limit,
+        },
+        {
+            "exchange": instrument.exchange,
+            "tradingsymbol": instrument.tradingsymbol,
+            "transaction_type": exit_side,
+            "quantity": qty,
+            "order_type": "LIMIT",
+            "product": product,
+            "price": target_limit,
+        },
+    ]
+    result: int = backoff_call(
+        kite_client.modify_gtt,
+        trigger_id=gtt_id,
+        trigger_type=kite_client.GTT_TYPE_OCO,
+        tradingsymbol=instrument.tradingsymbol,
+        exchange=instrument.exchange,
+        trigger_values=[sl_trigger, target_trigger],
+        last_price=last_price,
+        orders=order_dict,
+    )
+    log.info("Modified GTT %d for %s: sl=%.4f target=%.4f", gtt_id, instrument.tradingsymbol, sl_trigger, target_trigger)
+    return result
+
+
 def cancel_gtt(kite_client: Any, gtt_id: int) -> bool:
     """Cancel a GTT by id. Returns True on success."""
     backoff_call(kite_client.delete_gtt, gtt_id)
