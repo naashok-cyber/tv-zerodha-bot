@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import secrets as _secrets
 from datetime import date, datetime
+from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -38,11 +39,14 @@ def _s(**kwargs) -> Settings:
         _env_file=None,
         DRY_RUN=True,
         CAPITAL_PER_TRADE=10_000.0,
-        RISK_PER_TRADE_PCT=100.0,    # so capital_risk == CAPITAL_PER_TRADE (no RISK_PCT shrinkage)
+        RISK_PER_TRADE_PCT=100.0,    # legacy; kept for compatibility
+        RISK_PCT=Decimal("1.0"),     # 100% fraction so capital_risk == CAPITAL_PER_TRADE
         MAX_DAILY_LOSS_ABS=100_000.0,  # large enough to never constrain sizing in tests
+        MAX_DAILY_LOSS=Decimal("100000"),  # risk.py Decimal cap; large so it doesn't bind
         MAX_DAILY_LOSS_PCT=100.0,
         TOTAL_CAPITAL=100_000.0,
         FUTURES_SL_PCT=0.005,
+        SL_PERCENT=Decimal("0.005"),
         SL_PREMIUM_PCT=0.30,
         BREAKEVEN_RR=1.0,
         TRAIL_RR=1.5,
@@ -243,6 +247,7 @@ def test_ng_sizing_math():
     with (
         patch("app.main.resolve_expiry", return_value=resolved),
         patch("app.main.place_entry") as mock_pe,
+        patch("app.risk.daily_loss_remaining", return_value=Decimal("100000")),
     ):
         main_module._SessionFactory = factory
         _process_alert(alert_id, _make_ng_alert(entry_price=200.0), s)
@@ -299,6 +304,8 @@ def test_ng_live_calls_place_entry_with_correct_args():
         patch("app.main.resolve_expiry", return_value=resolved),
         patch("app.main.place_entry", return_value="ORD_NG") as mock_pe,
         patch("app.main.get_session_manager") as mock_sm,
+        patch("app.risk.daily_loss_remaining", return_value=Decimal("100000")),
+        patch("app.risk.check_risk_gates"),  # skip gates for live-path test
     ):
         mock_sm.return_value.get_kite.return_value = mock_kite
         main_module._SessionFactory = factory

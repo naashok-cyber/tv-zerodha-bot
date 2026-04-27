@@ -15,19 +15,32 @@ class EntryFilledEvent:
     data: dict = field(default_factory=dict)
 
 
+@dataclass
+class GttFilledEvent:
+    kite_order_id: str
+    tradingsymbol: str
+    fill_price: float
+    fill_qty: int
+    transaction_type: str   # "SELL" for long exits, "BUY" for short covers
+    data: dict = field(default_factory=dict)
+
+
 class OrderWatcher:
     """Wraps KiteTicker to watch for order postbacks and tick data.
 
     Inject a ticker_factory to avoid real websocket connections in tests.
     Inject on_entry_filled to handle entry fills without coupling to orders.py.
+    Inject on_gtt_filled to handle GTT exit fills.
     """
 
     def __init__(
         self,
         on_entry_filled: Callable[[EntryFilledEvent], None] | None = None,
+        on_gtt_filled: Callable[[GttFilledEvent], None] | None = None,
         ticker_factory: Callable[..., Any] | None = None,
     ) -> None:
         self._on_entry_filled = on_entry_filled
+        self._on_gtt_filled = on_gtt_filled
         self._ticker_factory = ticker_factory or _default_ticker_factory
         self._ticker: Any = None
         self._subscribed_tokens: set[int] = set()
@@ -108,6 +121,18 @@ class OrderWatcher:
             )
             if self._on_entry_filled is not None:
                 self._on_entry_filled(event)
+        elif status == "COMPLETE" and data.get("transaction_type") == "SELL":
+            # GTT exit fill — any COMPLETE SELL not tracked as an entry
+            event = GttFilledEvent(
+                kite_order_id=order_id,
+                tradingsymbol=str(data.get("tradingsymbol", "")),
+                fill_price=float(data.get("average_price", 0.0)),
+                fill_qty=int(data.get("filled_quantity", 0)),
+                transaction_type="SELL",
+                data=data,
+            )
+            if self._on_gtt_filled is not None:
+                self._on_gtt_filled(event)
 
     def on_ticks(self, ws: Any, ticks: list[dict]) -> None:
         log.debug("Received %d ticks (MTM stub)", len(ticks))

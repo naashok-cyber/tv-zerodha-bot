@@ -5,6 +5,7 @@ import logging
 import secrets
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from decimal import Decimal
 from math import floor
 from typing import Any
 
@@ -14,6 +15,7 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
+import app.risk as risk
 from app.auth import HMACError, IPBlockedError, RateLimitError, check_ip, check_rate_limit, verify_hmac
 from app.config import IST, Settings, get_settings
 from app.expiry_resolver import NoEligibleExpiryError, resolve_expiry
@@ -22,7 +24,7 @@ from app.orders import cancel_gtt, modify_gtt, place_entry, place_gtt_oco, squar
 from app.storage import Alert, ClosedTrade, Gtt, Instrument, Order, Position, init_db
 from app.strike_selector import NoValidStrikeError, select_strike
 from app.symbol_mapper import resolve_underlying
-from app.watcher import EntryFilledEvent, OrderWatcher
+from app.watcher import EntryFilledEvent, GttFilledEvent, OrderWatcher
 from app.webhook_models import Action, TradingViewAlert
 
 log = logging.getLogger(__name__)
@@ -149,9 +151,9 @@ def _on_entry_filled(event: EntryFilledEvent) -> None:
             sl_price = fill_price - sl_distance
             target_price = fill_price + target_distance
         else:
-            risk = fill_price * settings.SL_PREMIUM_PCT
-            sl_price = fill_price - risk
-            target_price = fill_price + settings.RR_RATIO * risk
+            sl_risk = fill_price * settings.SL_PREMIUM_PCT
+            sl_price = fill_price - sl_risk
+            target_price = fill_price + settings.RR_RATIO * sl_risk
 
         position = Position(
             order_id=order.id,
@@ -213,6 +215,50 @@ def _on_entry_filled(event: EntryFilledEvent) -> None:
         session.commit()
 
 
+# ── GttFilledEvent callback ───────────────────────────────────────────────────
+
+def _on_gtt_filled(event: GttFilledEvent) -> None:
+    """Consume a GTT exit fill: compute PnL and persist via risk.record_trade_result."""
+    if _SessionFactory is None:
+        log.error("_on_gtt_filled fired but _SessionFactory is None")
+        return
+    with _SessionFactory() as session:
+        position = (
+            session.query(Position)
+            .outerjoin(ClosedTrade, Position.id == ClosedTrade.position_id)
+            .filter(
+                Position.tradingsymbol == event.tradingsymbol,
+                ClosedTrade.id == None,  # noqa: E711
+            )
+            .first()
+        )
+        if position is None:
+            log.warning("_on_gtt_filled: no open position for %s", event.tradingsymbol)
+            return
+
+        entry_order = session.query(Order).filter(Order.id == position.order_id).first()
+        if entry_order is None:
+            log.error("_on_gtt_filled: no Order for position %d", position.id)
+            return
+
+        entry_price = Decimal(str(position.entry_premium))
+        fill_price = Decimal(str(event.fill_price))
+        qty = Decimal(str(event.fill_qty))
+
+        if event.transaction_type == "SELL":
+            pnl = (fill_price - entry_price) * qty
+        else:
+            pnl = -(fill_price - entry_price) * qty
+
+        now = datetime.now(IST)
+        risk.record_trade_result(session, entry_order.kite_order_id, pnl, now)
+        session.commit()
+        log.info(
+            "_on_gtt_filled: %s pnl=%.2f order=%s",
+            event.tradingsymbol, float(pnl), entry_order.kite_order_id,
+        )
+
+
 # ── Lifespan ──────────────────────────────────────────────────────────────────
 
 @asynccontextmanager
@@ -222,7 +268,7 @@ async def lifespan(app: FastAPI):
         from sqlalchemy.orm import sessionmaker
         engine = init_db(get_settings().DATABASE_URL)
         _SessionFactory = sessionmaker(bind=engine, expire_on_commit=False)
-    _watcher = OrderWatcher(on_entry_filled=_on_entry_filled)
+    _watcher = OrderWatcher(on_entry_filled=_on_entry_filled, on_gtt_filled=_on_gtt_filled)
     yield
 
 
@@ -311,15 +357,17 @@ def _process_alert(alert_id: int, alert_data: TradingViewAlert, settings: Settin
         now = datetime.now(IST)
         product = settings.PRODUCT_TYPE.value
 
-        # ── NATURALGAS: near-month future entry ───────────────────────────────
-        if underlying.is_natural_gas:
-            ok, reason = _check_risk_guards(session, settings)
-            if not ok:
-                log.warning("Alert %d: risk guard rejected NG entry: %s", alert_id, reason)
+        if not settings.DRY_RUN:
+            try:
+                risk.check_risk_gates(session, now)
+            except risk.RiskHaltError as exc:
+                log.warning("Alert %d: risk halt — %s", alert_id, exc.reason)
                 alert.processed = True
                 session.commit()
                 return
 
+        # ── NATURALGAS: near-month future entry ───────────────────────────────
+        if underlying.is_natural_gas:
             try:
                 resolved = resolve_expiry(
                     underlying.name, session, instrument_type="FUT",
@@ -347,20 +395,18 @@ def _process_alert(alert_id: int, alert_data: TradingViewAlert, settings: Settin
                 session.commit()
                 return
 
-            sl_frac = float(alert_data.sl_percent) if alert_data.sl_percent else settings.FUTURES_SL_PCT
-            entry_px = float(alert_data.entry_price) if alert_data.entry_price else 0.0
-            sl_distance = entry_px * sl_frac
+            sl_frac = Decimal(str(alert_data.sl_percent)) if alert_data.sl_percent else settings.SL_PERCENT
+            entry_px_d = Decimal(str(alert_data.entry_price)) if alert_data.entry_price else Decimal("0")
+            sl_distance_d = entry_px_d * sl_frac
+            sl_distance = float(sl_distance_d)
             target_distance = settings.RR_RATIO * sl_distance
 
-            loss_remaining = settings.effective_max_daily_loss - _realised_loss_today(session)
+            daily_remaining = risk.daily_loss_remaining(session, now)
             capital_risk = min(
-                settings.CAPITAL_PER_TRADE * settings.RISK_PER_TRADE_PCT / 100.0,
-                max(0.0, loss_remaining),
+                Decimal(str(settings.CAPITAL_PER_TRADE)) * settings.RISK_PCT,
+                daily_remaining,
             )
-            qty = (
-                floor(capital_risk / sl_distance / fut_instr.lot_size) * fut_instr.lot_size
-                if sl_distance > 0 else 0
-            )
+            qty = risk.compute_futures_qty(capital_risk, sl_distance_d, Decimal(str(fut_instr.lot_size)))
 
             if qty < fut_instr.lot_size:
                 log.warning("Alert %d: NG sizing — insufficient capital for 1 lot (qty=%d)", alert_id, qty)
@@ -491,19 +537,19 @@ def _process_alert(alert_id: int, alert_data: TradingViewAlert, settings: Settin
             )
 
             entry_premium = float(position.entry_premium)
-            risk = entry_premium * settings.SL_PREMIUM_PCT
+            sl_risk = entry_premium * settings.SL_PREMIUM_PCT
             current_premium = float(alert_data.entry_price) if alert_data.entry_price else entry_premium
 
             new_sl: float | None = None
-            if current_premium >= entry_premium + settings.TRAIL_RR * risk:
-                candidate_sl = current_premium - settings.TRAIL_DISTANCE_RR * risk
+            if current_premium >= entry_premium + settings.TRAIL_RR * sl_risk:
+                candidate_sl = current_premium - settings.TRAIL_DISTANCE_RR * sl_risk
                 if candidate_sl > float(position.current_sl):
                     new_sl = candidate_sl
                     position.trail_active = True
                     position.breakeven_moved = True
                     position.current_sl = new_sl
             elif (
-                current_premium >= entry_premium + settings.BREAKEVEN_RR * risk
+                current_premium >= entry_premium + settings.BREAKEVEN_RR * sl_risk
                 and not position.breakeven_moved
             ):
                 new_sl = entry_premium
@@ -542,13 +588,6 @@ def _process_alert(alert_id: int, alert_data: TradingViewAlert, settings: Settin
 
         # ── Non-NG options entry (BUY → CE, SELL → PE) ───────────────────────
         flag = "CE" if alert_data.action == Action.BUY else "PE"
-
-        ok, reason = _check_risk_guards(session, settings)
-        if not ok:
-            log.warning("Alert %d: risk guard rejected options entry: %s", alert_id, reason)
-            alert.processed = True
-            session.commit()
-            return
 
         if settings.DRY_RUN:
             log.info(
@@ -611,7 +650,11 @@ def _process_alert(alert_id: int, alert_data: TradingViewAlert, settings: Settin
 
         lot_size = selection.instrument.lot_size
         option_ltp = float(selection.option_ltp)
-        qty = floor(settings.CAPITAL_PER_TRADE / option_ltp / lot_size) * lot_size
+        qty = risk.compute_option_qty(
+            Decimal(str(settings.CAPITAL_PER_TRADE)),
+            Decimal(str(option_ltp)),
+            Decimal(str(lot_size)),
+        )
 
         if qty < lot_size:
             log.warning(

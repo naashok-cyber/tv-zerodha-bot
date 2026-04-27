@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from decimal import Decimal
 from enum import Enum
 from functools import lru_cache
 from zoneinfo import ZoneInfo
@@ -108,6 +109,11 @@ class Settings(BaseSettings):
     DIVIDEND_YIELD_OVERRIDES: dict[str, float] = {}  # per-symbol q; e.g. {"INFY": 0.025}
     NATURAL_GAS_NAMES: list[str] = ["NATURALGAS", "NATGASMINI"]  # route to future, not option
     FUTURES_SL_PCT: float = 0.005   # SL distance as fraction of price for NG near-month futures
+
+    # ── Risk module (risk.py) — Decimal for monetary precision ───────────────
+    RISK_PCT: Decimal = Decimal("0.01")        # 1% per-trade risk fraction (futures sizing)
+    MAX_DAILY_LOSS: Decimal = Decimal("2000")  # absolute ₹ daily loss cap for risk.py
+    SL_PERCENT: Decimal = Decimal("0.005")     # 0.5% futures SL distance fraction (risk.py default)
 
     # ── Breakeven & Trail (on option premium; future price for NATURALGAS) ────
     # BUY CE at ₹100, SL_PREMIUM_PCT=30% → SL=₹70, risk=₹30:
