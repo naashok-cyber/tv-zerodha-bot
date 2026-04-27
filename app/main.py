@@ -16,11 +16,13 @@ from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
 import app.risk as risk
+import app.state as state
 from app.auth import HMACError, IPBlockedError, RateLimitError, check_ip, check_rate_limit, verify_hmac
 from app.config import IST, Settings, get_settings
 from app.expiry_resolver import NoEligibleExpiryError, resolve_expiry
 from app.kite_session import get_session_manager
 from app.orders import cancel_gtt, modify_gtt, place_entry, place_gtt_oco, square_off
+from app.scheduler import daily_session_check, get_last_checked_at, make_scheduler
 from app.storage import Alert, ClosedTrade, Gtt, Instrument, Order, Position, init_db
 from app.strike_selector import NoValidStrikeError, select_strike
 from app.symbol_mapper import resolve_underlying
@@ -36,6 +38,8 @@ _idempotency_cache: TTLCache = TTLCache(maxsize=10_000, ttl=86_400)
 
 # Keyed by kite_order_id; carries sl/target distances for the EntryFilledEvent callback.
 _pending_order_meta: dict[str, dict] = {}
+
+_scheduler: Any = None
 
 
 # ── Risk guard helpers ────────────────────────────────────────────────────────
@@ -263,13 +267,18 @@ def _on_gtt_filled(event: GttFilledEvent) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _SessionFactory, _watcher
+    global _SessionFactory, _watcher, _scheduler
     if _SessionFactory is None:
         from sqlalchemy.orm import sessionmaker
         engine = init_db(get_settings().DATABASE_URL)
         _SessionFactory = sessionmaker(bind=engine, expire_on_commit=False)
     _watcher = OrderWatcher(on_entry_filled=_on_entry_filled, on_gtt_filled=_on_gtt_filled)
+    _scheduler = make_scheduler()
+    _scheduler.start()
+    daily_session_check(now=datetime.now(IST))
     yield
+    if _scheduler is not None:
+        _scheduler.shutdown(wait=False)
 
 
 app = FastAPI(title="tv-zerodha-bot", version="0.1.0", lifespan=lifespan)
@@ -356,6 +365,12 @@ def _process_alert(alert_id: int, alert_data: TradingViewAlert, settings: Settin
         underlying = resolve_underlying(alert_data.tv_ticker, settings=settings)
         now = datetime.now(IST)
         product = settings.PRODUCT_TYPE.value
+
+        if state.SESSION_INVALID and not settings.DRY_RUN:
+            log.warning("Alert %d: order blocked — session invalid, manual login required", alert_id)
+            alert.processed = True
+            session.commit()
+            return
 
         if not settings.DRY_RUN:
             try:
@@ -867,3 +882,13 @@ async def status_page(
         ),
         media_type="text/html",
     )
+
+
+@app.get("/auth/status")
+async def auth_status(settings: Settings = Depends(get_current_settings)) -> dict:
+    checked_at = get_last_checked_at()
+    return {
+        "session_valid": not state.SESSION_INVALID,
+        "dry_run": settings.DRY_RUN,
+        "checked_at": checked_at.isoformat() if checked_at is not None else None,
+    }

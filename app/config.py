@@ -126,6 +126,8 @@ class Settings(BaseSettings):
     TRAIL_DISTANCE_RR: float = 0.5
 
     # ── Scheduler (IST, "HH:MM") ──────────────────────────────────────────────
+    SCHEDULER_HOUR_IST: int = 8    # hour for daily_session_check cron job
+    SCHEDULER_MINUTE_IST: int = 0  # minute for daily_session_check cron job
     LOGIN_REMINDER_TIME: str = "07:30"
     INSTRUMENTS_REFRESH_TIME: str = "08:30"
     NSE_SQUAREOFF_TIME: str = "15:15"   # kept for future MIS support; NRML has no auto-squareoff

@@ -59,6 +59,11 @@ greenlet==3.4.0
 typing-inspection==0.4.2
 typing_extensions==4.15.0
 
+# Scheduler
+apscheduler==3.10.4
+pytz==2026.1.post1
+tzlocal==5.3.1
+
 # Options / Greeks
 scipy==1.17.1
 py_vollib==1.0.1
