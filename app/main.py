@@ -870,6 +870,11 @@ async def status_page(
     )
 
 
+@app.get("/health")
+def health() -> dict:
+    return {"status": "ok"}
+
+
 @app.get("/auth/status")
 async def auth_status(settings: Settings = Depends(get_current_settings)) -> dict:
     checked_at = get_last_checked_at()

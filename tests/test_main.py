@@ -223,3 +223,10 @@ def test_dashboard_returns_200(client) -> None:
     resp = c.get("/dashboard")
     assert resp.status_code == 200
     assert "Recent Alerts" in resp.text
+
+
+def test_health_returns_ok(client) -> None:
+    c, _ = client
+    resp = c.get("/health")
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "ok"}
