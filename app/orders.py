@@ -157,7 +157,7 @@ def place_gtt_oco(
         },
     ]
 
-    gtt_id: int = backoff_call(
+    raw = backoff_call(
         kite_client.place_gtt,
         trigger_type=kite_client.GTT_TYPE_OCO,
         tradingsymbol=instrument.tradingsymbol,
@@ -166,6 +166,8 @@ def place_gtt_oco(
         last_price=last_price_r,
         orders=order_dict,
     )
+    # Kite returns either an int or {"trigger_id": <int>} depending on SDK version.
+    gtt_id: int = raw["trigger_id"] if isinstance(raw, dict) else int(raw)
     log.info("Placed GTT OCO %d for %s", gtt_id, instrument.tradingsymbol)
     return gtt_id
 

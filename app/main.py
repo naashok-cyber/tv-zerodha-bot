@@ -279,6 +279,21 @@ async def lifespan(app: FastAPI):
     _scheduler = make_scheduler(session_factory=_SessionFactory)
     _scheduler.start()
     daily_session_check(now=datetime.now(IST))
+    # Start watcher immediately if a valid token is already stored, so fill
+    # events are not missed after a container restart (the watcher is also
+    # started in /kite/callback for fresh OAuth logins).
+    if not state.SESSION_INVALID:
+        try:
+            result = get_session_manager()._load_token()
+            if result is not None:
+                _stored_token, _ = result
+                _watcher.start(
+                    api_key=get_settings().KITE_API_KEY,
+                    access_token=_stored_token,
+                )
+                log.info("OrderWatcher started at startup with stored token")
+        except Exception as _exc:
+            log.warning("Could not start OrderWatcher at startup: %s", _exc)
     refresh_instruments_job(_SessionFactory)
     yield
     if _scheduler is not None:
