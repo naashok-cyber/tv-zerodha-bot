@@ -14,7 +14,8 @@ from sqlalchemy.orm import Session
 from app.config import Settings, get_settings
 from app.storage import Instrument
 
-_KITE_INSTRUMENTS_URL = "https://api.kite.trade/instruments"
+_KITE_INSTRUMENTS_BASE_URL = "https://api.kite.trade/instruments"
+_KITE_EXCHANGES = ("NSE", "NFO", "MCX")
 
 # Single-character month encoding used in Kite weekly option tradingsymbols.
 _MONTH_CHAR: dict[str, int] = {
@@ -116,14 +117,16 @@ def refresh_instruments(
     settings: Settings | None = None,
     _download_fn: Callable[[str], str] | None = None,
 ) -> int:
-    """Download the Kite instruments CSV, truncate and reload the instruments table.
+    """Download NSE/NFO/MCX instruments from Kite, truncate and reload the table.
 
     Returns the number of rows loaded. Safe to call repeatedly (idempotent).
     Pass _download_fn in tests to avoid network I/O.
     """
     fn = _download_fn or _download_csv
-    csv_text = fn(_KITE_INSTRUMENTS_URL)
-    rows = _parse_instruments(csv_text)
+    rows: list[dict] = []
+    for exchange in _KITE_EXCHANGES:
+        csv_text = fn(f"{_KITE_INSTRUMENTS_BASE_URL}/{exchange}")
+        rows.extend(_parse_instruments(csv_text))
     session.query(Instrument).delete(synchronize_session=False)
     for row in rows:
         session.add(Instrument(**row))
