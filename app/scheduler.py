@@ -6,6 +6,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.background import BackgroundScheduler
+from sqlalchemy.orm import sessionmaker
 
 from app import state
 from app.config import IST, get_settings
@@ -37,7 +38,19 @@ def get_last_checked_at() -> datetime | None:
     return _last_checked_at
 
 
-def make_scheduler(settings: Any = None) -> BackgroundScheduler:
+def refresh_instruments_job(session_factory: Any) -> None:
+    """Download Kite instruments CSV and reload the instruments table."""
+    from app.symbol_mapper import refresh_instruments
+    from app.storage import init_db
+    try:
+        with session_factory() as session:
+            n = refresh_instruments(session)
+            log.info("[scheduler] instruments refreshed: %d rows", n)
+    except Exception as exc:
+        log.error("[scheduler] instrument refresh failed: %s", exc)
+
+
+def make_scheduler(settings: Any = None, session_factory: Any = None) -> BackgroundScheduler:
     if settings is None:
         settings = get_settings()
     scheduler = BackgroundScheduler(timezone=ZoneInfo("Asia/Kolkata"))
@@ -48,4 +61,14 @@ def make_scheduler(settings: Any = None) -> BackgroundScheduler:
         minute=settings.SCHEDULER_MINUTE_IST,
         id="daily_session_check",
     )
+    if session_factory is not None:
+        # Refresh instruments daily at 8:30 AM IST, before market open.
+        scheduler.add_job(
+            refresh_instruments_job,
+            trigger="cron",
+            hour=8,
+            minute=30,
+            args=[session_factory],
+            id="daily_instrument_refresh",
+        )
     return scheduler

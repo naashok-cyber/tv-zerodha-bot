@@ -25,7 +25,7 @@ from app.config import IST, Settings, get_settings
 from app.expiry_resolver import NoEligibleExpiryError, resolve_expiry
 from app.kite_session import get_session_manager
 from app.orders import cancel_gtt, modify_gtt, place_entry, place_gtt_oco, square_off
-from app.scheduler import daily_session_check, get_last_checked_at, make_scheduler
+from app.scheduler import daily_session_check, get_last_checked_at, make_scheduler, refresh_instruments_job
 from app.storage import Alert, AppError, ClosedTrade, Gtt, Instrument, Order, Position, init_db
 from app.strike_selector import NoValidStrikeError, select_strike
 from app.symbol_mapper import resolve_underlying
@@ -276,9 +276,10 @@ async def lifespan(app: FastAPI):
         engine = init_db(get_settings().DATABASE_URL)
         _SessionFactory = sessionmaker(bind=engine, expire_on_commit=False)
     _watcher = OrderWatcher(on_entry_filled=_on_entry_filled, on_gtt_filled=_on_gtt_filled)
-    _scheduler = make_scheduler()
+    _scheduler = make_scheduler(session_factory=_SessionFactory)
     _scheduler.start()
     daily_session_check(now=datetime.now(IST))
+    refresh_instruments_job(_SessionFactory)
     yield
     if _scheduler is not None:
         _scheduler.shutdown(wait=False)
