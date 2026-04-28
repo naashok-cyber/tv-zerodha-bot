@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import logging
 import secrets
+import traceback
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -10,7 +12,10 @@ from typing import Any
 
 from cachetools import TTLCache
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, Response
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 import app.risk as risk
@@ -21,7 +26,7 @@ from app.expiry_resolver import NoEligibleExpiryError, resolve_expiry
 from app.kite_session import get_session_manager
 from app.orders import cancel_gtt, modify_gtt, place_entry, place_gtt_oco, square_off
 from app.scheduler import daily_session_check, get_last_checked_at, make_scheduler
-from app.storage import Alert, ClosedTrade, Gtt, Instrument, Order, Position, init_db
+from app.storage import Alert, AppError, ClosedTrade, Gtt, Instrument, Order, Position, init_db
 from app.strike_selector import NoValidStrikeError, select_strike
 from app.symbol_mapper import resolve_underlying
 from app.schemas import AlertPayload
@@ -283,6 +288,23 @@ app = FastAPI(title="tv-zerodha-bot", version="0.1.0", lifespan=lifespan)
 _security = HTTPBasic(auto_error=False)
 
 
+@app.exception_handler(RequestValidationError)
+async def _validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+    body = await request.body()
+    log.error(
+        "422 validation error on %s | content-type=%r | body=%r | errors=%s",
+        request.url.path,
+        request.headers.get("content-type", "<missing>"),
+        body[:500],
+        exc.errors(),
+    )
+    safe_errors = [
+        {**e, "input": e["input"].decode("utf-8", errors="replace") if isinstance(e.get("input"), bytes) else e.get("input")}
+        for e in exc.errors()
+    ]
+    return JSONResponse(status_code=422, content={"detail": safe_errors})
+
+
 # ── Dependencies ──────────────────────────────────────────────────────────────
 
 def get_current_settings() -> Settings:
@@ -353,6 +375,23 @@ def _build_alert_row(payload: AlertPayload, raw: str, ikey: str) -> Alert:
 
 # ── Background task ───────────────────────────────────────────────────────────
 
+def _fail_alert(session: Any, alert: Alert, error_type: str, exc: BaseException) -> None:
+    """Persist an AppError row, leave alert.processed=False, and log with traceback.
+
+    Caller must commit() after this returns — keeps commit ownership at the call site.
+    alert.processed is intentionally NOT set to True so the /dashboard shows the alert
+    as unhandled and operators know it needs attention.
+    """
+    log.error("Alert %d [%s]: %s", alert.id, error_type, exc, exc_info=True)
+    session.add(AppError(
+        alert_id=alert.id,
+        error_type=error_type,
+        message=str(exc),
+        traceback=traceback.format_exc(),
+        occurred_at=datetime.now(IST),
+    ))
+
+
 def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) -> None:
     with _SessionFactory() as session:
         alert = session.get(Alert, alert_id)
@@ -387,8 +426,7 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
                     segment=underlying.segment, now=now, settings=settings,
                 )
             except NoEligibleExpiryError as exc:
-                log.error("Alert %d: NG expiry resolution failed: %s", alert_id, exc)
-                alert.processed = True
+                _fail_alert(session, alert, "NoEligibleExpiryError", exc)
                 session.commit()
                 return
 
@@ -637,8 +675,7 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
                 segment=underlying.segment, now=now, settings=settings,
             )
         except NoEligibleExpiryError as exc:
-            log.error("Alert %d: expiry resolution failed: %s", alert_id, exc)
-            alert.processed = True
+            _fail_alert(session, alert, "NoEligibleExpiryError", exc)
             session.commit()
             return
 
@@ -656,8 +693,7 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
                 settings=settings,
             )
         except NoValidStrikeError as exc:
-            log.error("Alert %d: strike selection failed: %s", alert_id, exc)
-            alert.processed = True
+            _fail_alert(session, alert, "NoValidStrikeError", exc)
             session.commit()
             return
 
@@ -717,7 +753,6 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
 
 @app.post("/webhook", status_code=202)
 async def webhook(
-    payload: AlertPayload,
     request: Request,
     background_tasks: BackgroundTasks,
     settings: Settings = Depends(get_current_settings),
@@ -735,6 +770,28 @@ async def webhook(
     except RateLimitError:
         raise HTTPException(status_code=429, detail="Rate limit exceeded")
 
+    # TradingView sends Content-Type: text/plain even for JSON bodies, so we
+    # must parse manually instead of relying on FastAPI's automatic JSON binding.
+    raw_body = await request.body()
+    try:
+        payload = AlertPayload.model_validate(json.loads(raw_body))
+    except json.JSONDecodeError as exc:
+        log.error(
+            "webhook parse error | content-type=%r | body=%r | error=%s",
+            request.headers.get("content-type", "<missing>"),
+            raw_body[:500],
+            exc,
+        )
+        raise HTTPException(status_code=422, detail=f"Invalid JSON: {exc}")
+    except Exception as exc:
+        log.error(
+            "webhook validation error | content-type=%r | body=%r | error=%s",
+            request.headers.get("content-type", "<missing>"),
+            raw_body[:500],
+            exc,
+        )
+        raise HTTPException(status_code=422, detail=str(exc))
+
     ikey = payload.alert_id
     if ikey in _idempotency_cache:
         return {"status": "duplicate"}
@@ -742,8 +799,12 @@ async def webhook(
 
     alert_row = _build_alert_row(payload, payload.model_dump_json(), ikey)
     session.add(alert_row)
-    session.commit()
-    session.refresh(alert_row)
+    try:
+        session.commit()
+        session.refresh(alert_row)
+    except IntegrityError:
+        session.rollback()
+        return {"status": "duplicate"}
 
     background_tasks.add_task(_process_alert, alert_row.id, payload, settings)
 
@@ -764,6 +825,9 @@ async def kite_callback(status: str = "unknown", request_token: str = "") -> Res
     settings = get_settings()
     if _watcher is not None:
         _watcher.start(api_key=settings.KITE_API_KEY, access_token=access_token)
+    # Validate the fresh token immediately so SESSION_INVALID is cleared and
+    # checked_at reflects the actual login time, not the stale startup check.
+    daily_session_check()
     return Response(
         content="<html><body><h2>Login complete. You may close this window.</h2></body></html>",
         media_type="text/html",

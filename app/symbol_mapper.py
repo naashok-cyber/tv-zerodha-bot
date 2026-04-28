@@ -31,6 +31,18 @@ _MONTH_ABBR: dict[str, int] = {
 
 _INDEX_NAMES = frozenset({"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"})
 
+# MCX commodities that should route to MCX segment even without an "MCX:" exchange prefix.
+# NATURALGAS/NATGASMINI are kept separate (routed to near-month futures via is_natural_gas).
+# Add any new MCX commodity here to avoid it falling through to the NSE equity path.
+_MCX_COMMODITY_NAMES = frozenset({
+    "CRUDEOIL", "CRUDEOILM",
+    "GOLD", "GOLDM", "GOLDGUINEA", "GOLDPETAL",
+    "SILVER", "SILVERM", "SILVERMIC",
+    "COPPER", "LEAD", "LEADMINI", "ZINC", "ZINCMINI",
+    "ALUMINIUM", "NICKEL",
+    "MENTHAOIL", "COTTON", "CASTORSEED",
+})
+
 _INDEX_SPOT: dict[str, str] = {
     "NIFTY": "NSE:NIFTY 50",
     "BANKNIFTY": "NSE:NIFTY BANK",
@@ -227,7 +239,7 @@ def resolve_underlying(
             spot_source=_INDEX_SPOT[name],
         )
 
-    if exchange_prefix == "MCX" or is_natural_gas:
+    if exchange_prefix == "MCX" or is_natural_gas or name in _MCX_COMMODITY_NAMES:
         return Underlying(
             name=name,
             segment="MCX",

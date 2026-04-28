@@ -6,7 +6,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
-from app.config import IST
+from app.config import IST, UTC
 
 
 class AlertPayload(BaseModel):
@@ -48,7 +48,8 @@ class AlertPayload(BaseModel):
     @classmethod
     def convert_to_ist(cls, v: datetime) -> datetime:
         if v.tzinfo is None:
-            raise ValueError("timestamp must be timezone-aware")
+            # TradingView {{time}} sends UTC without a timezone suffix; treat as UTC.
+            v = v.replace(tzinfo=UTC)
         return v.astimezone(IST)
 
     @model_validator(mode="after")

@@ -47,14 +47,31 @@
 // =============================================================================
 
 
-// ── BUY (enter long via CE option or NATURALGAS future) ─────────────────────
+// ── PASTE THESE DIRECTLY INTO TRADINGVIEW'S ALERT MESSAGE BOX ───────────────
+//
+// {{ticker}}    → TradingView fills in the bare symbol (NIFTY, CRUDEOIL, etc.)
+//                 — no exchange prefix, so it works for any chart without editing.
+//                 resolve_underlying() in symbol_mapper.py also handles the
+//                 "NSE:NIFTY" format if you use {{exchange}}:{{ticker}} instead.
+//
+// {{close}}     → bar close price (bare number, no quotes — correct for JSON)
+// {{interval}}  → chart timeframe in minutes ("5", "15", "60", "D", etc.)
+// {{timenow}}   → current UTC time as Unix ms integer — used as idempotency key
+//                 (string field in the schema, so the quotes below are correct)
+// {{time}}      → bar-open UTC time; TradingView formats this as ISO-8601 with
+//                 timezone (e.g. 2024-04-28T07:15:00Z) which Pydantic accepts.
+//                 It is bar-open time, not wall-clock time; for wall-clock
+//                 accuracy use the Pine Script alert() approach at the bottom.
+
+
+// ── BUY (enter long: CE option for indices/stocks, near-month FUT for NATURALGAS) ──
 {
     "symbol": "{{ticker}}",
     "action": "BUY",
     "price": {{close}},
     "timeframe": "{{interval}}",
     "alert_id": "{{timenow}}",
-    "timestamp": "{{timenow}}"
+    "timestamp": "{{time}}"
 }
 
 
@@ -65,7 +82,7 @@
 //     "price": {{close}},
 //     "timeframe": "{{interval}}",
 //     "alert_id": "{{timenow}}",
-//     "timestamp": "{{timenow}}"
+//     "timestamp": "{{time}}"
 // }
 
 
@@ -76,13 +93,13 @@
 //     "price": {{close}},
 //     "timeframe": "{{interval}}",
 //     "alert_id": "{{timenow}}",
-//     "timestamp": "{{timenow}}"
+//     "timestamp": "{{time}}"
 // }
 
 
 // ── TRAIL (bar-close trail check; premium field is REQUIRED) ─────────────────
-// {{close}} here should be the current option premium, not the underlying price.
-// Chart the option contract directly when using this template.
+// Chart the option contract directly — {{close}} is the OPTION premium here,
+// not the underlying price.
 // {
 //     "symbol": "{{ticker}}",
 //     "action": "TRAIL",
@@ -90,7 +107,7 @@
 //     "premium": {{close}},
 //     "timeframe": "{{interval}}",
 //     "alert_id": "{{timenow}}",
-//     "timestamp": "{{timenow}}"
+//     "timestamp": "{{time}}"
 // }
 
 
