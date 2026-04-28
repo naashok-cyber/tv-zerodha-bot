@@ -419,10 +419,11 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
                 session.commit()
                 return
 
-        # ── MCX commodities: near-month future entry ──────────────────────────
-        # All MCX segment instruments (NATURALGAS, CRUDEOIL, CRUDEOILM, GOLD,
-        # SILVER, etc.) trade as futures, not options.
-        if underlying.segment == "MCX":
+        # ── NATURALGAS / NATGASMINI: near-month future entry ─────────────────
+        # NG options are illiquid; always trade the near-month FUT directly.
+        # Other MCX commodities (CRUDEOIL, GOLD, SILVER, etc.) have liquid
+        # options and fall through to the CE/PE path below.
+        if underlying.is_natural_gas:
             try:
                 resolved = resolve_expiry(
                     underlying.name, session, instrument_type="FUT",
@@ -669,8 +670,32 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
             return
 
         kite_client = get_session_manager().get_kite()
-        spot_quote = kite_client.quote(underlying.spot_source)
-        spot_ltp = float(spot_quote[underlying.spot_source]["last_price"])
+
+        # MCX commodities have no quotable spot index (unlike NSE:NIFTY 50).
+        # Quote the near-month FUT tradingsymbol as a spot-price proxy instead.
+        if underlying.segment == "MCX":
+            mcx_spot_instr = (
+                session.query(Instrument)
+                .filter(
+                    Instrument.name == underlying.name,
+                    Instrument.instrument_type == "FUT",
+                    Instrument.exchange == "MCX",
+                    Instrument.expiry >= now.date(),
+                )
+                .order_by(Instrument.expiry)
+                .first()
+            )
+            if mcx_spot_instr is None:
+                log.error("Alert %d: no MCX FUT found for spot price of %s", alert_id, underlying.name)
+                alert.processed = True
+                session.commit()
+                return
+            spot_key = f"MCX:{mcx_spot_instr.tradingsymbol}"
+            spot_quote = kite_client.quote(spot_key)
+            spot_ltp = float(spot_quote[spot_key]["last_price"])
+        else:
+            spot_quote = kite_client.quote(underlying.spot_source)
+            spot_ltp = float(spot_quote[underlying.spot_source]["last_price"])
 
         try:
             resolved = resolve_expiry(
