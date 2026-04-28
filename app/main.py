@@ -418,8 +418,10 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
                 session.commit()
                 return
 
-        # ── NATURALGAS: near-month future entry ───────────────────────────────
-        if underlying.is_natural_gas:
+        # ── MCX commodities: near-month future entry ──────────────────────────
+        # All MCX segment instruments (NATURALGAS, CRUDEOIL, CRUDEOILM, GOLD,
+        # SILVER, etc.) trade as futures, not options.
+        if underlying.segment == "MCX":
             try:
                 resolved = resolve_expiry(
                     underlying.name, session, instrument_type="FUT",
