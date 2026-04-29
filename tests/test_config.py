@@ -75,7 +75,7 @@ def test_sizing_mode_string_coercion():
 
 def test_capital_defaults():
     s = _s()
-    assert s.CAPITAL_PER_TRADE == 10_000.0
+    assert s.CAPITAL_PER_TRADE == 30_000.0
     assert s.TOTAL_CAPITAL == 100_000.0
     assert s.RISK_PER_TRADE_PCT == 1.0
 

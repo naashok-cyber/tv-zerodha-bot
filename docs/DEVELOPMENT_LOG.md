@@ -220,7 +220,7 @@ https://outskirts-phrase-retainer.ngrok-free.dev/kite/callback
 | Setting | Default | Notes |
 |---|---|---|
 | `DRY_RUN` | `true` | Set `false` only after full validation |
-| `CAPITAL_PER_TRADE` | `25000` | Min needed for SWIGGY options (lot_size=1300) |
+| `CAPITAL_PER_TRADE` | `30000` | Increased to cover most options (SWIGGY lot_size=1300 needs ≥₹25k) |
 | `EQUITY_SL_PCT` | `0.01` | 1% SL for CNC equity |
 | `RR_RATIO` | `2.0` | 1:2 risk:reward → target = 2× SL distance |
 | `TV_ALLOWED_IPS` | TradingView CIDRs | Webhook IP allowlist |

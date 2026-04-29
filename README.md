@@ -72,7 +72,7 @@ All variables are read from `.env` (copy from `.env.example`). Key settings:
 | `SECRET_KEY` | *(required)* | 32+ char random string; used for access-token encryption |
 | `TELEGRAM_BOT_TOKEN` | *(empty)* | Notifier is a no-op when empty |
 | `TELEGRAM_CHAT_ID` | *(empty)* | Your personal or group chat ID |
-| `CAPITAL_PER_TRADE` | `10000` | ₹ premium budget per option trade |
+| `CAPITAL_PER_TRADE` | `30000` | ₹ premium budget per option trade |
 | `TOTAL_CAPITAL` | `100000` | ₹ total capital; used for % daily-loss cap |
 | `MAX_DAILY_LOSS_ABS` | `2000` | ₹ absolute daily loss hard stop |
 | `MAX_DAILY_LOSS_PCT` | `2.0` | % of `TOTAL_CAPITAL`; whichever limit hits first wins |
