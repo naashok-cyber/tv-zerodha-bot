@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import secrets
@@ -294,7 +295,10 @@ async def lifespan(app: FastAPI):
                 log.info("OrderWatcher started at startup with stored token")
         except Exception as _exc:
             log.warning("Could not start OrderWatcher at startup: %s", _exc)
-    refresh_instruments_job(_SessionFactory)
+    # Run instrument refresh in a background thread so the server starts
+    # accepting webhooks immediately instead of blocking for 30+ seconds.
+    loop = asyncio.get_event_loop()
+    loop.run_in_executor(None, refresh_instruments_job, _SessionFactory)
     yield
     if _scheduler is not None:
         _scheduler.shutdown(wait=False)
@@ -854,6 +858,23 @@ async def webhook(
     return {"status": "queued", "alert_id": alert_row.id}
 
 
+@app.get("/kite/login")
+async def kite_login() -> Response:
+    """Redirect the browser to Kite's OAuth login page.
+
+    After the user authenticates, Kite redirects to KITE_REDIRECT_URL/kite/callback
+    with ?status=success&request_token=<token>.
+    """
+    from kiteconnect import KiteConnect
+    settings = get_settings()
+    kite = KiteConnect(api_key=settings.KITE_API_KEY)
+    login_url = kite.login_url()
+    return Response(
+        status_code=302,
+        headers={"Location": login_url},
+    )
+
+
 @app.get("/kite/callback")
 async def kite_callback(status: str = "unknown", request_token: str = "") -> Response:
     if status != "success" or not request_token:
@@ -867,7 +888,7 @@ async def kite_callback(status: str = "unknown", request_token: str = "") -> Res
         raise HTTPException(status_code=400, detail=f"Token exchange failed: {exc}")
     settings = get_settings()
     if _watcher is not None:
-        _watcher.start(api_key=settings.KITE_API_KEY, access_token=access_token)
+        _watcher.restart(api_key=settings.KITE_API_KEY, access_token=access_token)
     # Validate the fresh token immediately so SESSION_INVALID is cleared and
     # checked_at reflects the actual login time, not the stale startup check.
     daily_session_check()

@@ -64,6 +64,21 @@ class OrderWatcher:
         self._ticker.on_ticks = self.on_ticks
         self._ticker.connect(threaded=True)
 
+    def restart(self, api_key: str, access_token: str) -> None:
+        """Stop any existing ticker and start fresh with new credentials.
+
+        Call this after a fresh Kite OAuth login so the watcher picks up the
+        new access token even if it previously gave up reconnecting.
+        """
+        if self._ticker is not None:
+            try:
+                self._ticker.close()
+            except Exception:
+                pass
+            self._ticker = None
+        self._started = False
+        self.start(api_key=api_key, access_token=access_token)
+
     # ── Entry order tracking ──────────────────────────────────────────────────
 
     def watch_order(self, kite_order_id: str) -> None:
@@ -105,6 +120,7 @@ class OrderWatcher:
 
     def on_noreconnect(self, ws: Any) -> None:
         log.error("Ticker gave up reconnecting")
+        self._started = False  # allow restart() after a fresh login
 
     def on_order_update(self, ws: Any, data: dict) -> None:
         order_id = str(data.get("order_id", ""))
