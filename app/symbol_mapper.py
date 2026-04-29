@@ -123,15 +123,22 @@ def refresh_instruments(
     Pass _download_fn in tests to avoid network I/O.
     """
     fn = _download_fn or _download_csv
-    rows: list[dict] = []
+    # Keyed by instrument_token so duplicate tokens across exchange downloads
+    # are silently overwritten rather than causing a UNIQUE constraint error.
+    rows_by_token: dict[int, dict] = {}
     for exchange in _KITE_EXCHANGES:
         csv_text = fn(f"{_KITE_INSTRUMENTS_BASE_URL}/{exchange}")
-        rows.extend(_parse_instruments(csv_text))
+        for row in _parse_instruments(csv_text):
+            rows_by_token[row["instrument_token"]] = row
+
     session.query(Instrument).delete(synchronize_session=False)
-    for row in rows:
+    # Clear the identity map so stale references from before the bulk delete
+    # don't conflict when re-inserting the same primary keys.
+    session.expunge_all()
+    for row in rows_by_token.values():
         session.add(Instrument(**row))
     session.commit()
-    return len(rows)
+    return len(rows_by_token)
 
 
 # ── Resolution helpers ────────────────────────────────────────────────────────
