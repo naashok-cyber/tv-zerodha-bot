@@ -12,8 +12,9 @@ from app.config import IST, UTC
 class AlertPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    symbol: str                                    # e.g. "NIFTY", "NATURALGAS"
+    symbol: str                                    # e.g. "NIFTY", "NATURALGAS", "RELIANCE"
     action: Literal["BUY", "SELL", "EXIT", "TRAIL"]
+    instrument_type: Literal["OPTIONS", "EQUITY"] = "OPTIONS"  # defaults to OPTIONS so existing alerts keep working
     price: Decimal                                 # current price from TradingView
     premium: Decimal | None = None                 # required for TRAIL action only
     timeframe: str                                 # e.g. "5", "15", "60"

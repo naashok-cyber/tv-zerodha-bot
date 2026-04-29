@@ -26,6 +26,17 @@ def compute_option_qty(
     return qty if qty >= int(lot_size) else 0
 
 
+def compute_equity_qty(
+    capital_per_trade: Decimal,
+    price: Decimal,
+) -> int:
+    """qty = floor(capital / price); 0 if fewer than 1 share can be bought."""
+    if price <= 0:
+        return 0
+    qty = int((capital_per_trade / price).to_integral_value(rounding=ROUND_DOWN))
+    return qty if qty >= 1 else 0
+
+
 def compute_futures_qty(
     capital_risk: Decimal,
     sl_distance: Decimal,

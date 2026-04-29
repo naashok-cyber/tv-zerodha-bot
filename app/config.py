@@ -109,6 +109,7 @@ class Settings(BaseSettings):
     DIVIDEND_YIELD_OVERRIDES: dict[str, float] = {}  # per-symbol q; e.g. {"INFY": 0.025}
     NATURAL_GAS_NAMES: list[str] = ["NATURALGAS", "NATGASMINI"]  # route to future, not option
     FUTURES_SL_PCT: float = 0.005   # SL distance as fraction of price for NG near-month futures
+    EQUITY_SL_PCT: float = 0.01     # SL = 1% of fill price for CNC equity trades; target = RR_RATIO × SL
 
     # ── Risk module (risk.py) — Decimal for monetary precision ───────────────
     RISK_PCT: Decimal = Decimal("0.01")        # 1% per-trade risk fraction (futures sizing)

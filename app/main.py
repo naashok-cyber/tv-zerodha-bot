@@ -153,12 +153,17 @@ def _on_entry_filled(event: EntryFilledEvent) -> None:
             return
 
         fill_price = event.fill_price
-        if instrument_type == "FUT":
+        if instrument_type == "EQ":
+            sl_distance = fill_price * settings.EQUITY_SL_PCT
+            target_distance = settings.RR_RATIO * sl_distance
+            sl_price = fill_price - sl_distance
+            target_price = fill_price + target_distance
+        elif instrument_type == "FUT":
             sl_distance = meta.get("sl_distance", fill_price * settings.FUTURES_SL_PCT)
             target_distance = meta.get("target_distance", settings.RR_RATIO * sl_distance)
             sl_price = fill_price - sl_distance
             target_price = fill_price + target_distance
-        else:
+        else:  # CE / PE options
             sl_risk = fill_price * settings.SL_PREMIUM_PCT
             sl_price = fill_price - sl_risk
             target_price = fill_price + settings.RR_RATIO * sl_risk
@@ -531,6 +536,96 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
             session.commit()
             return
 
+        # ── EQUITY (CNC) entry ────────────────────────────────────────────────
+        if alert_data.instrument_type == "EQUITY":
+            if alert_data.action != "BUY":
+                log.warning(
+                    "Alert %d: EQUITY only supports BUY action (got %s) — skipping",
+                    alert_id, alert_data.action,
+                )
+                alert.processed = True
+                session.commit()
+                return
+
+            eq_instrument = (
+                session.query(Instrument)
+                .filter(
+                    Instrument.tradingsymbol == underlying.name,
+                    Instrument.exchange == "NSE",
+                    Instrument.instrument_type == "EQ",
+                )
+                .first()
+            )
+            if eq_instrument is None:
+                log.error(
+                    "Alert %d: EQUITY — %s not found in NSE instruments table",
+                    alert_id, underlying.name,
+                )
+                alert.processed = True
+                session.commit()
+                return
+
+            if not settings.DRY_RUN:
+                kite_client = get_session_manager().get_kite()
+                q_key = f"NSE:{underlying.name}"
+                q = kite_client.quote(q_key)
+                ltp = float(q[q_key]["last_price"])
+            else:
+                ltp = float(alert_data.price)
+
+            qty = risk.compute_equity_qty(
+                Decimal(str(settings.CAPITAL_PER_TRADE)),
+                Decimal(str(ltp)),
+            )
+            if qty < 1:
+                log.warning(
+                    "Alert %d: EQUITY sizing — 0 shares at ltp=%.2f CAPITAL=%.0f",
+                    alert_id, ltp, settings.CAPITAL_PER_TRADE,
+                )
+                alert.processed = True
+                session.commit()
+                return
+
+            kite_order_id = None
+            if not settings.DRY_RUN:
+                kite_order_id = place_entry(kite_client, eq_instrument, "BUY", qty, "MARKET", "CNC")
+            else:
+                log.info(
+                    "Alert %d: DRY_RUN — would BUY %d shares %s MARKET CNC at ltp=%.2f",
+                    alert_id, qty, eq_instrument.tradingsymbol, ltp,
+                )
+
+            order = Order(
+                alert_id=alert_id,
+                kite_order_id=kite_order_id,
+                variety="regular",
+                exchange=eq_instrument.exchange,
+                tradingsymbol=eq_instrument.tradingsymbol,
+                transaction_type="BUY",
+                order_type="MARKET",
+                product="CNC",
+                quantity=qty,
+                status="PENDING" if not settings.DRY_RUN else "DRY_RUN",
+                placed_at=now,
+                updated_at=now,
+                dry_run=settings.DRY_RUN,
+            )
+            session.add(order)
+            session.flush()
+
+            if kite_order_id and _watcher is not None:
+                _pending_order_meta[kite_order_id] = {
+                    "instrument_type": "EQ",
+                    "order_db_id": order.id,
+                    "underlying": underlying.name,
+                    "dry_run": settings.DRY_RUN,
+                }
+                _watcher.watch_order(kite_order_id)
+
+            alert.processed = True
+            session.commit()
+            return
+
         # ── EXIT ──────────────────────────────────────────────────────────────
         if alert_data.action == "EXIT":
             ts = underlying.name
@@ -557,6 +652,11 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
                 .first()
             )
 
+            # Use the product stored on the original entry order so that CNC
+            # equity exits use CNC (not the global NRML options product type).
+            entry_order = session.query(Order).filter(Order.id == position.order_id).first()
+            exit_product = entry_order.product if entry_order else product
+
             if not settings.DRY_RUN:
                 kite_client = get_session_manager().get_kite()
                 if gtt and gtt.kite_gtt_id:
@@ -564,9 +664,9 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
                 if gtt:
                     gtt.status = "CANCELLED"
                 if instrument:
-                    square_off(kite_client, instrument, position.quantity, product)
+                    square_off(kite_client, instrument, position.quantity, exit_product)
             else:
-                log.info("Alert %d: DRY_RUN — would EXIT %s qty=%d", alert_id, ts, position.quantity)
+                log.info("Alert %d: DRY_RUN — would EXIT %s qty=%d product=%s", alert_id, ts, position.quantity, exit_product)
 
             ct = ClosedTrade(
                 position_id=position.id,
