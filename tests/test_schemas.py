@@ -85,9 +85,11 @@ class TestAlertPayloadSchema:
         with pytest.raises(ValidationError, match="must not be empty"):
             AlertPayload(**_valid(alert_id="   "))
 
-    def test_timestamp_naive_raises(self):
-        with pytest.raises(ValidationError, match="timezone-aware"):
-            AlertPayload(**_valid(timestamp=datetime(2026, 4, 27, 10, 0, 0)))
+    def test_timestamp_naive_treated_as_utc(self):
+        # TradingView {{time}} sends UTC without a tz suffix; we accept and convert.
+        p = AlertPayload(**_valid(timestamp=datetime(2026, 4, 27, 4, 30, 0)))
+        assert p.timestamp.tzinfo is not None
+        assert p.timestamp.hour == 10  # 04:30 UTC → 10:00 IST
 
     def test_timestamp_utc_converted_to_ist(self):
         p = AlertPayload(**_valid(timestamp=_TS_UTC))

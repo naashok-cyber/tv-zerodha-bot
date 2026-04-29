@@ -711,10 +711,10 @@ def test_entry_filled_futures_gtt_prices():
     mock_gtt.assert_not_called()   # DRY_RUN=True
 
 
-# ── /kite/callback wires watcher.start() ─────────────────────────────────────
+# ── /kite/callback wires watcher.restart() ───────────────────────────────────
 
 def test_kite_callback_starts_watcher():
-    """Successful /kite/callback must call _watcher.start(api_key, access_token)."""
+    """Successful /kite/callback must call _watcher.restart(api_key, access_token)."""
     engine = _make_engine()
     factory = _make_factory(engine)
     settings = _s(KITE_API_KEY="testkey")
@@ -743,6 +743,6 @@ def test_kite_callback_starts_watcher():
     app.dependency_overrides.clear()
 
     assert resp.status_code == 200
-    mock_watcher_instance.start.assert_called_once_with(
+    mock_watcher_instance.restart.assert_called_once_with(
         api_key="testkey", access_token="acc_token_xyz"
     )
