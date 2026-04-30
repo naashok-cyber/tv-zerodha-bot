@@ -76,6 +76,7 @@ class Settings(BaseSettings):
     MAX_DAILY_LOSS_PCT: float = 2.0           # % of TOTAL_CAPITAL
     MAX_TRADES_PER_DAY: int = 10
     MAX_OPEN_POSITIONS: int = 3
+    MAX_LOTS_PER_ORDER: int = 5               # exchange freeze-quantity guard for futures
     CONSECUTIVE_LOSSES_LIMIT: int = 3         # circuit breaker; resets only on manual intervention
     RR_RATIO: float = 2.0                     # target_dist = RR_RATIO × sl_dist
     MARKET_PROTECTION_PCT: float = -1.0       # -1 = kiteconnect default; mandatory on MARKET/SL-M

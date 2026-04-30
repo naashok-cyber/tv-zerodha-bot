@@ -226,10 +226,10 @@ def _seed_open_position(
 # ── NATURALGAS branch ─────────────────────────────────────────────────────────
 
 def test_ng_sizing_math():
-    """qty = floor(capital_risk / sl_distance / lot_size) * lot_size."""
+    """qty is capped at MAX_LOTS_PER_ORDER * lot_size when raw sizing exceeds it."""
     # capital_risk = 10_000 (RISK_PCT=100%, daily cap=100k so not binding)
     # entry=200, sl_frac=0.005, sl_distance=1.0
-    # qty = floor(10_000 / 1.0 / 2) * 2 = 5_000 * 2 = 10_000
+    # raw qty = floor(10_000 / 1.0 / 2) * 2 = 10_000; capped to MAX_LOTS_PER_ORDER(5) * lot_size(2) = 10
     factory = _make_factory()
     s = _s(CAPITAL_PER_TRADE=10_000.0, RISK_PER_TRADE_PCT=100.0, FUTURES_SL_PCT=0.005)
 
@@ -254,7 +254,7 @@ def test_ng_sizing_math():
         order = session.query(Order).filter_by(alert_id=alert_id).first()
     assert order is not None
     assert order.dry_run is True
-    assert order.quantity == 10_000   # floor(10000/1.0/2)*2
+    assert order.quantity == 10        # capped: MAX_LOTS_PER_ORDER(5) * lot_size(2)
     mock_pe.assert_not_called()
 
 
@@ -284,7 +284,7 @@ def test_ng_dry_run_skips_place_entry():
 def test_ng_live_calls_place_entry_with_correct_args():
     """DRY_RUN=False: place_entry called with FUT instrument, BUY, qty, MARKET."""
     factory = _make_factory()
-    # capital_risk=10000, sl_distance=1.0, lot_size=1 → qty=10000
+    # capital_risk=10000, sl_distance=1.0, lot_size=1 → raw qty=10000, capped to MAX_LOTS_PER_ORDER(5)*lot_size(1)=5
     s = _s(DRY_RUN=False, CAPITAL_PER_TRADE=10_000.0, RISK_PER_TRADE_PCT=100.0, FUTURES_SL_PCT=0.005)
 
     with factory() as session:
@@ -311,7 +311,7 @@ def test_ng_live_calls_place_entry_with_correct_args():
     mock_pe.assert_called_once()
     args = mock_pe.call_args.args
     assert args[2] == "BUY"
-    assert args[3] == 10_000     # qty = floor(10000/1.0/1)*1
+    assert args[3] == 5          # capped: MAX_LOTS_PER_ORDER(5) * lot_size(1)
     assert args[4] == "MARKET"
 
 
