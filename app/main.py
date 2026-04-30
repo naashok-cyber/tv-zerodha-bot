@@ -504,11 +504,18 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
         now = alert_data.timestamp
         product = settings.PRODUCT_TYPE.value
 
-        if state.SESSION_INVALID and not settings.DRY_RUN:
-            log.warning("Alert %d: order blocked — session invalid, manual login required", alert_id)
-            alert.processed = True
-            session.commit()
-            return
+        if not settings.DRY_RUN:
+            token_info = get_session_manager().get_token_info()
+            if not token_info["is_valid"] or state.SESSION_INVALID:
+                reason = token_info.get("reason") or "session marked invalid by scheduler"
+                log.warning(
+                    "Alert %d: order blocked — %s. Re-login at /kite/login",
+                    alert_id, reason,
+                )
+                state.set_session_invalid(True)
+                alert.processed = True
+                session.commit()
+                return
 
         if not settings.DRY_RUN:
             try:

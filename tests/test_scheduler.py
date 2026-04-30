@@ -299,8 +299,13 @@ _RESOLVED = ResolvedExpiry(expiry_date=date(2026, 4, 26), days_to_expiry=0, rule
 
 
 class TestSessionInvalidGate:
-    def test_invalid_session_blocks_live_order(self):
-        """SESSION_INVALID=True + DRY_RUN=False → _process_alert returns early; place_entry not called."""
+    def _fresh_token_mgr(self):
+        mock_mgr = MagicMock()
+        mock_mgr.get_token_info.return_value = {"is_valid": True, "age_hours": 1.0, "reason": None}
+        return mock_mgr
+
+    def test_invalid_session_flag_blocks_live_order(self):
+        """SESSION_INVALID=True + fresh token + DRY_RUN=False → blocked; place_entry not called."""
         state.set_session_invalid(True)
         factory = _make_factory()
         s = _s(DRY_RUN=False)
@@ -314,11 +319,40 @@ class TestSessionInvalidGate:
             patch("app.main.resolve_expiry", return_value=_RESOLVED),
             patch("app.main.place_entry") as mock_pe,
             patch("app.risk.check_risk_gates"),
+            patch("app.main.get_session_manager", return_value=self._fresh_token_mgr()),
         ):
             main_module._SessionFactory = factory
             _process_alert(alert_id, _make_alert(), s)
 
         mock_pe.assert_not_called()
+
+    def test_stale_token_blocks_live_order_even_when_flag_clear(self):
+        """Expired token + SESSION_INVALID=False + DRY_RUN=False → blocked; this was the production bug."""
+        state.set_session_invalid(False)
+        factory = _make_factory()
+        s = _s(DRY_RUN=False)
+        mock_mgr = MagicMock()
+        mock_mgr.get_token_info.return_value = {
+            "is_valid": False, "age_hours": 24.6,
+            "reason": "token is 24.6h old (limit 20h)",
+        }
+
+        with factory() as session:
+            alert = _seed_alert_row(session, suffix="stale")
+            alert_id = alert.id
+            session.commit()
+
+        with (
+            patch("app.main.resolve_expiry", return_value=_RESOLVED),
+            patch("app.main.place_entry") as mock_pe,
+            patch("app.risk.check_risk_gates"),
+            patch("app.main.get_session_manager", return_value=mock_mgr),
+        ):
+            main_module._SessionFactory = factory
+            _process_alert(alert_id, _make_alert(), s)
+
+        mock_pe.assert_not_called()
+        assert state.get_session_invalid() is True  # gate syncs the flag for future alerts
 
     def test_dry_run_bypasses_session_gate(self):
         """SESSION_INVALID=True + DRY_RUN=True → gate skipped; DRY_RUN Order row is created."""
