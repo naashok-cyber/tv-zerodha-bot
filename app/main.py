@@ -569,6 +569,14 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
                 session.commit()
                 return
 
+            max_qty = settings.MAX_LOTS_PER_ORDER * fut_instr.lot_size
+            if qty > max_qty:
+                log.warning(
+                    "Alert %d: NG qty %d capped to %d (MAX_LOTS_PER_ORDER=%d)",
+                    alert_id, qty, max_qty, settings.MAX_LOTS_PER_ORDER,
+                )
+                qty = max_qty
+
             kite_order_id = None
             if not settings.DRY_RUN:
                 kite_client = get_session_manager().get_kite()
@@ -1206,9 +1214,12 @@ def health() -> dict:
 
 @app.get("/auth/status")
 async def auth_status(settings: Settings = Depends(get_current_settings)) -> dict:
+    token_info = get_session_manager().get_token_info()
     checked_at = get_last_checked_at()
     return {
-        "session_valid": not state.SESSION_INVALID,
+        "session_valid": token_info["is_valid"],
+        "token_age_hours": token_info["age_hours"],
+        "reason": token_info["reason"],
         "dry_run": settings.DRY_RUN,
         "checked_at": checked_at.isoformat() if checked_at is not None else None,
     }

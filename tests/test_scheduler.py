@@ -193,48 +193,78 @@ class TestDailySessionCheck:
 # ── /auth/status endpoint ─────────────────────────────────────────────────────
 
 class TestAuthStatusEndpoint:
-    def _client(self, settings: Settings | None = None):
+    def _setup(self, token_info: dict, settings: Settings | None = None):
         s = settings or _s()
         factory = _make_factory()
         app.dependency_overrides[get_current_settings] = lambda: s
         app.dependency_overrides[get_db_session] = lambda: factory()
-        return TestClient(app, raise_server_exceptions=True)
+        mock_mgr = MagicMock()
+        mock_mgr.get_token_info.return_value = token_info
+        return mock_mgr
 
     def teardown_method(self):
         app.dependency_overrides.clear()
 
-    def test_returns_valid_when_flag_clear(self):
-        state.set_session_invalid(False)
+    def test_returns_valid_when_token_fresh(self):
         sched_module._last_checked_at = None
+        mock_mgr = self._setup({"is_valid": True, "age_hours": 1.5, "reason": None})
 
-        client = self._client()
-        resp = client.get("/auth/status")
+        with patch("app.main.get_session_manager", return_value=mock_mgr):
+            resp = TestClient(app, raise_server_exceptions=True).get("/auth/status")
 
         assert resp.status_code == 200
         body = resp.json()
         assert body["session_valid"] is True
+        assert body["token_age_hours"] == 1.5
+        assert body["reason"] is None
         assert body["checked_at"] is None
 
-    def test_returns_invalid_when_flag_set(self):
-        state.set_session_invalid(True)
-        client = self._client()
-        resp = client.get("/auth/status")
+    def test_returns_invalid_when_no_token_file(self):
+        mock_mgr = self._setup({"is_valid": False, "age_hours": None, "reason": "no token file"})
+
+        with patch("app.main.get_session_manager", return_value=mock_mgr):
+            resp = TestClient(app, raise_server_exceptions=True).get("/auth/status")
 
         assert resp.status_code == 200
-        assert resp.json()["session_valid"] is False
+        body = resp.json()
+        assert body["session_valid"] is False
+        assert body["reason"] == "no token file"
+        assert body["token_age_hours"] is None
+
+    def test_returns_invalid_when_token_stale(self):
+        mock_mgr = self._setup({
+            "is_valid": False,
+            "age_hours": 21.0,
+            "reason": "token is 21.0h old (limit 20h)",
+        })
+
+        with patch("app.main.get_session_manager", return_value=mock_mgr):
+            resp = TestClient(app, raise_server_exceptions=True).get("/auth/status")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["session_valid"] is False
+        assert body["token_age_hours"] == 21.0
 
     def test_checked_at_populated_after_job_run(self):
         now = datetime(2026, 4, 27, 8, 0, tzinfo=IST)
         sched_module._last_checked_at = now
+        mock_mgr = self._setup({"is_valid": True, "age_hours": 2.0, "reason": None})
 
-        client = self._client()
-        resp = client.get("/auth/status")
+        with patch("app.main.get_session_manager", return_value=mock_mgr):
+            resp = TestClient(app, raise_server_exceptions=True).get("/auth/status")
 
         assert resp.json()["checked_at"] == now.isoformat()
 
     def test_dry_run_reflected(self):
-        client = self._client(settings=_s(DRY_RUN=True))
-        resp = client.get("/auth/status")
+        mock_mgr = self._setup(
+            {"is_valid": True, "age_hours": 1.0, "reason": None},
+            settings=_s(DRY_RUN=True),
+        )
+
+        with patch("app.main.get_session_manager", return_value=mock_mgr):
+            resp = TestClient(app, raise_server_exceptions=True).get("/auth/status")
+
         assert resp.json()["dry_run"] is True
 
 

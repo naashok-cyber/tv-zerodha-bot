@@ -109,6 +109,23 @@ class KiteSessionManager:
             )
         return token, created_at
 
+    def get_token_info(self) -> dict:
+        """Return token validity from the file. No network call made."""
+        result = self._load_token()
+        if result is None:
+            return {"is_valid": False, "age_hours": None, "reason": "no token file"}
+        _, created_at = result
+        age = datetime.now(timezone.utc) - created_at.astimezone(timezone.utc)
+        age_hours = round(age.total_seconds() / 3600, 2)
+        limit = timedelta(hours=self._settings.KITE_MAX_TOKEN_AGE_HOURS)
+        if age >= limit:
+            return {
+                "is_valid": False,
+                "age_hours": age_hours,
+                "reason": f"token is {age_hours:.1f}h old (limit {self._settings.KITE_MAX_TOKEN_AGE_HOURS}h)",
+            }
+        return {"is_valid": True, "age_hours": age_hours, "reason": None}
+
     # ── KiteConnect client ────────────────────────────────────────────────────
 
     def get_kite(self) -> KiteConnect:
