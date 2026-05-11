@@ -86,6 +86,7 @@ class Settings(BaseSettings):
 
     # ── Options (v2) ──────────────────────────────────────────────────────────
     TARGET_DELTA: float = 0.65
+    DELTA_FALLBACK_STEPS: list[float] = [0.50, 0.35, 0.25]  # tried in order when primary delta strike exceeds capital
     DELTA_TOLERANCE: float = 0.05
     OPTION_EXPIRY_RULE: ExpiryRule = ExpiryRule.NEAREST_WEEKLY
     MIN_DAYS_TO_EXPIRY_INDEX: int = 1
@@ -109,6 +110,25 @@ class Settings(BaseSettings):
     DIVIDEND_YIELD_DEFAULT: float = 0.0     # q for all underlyings not in OVERRIDES
     DIVIDEND_YIELD_OVERRIDES: dict[str, float] = {}  # per-symbol q; e.g. {"INFY": 0.025}
     NATURAL_GAS_NAMES: list[str] = ["NATURALGAS", "NATGASMINI"]  # route to future, not option
+    # MCX lot units: number of underlying units per lot (Kite quotes LTP per unit, orders in lots).
+    # Kite instruments.csv stores lot_size=1 for MCX options; this map supplies the true contract size.
+    MCX_LOT_UNITS: dict[str, int] = {
+        "CRUDEOIL":   100,   # barrels/lot; LTP in INR/barrel
+        "CRUDEOILM":  10,    # barrels/lot; LTP in INR/barrel
+        "NATURALGAS": 1250,  # MMBtu/lot;   LTP in INR/MMBtu (routes to FUT but included for completeness)
+        "NATGASMINI": 250,   # MMBtu/lot
+        "GOLD":       100,   # × 10g units/lot (1 lot = 1 kg = 100 × 10 g); LTP in INR/10 g
+        "GOLDM":      10,    # × 10g units/lot (1 lot = 100 g)
+        "GOLDPETAL":  1,     # gram/lot; LTP in INR/gram
+        "SILVER":     30,    # kg/lot (1 lot = 30 kg); LTP in INR/kg
+        "SILVERM":    5,     # kg/lot (1 lot = 5 kg)
+        "SILVERMIC":  1,     # kg/lot (1 lot = 1 kg)
+        "COPPER":     2500,  # kg/lot (1 lot = 2.5 MT); LTP in INR/kg
+        "ZINC":       5000,  # kg/lot (1 lot = 5 MT)
+        "LEAD":       5000,  # kg/lot (1 lot = 5 MT)
+        "ALUMINIUM":  5000,  # kg/lot (1 lot = 5 MT)
+        "NICKEL":     1500,  # kg/lot (1 lot = 1500 kg)
+    }
     FUTURES_SL_PCT: float = 0.005   # SL distance as fraction of price for NG near-month futures
     EQUITY_SL_PCT: float = 0.01     # SL = 1% of fill price for CNC equity trades; target = RR_RATIO × SL
 

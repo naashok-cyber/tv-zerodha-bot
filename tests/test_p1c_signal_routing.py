@@ -344,7 +344,7 @@ def test_ng_insufficient_capital_rejected(caplog):
 
 # ── Non-NG options entry ──────────────────────────────────────────────────────
 
-def _mock_selection(ltp: float = 50.0, lot_size: int = 50) -> MagicMock:
+def _mock_selection(ltp: float = 50.0, lot_size: int = 50, delta: float = 0.65) -> MagicMock:
     inst = MagicMock()
     inst.lot_size = lot_size
     inst.exchange = "NFO"
@@ -352,6 +352,7 @@ def _mock_selection(ltp: float = 50.0, lot_size: int = 50) -> MagicMock:
     sel = MagicMock()
     sel.instrument = inst
     sel.option_ltp = ltp
+    sel.computed_delta = delta
     return sel
 
 
@@ -746,3 +747,98 @@ def test_kite_callback_starts_watcher():
     mock_watcher_instance.restart.assert_called_once_with(
         api_key="testkey", access_token="acc_token_xyz"
     )
+
+
+# ── Delta fallback when primary strike exceeds capital ────────────────────────
+
+from app.strike_selector import NoValidStrikeError as _NoValidStrikeError
+
+
+def test_options_delta_fallback_succeeds_on_lower_delta():
+    """When primary delta strike is too expensive, bot retries at lower delta and places the order."""
+    # CAPITAL=5000, primary ltp=200 × lot_size=50 = 10000 → 0 lots
+    # fallback delta=0.50: ltp=80 × lot_size=50 = 4000 → 1 lot (qty=50)
+    factory = _make_factory()
+    s = _s(
+        DRY_RUN=False,
+        CAPITAL_PER_TRADE=5_000.0,
+        TARGET_DELTA=0.65,
+        DELTA_FALLBACK_STEPS=[0.50, 0.35],
+    )
+
+    with factory() as session:
+        alert = _seed_alert(session, tv_ticker="NIFTY", action="BUY", suffix="fb1")
+        alert_id = alert.id
+        session.commit()
+
+    expensive = _mock_selection(ltp=200.0, lot_size=50, delta=0.65)
+    expensive.instrument.tradingsymbol = "NIFTY26APR26CE19500"
+    affordable = _mock_selection(ltp=80.0, lot_size=50, delta=0.50)
+    affordable.instrument.tradingsymbol = "NIFTY26APR26CE19700"
+
+    def _ss_side_effect(*args, **kwargs):
+        td = kwargs.get("target_delta", 0.65)
+        if td == 0.65:
+            return expensive
+        if td == 0.50:
+            return affordable
+        raise _NoValidStrikeError("no strike")
+
+    mock_kite = MagicMock()
+    mock_kite.quote.return_value = {"NSE:NIFTY 50": {"last_price": 19_600.0}}
+    resolved = ResolvedExpiry(expiry_date=date(2026, 5, 1), days_to_expiry=4, rule_used="NEAREST_WEEKLY")
+
+    with (
+        patch("app.main.resolve_expiry", return_value=resolved),
+        patch("app.main.select_strike", side_effect=_ss_side_effect),
+        patch("app.main.place_entry", return_value="ORD_FB") as mock_pe,
+        patch("app.main.get_session_manager") as mock_sm,
+        patch("app.risk.check_risk_gates"),
+    ):
+        mock_sm.return_value.get_kite.return_value = mock_kite
+        main_module._SessionFactory = factory
+        _process_alert(alert_id, _make_alert("BUY"), s)
+
+    mock_pe.assert_called_once()
+    assert mock_pe.call_args.args[1].tradingsymbol == "NIFTY26APR26CE19700"
+    assert mock_pe.call_args.args[3] == 50  # floor(5000/80/50)*50 = 1*50
+
+
+def test_options_all_fallback_deltas_exhausted_skips():
+    """When every fallback delta is also too expensive, the alert is skipped with no order placed."""
+    # CAPITAL=5000, all strikes ltp=200 × lot_size=50 = 10000 → 0 lots at every delta
+    factory = _make_factory()
+    s = _s(
+        DRY_RUN=False,
+        CAPITAL_PER_TRADE=5_000.0,
+        TARGET_DELTA=0.65,
+        DELTA_FALLBACK_STEPS=[0.50, 0.35],
+    )
+
+    with factory() as session:
+        alert = _seed_alert(session, tv_ticker="NIFTY", action="BUY", suffix="fb2")
+        alert_id = alert.id
+        session.commit()
+
+    def _ss_always_expensive(*args, **kwargs):
+        return _mock_selection(ltp=200.0, lot_size=50, delta=kwargs.get("target_delta", 0.65))
+
+    mock_kite = MagicMock()
+    mock_kite.quote.return_value = {"NSE:NIFTY 50": {"last_price": 19_600.0}}
+    resolved = ResolvedExpiry(expiry_date=date(2026, 5, 1), days_to_expiry=4, rule_used="NEAREST_WEEKLY")
+
+    with (
+        patch("app.main.resolve_expiry", return_value=resolved),
+        patch("app.main.select_strike", side_effect=_ss_always_expensive),
+        patch("app.main.place_entry") as mock_pe,
+        patch("app.main.get_session_manager") as mock_sm,
+        patch("app.risk.check_risk_gates"),
+    ):
+        mock_sm.return_value.get_kite.return_value = mock_kite
+        main_module._SessionFactory = factory
+        _process_alert(alert_id, _make_alert("BUY"), s)
+
+    mock_pe.assert_not_called()
+    with factory() as session:
+        order = session.query(Order).filter_by(alert_id=alert_id).first()
+    assert order is None

@@ -257,11 +257,17 @@ def _on_gtt_filled(event: GttFilledEvent) -> None:
         entry_price = Decimal(str(position.entry_premium))
         fill_price = Decimal(str(event.fill_price))
         qty = Decimal(str(event.fill_qty))
+        # MCX: LTP and fill prices are per underlying unit; qty is in lots.
+        # Multiply by units-per-lot to get true INR PnL.
+        mcx_units = Decimal(str(
+            get_settings().MCX_LOT_UNITS.get(position.underlying, 1)
+            if position.exchange == "MCX" else 1
+        ))
 
         if event.transaction_type == "SELL":
-            pnl = (fill_price - entry_price) * qty
+            pnl = (fill_price - entry_price) * qty * mcx_units
         else:
-            pnl = -(fill_price - entry_price) * qty
+            pnl = -(fill_price - entry_price) * qty * mcx_units
 
         now = datetime.now(IST)
         risk.record_trade_result(session, entry_order.kite_order_id, pnl, now)
@@ -417,80 +423,6 @@ def _fail_alert(session: Any, alert: Alert, error_type: str, exc: BaseException)
     ))
 
 
-def _find_affordable_option(
-    name: str,
-    expiry,
-    flag: str,
-    selected_strike: float,
-    lot_size: int,
-    capital: Decimal,
-    kite_client,
-    session: Session,
-    segment: str,
-    alert_id: int,
-) -> tuple | None:
-    """Return (Instrument, ltp) for the nearest OTM strike that fits within capital.
-
-    Walks strikes further OTM from selected_strike (CE → higher, PE → lower),
-    bulk-quotes them, and returns the first whose 1-lot cost is within capital.
-    Returns None if no affordable strike exists.
-    """
-    from sqlalchemy import asc, desc
-    if flag == "CE":
-        order = asc(Instrument.strike)
-        candidates = (
-            session.query(Instrument)
-            .filter(
-                Instrument.name == name,
-                Instrument.expiry == expiry,
-                Instrument.instrument_type == flag,
-                Instrument.exchange == segment,
-                Instrument.strike > selected_strike,
-            )
-            .order_by(order)
-            .limit(60)
-            .all()
-        )
-    else:
-        order = desc(Instrument.strike)
-        candidates = (
-            session.query(Instrument)
-            .filter(
-                Instrument.name == name,
-                Instrument.expiry == expiry,
-                Instrument.instrument_type == flag,
-                Instrument.exchange == segment,
-                Instrument.strike < selected_strike,
-            )
-            .order_by(order)
-            .limit(60)
-            .all()
-        )
-
-    if not candidates:
-        return None
-
-    keys = [f"{segment}:{instr.tradingsymbol}" for instr in candidates]
-    try:
-        quotes = kite_client.quote(keys)
-    except Exception as exc:
-        log.warning("Alert %d: bulk quote for affordable strike failed: %s", alert_id, exc)
-        return None
-
-    for instr in candidates:
-        key = f"{segment}:{instr.tradingsymbol}"
-        ltp = float(quotes.get(key, {}).get("last_price", 0))
-        if ltp <= 0:
-            continue
-        qty = risk.compute_option_qty(capital, Decimal(str(ltp)), Decimal(str(lot_size)))
-        if qty >= lot_size:
-            log.info(
-                "Alert %d: affordable fallback strike %s ltp=%.2f (original delta strike too expensive)",
-                alert_id, instr.tradingsymbol, ltp,
-            )
-            return instr, ltp
-
-    return None
 
 
 def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) -> None:
@@ -937,45 +869,76 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
 
         lot_size = selection.instrument.lot_size
         option_ltp = float(selection.option_ltp)
+        # MCX: Kite quotes LTP per underlying unit (barrel/gram/kg) but orders are placed in lots.
+        # Multiply by units-per-lot so sizing reflects the true premium per lot.
+        mcx_units = settings.MCX_LOT_UNITS.get(underlying.name, 1) if underlying.segment == "MCX" else 1
         qty = risk.compute_option_qty(
             Decimal(str(settings.CAPITAL_PER_TRADE)),
-            Decimal(str(option_ltp)),
+            Decimal(str(option_ltp * mcx_units)),
             Decimal(str(lot_size)),
         )
 
         if qty < lot_size:
             log.warning(
-                "Alert %d: options sizing — 0 lots at ltp=%.4f CAPITAL=%.0f, searching cheaper OTM strike",
-                alert_id, option_ltp, settings.CAPITAL_PER_TRADE,
+                "Alert %d: options sizing — 0 lots at ltp=%.4f mcx_units=%d CAPITAL=%.0f; "
+                "retrying with lower deltas %s",
+                alert_id, option_ltp, mcx_units,
+                settings.CAPITAL_PER_TRADE, settings.DELTA_FALLBACK_STEPS,
             )
-            fallback = _find_affordable_option(
-                underlying.name,
-                resolved.expiry_date,
-                flag,
-                float(selection.instrument.strike),
-                lot_size,
-                Decimal(str(settings.CAPITAL_PER_TRADE)),
-                kite_client,
-                session,
-                underlying.segment,
-                alert_id,
-            )
-            if fallback is None:
+            fallback_selection = None
+            for fallback_delta in settings.DELTA_FALLBACK_STEPS:
+                if fallback_delta >= settings.TARGET_DELTA:
+                    continue
+                try:
+                    candidate = select_strike(
+                        underlying.name,
+                        resolved.expiry_date,
+                        flag,
+                        kite_client,
+                        spot_ltp,
+                        session,
+                        alert_id=alert_id,
+                        segment=underlying.segment,
+                        target_delta=fallback_delta,
+                        settings=settings,
+                    )
+                except NoValidStrikeError:
+                    log.warning(
+                        "Alert %d: no valid strike at fallback delta=%.2f",
+                        alert_id, fallback_delta,
+                    )
+                    continue
+                fallback_qty = risk.compute_option_qty(
+                    Decimal(str(settings.CAPITAL_PER_TRADE)),
+                    Decimal(str(float(candidate.option_ltp) * mcx_units)),
+                    Decimal(str(candidate.instrument.lot_size)),
+                )
+                if fallback_qty >= candidate.instrument.lot_size:
+                    log.info(
+                        "Alert %d: fallback delta=%.2f → %s ltp=%.4f fits CAPITAL=%.0f",
+                        alert_id, fallback_delta, candidate.instrument.tradingsymbol,
+                        candidate.option_ltp, settings.CAPITAL_PER_TRADE,
+                    )
+                    fallback_selection = candidate
+                    break
+
+            if fallback_selection is None:
                 log.warning(
-                    "Alert %d: no affordable strike found within CAPITAL=%.0f — skipping",
-                    alert_id, settings.CAPITAL_PER_TRADE,
+                    "Alert %d: no affordable strike at any delta %s within CAPITAL=%.0f — skipping",
+                    alert_id, settings.DELTA_FALLBACK_STEPS, settings.CAPITAL_PER_TRADE,
                 )
                 alert.processed = True
                 session.commit()
                 return
-            affordable_instr, option_ltp = fallback
-            lot_size = affordable_instr.lot_size
+
+            selection = fallback_selection
+            lot_size = selection.instrument.lot_size
+            option_ltp = float(selection.option_ltp)
             qty = risk.compute_option_qty(
                 Decimal(str(settings.CAPITAL_PER_TRADE)),
-                Decimal(str(option_ltp)),
+                Decimal(str(option_ltp * mcx_units)),
                 Decimal(str(lot_size)),
             )
-            selection = type("_S", (), {"instrument": affordable_instr, "option_ltp": option_ltp})()
 
         kite_order_id = place_entry(
             kite_client, selection.instrument, "BUY", qty, "MARKET", product
