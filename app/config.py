@@ -69,7 +69,7 @@ class Settings(BaseSettings):
     TELEGRAM_CHAT_ID: str = ""
 
     # ── Risk ──────────────────────────────────────────────────────────────────
-    CAPITAL_PER_TRADE: float = 30_000.0       # ₹ premium budget per trade
+    CAPITAL_PER_TRADE: float = 60_000.0       # ₹ premium budget per trade
     TOTAL_CAPITAL: float = 100_000.0          # ₹ 1 Lakh; base for % loss cap
     RISK_PER_TRADE_PCT: float = 1.0           # used in UNDERLYING_RISK_BASED mode
     MAX_DAILY_LOSS_ABS: float = 2_000.0       # ₹ absolute; kill switch on whichever hits first
@@ -133,7 +133,7 @@ class Settings(BaseSettings):
     EQUITY_SL_PCT: float = 0.01     # SL = 1% of fill price for CNC equity trades; target = RR_RATIO × SL
 
     # ── Risk module (risk.py) — Decimal for monetary precision ───────────────
-    RISK_PCT: Decimal = Decimal("0.01")        # 1% per-trade risk fraction (futures sizing)
+    RISK_PCT: Decimal = Decimal("0.05")        # 5% per-trade risk fraction → ₹5,000 on ₹1L capital (futures sizing)
     MAX_DAILY_LOSS: Decimal = Decimal("2000")  # absolute ₹ daily loss cap for risk.py
     SL_PERCENT: Decimal = Decimal("0.005")     # 0.5% futures SL distance fraction (risk.py default)
 
