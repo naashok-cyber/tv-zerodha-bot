@@ -69,11 +69,11 @@ class Settings(BaseSettings):
     TELEGRAM_CHAT_ID: str = ""
 
     # ── Risk ──────────────────────────────────────────────────────────────────
-    CAPITAL_PER_TRADE: float = 60_000.0       # ₹ premium budget per trade
+    CAPITAL_PER_TRADE: float = 100_000.0      # ₹ premium budget per trade
     TOTAL_CAPITAL: float = 100_000.0          # ₹ 1 Lakh; base for % loss cap
     RISK_PER_TRADE_PCT: float = 1.0           # used in UNDERLYING_RISK_BASED mode
-    MAX_DAILY_LOSS_ABS: float = 2_000.0       # ₹ absolute; kill switch on whichever hits first
-    MAX_DAILY_LOSS_PCT: float = 2.0           # % of TOTAL_CAPITAL
+    MAX_DAILY_LOSS_ABS: float = 10_000.0      # ₹ absolute; kill switch on whichever hits first
+    MAX_DAILY_LOSS_PCT: float = 10.0          # % of TOTAL_CAPITAL
     MAX_TRADES_PER_DAY: int = 10
     MAX_OPEN_POSITIONS: int = 3
     MAX_LOTS_PER_ORDER: int = 5               # exchange freeze-quantity guard for futures
@@ -134,7 +134,7 @@ class Settings(BaseSettings):
 
     # ── Risk module (risk.py) — Decimal for monetary precision ───────────────
     RISK_PCT: Decimal = Decimal("0.05")        # 5% per-trade risk fraction → ₹5,000 on ₹1L capital (futures sizing)
-    MAX_DAILY_LOSS: Decimal = Decimal("2000")  # absolute ₹ daily loss cap for risk.py
+    MAX_DAILY_LOSS: Decimal = Decimal("10000") # absolute ₹ daily loss cap for risk.py
     SL_PERCENT: Decimal = Decimal("0.005")     # 0.5% futures SL distance fraction (risk.py default)
 
     # ── Breakeven & Trail (on option premium; future price for NATURALGAS) ────
