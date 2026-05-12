@@ -90,7 +90,7 @@ class Settings(BaseSettings):
     DELTA_TOLERANCE: float = 0.05
     OPTION_EXPIRY_RULE: ExpiryRule = ExpiryRule.NEAREST_WEEKLY
     MIN_DAYS_TO_EXPIRY_INDEX: int = 1
-    MIN_DAYS_TO_EXPIRY_STOCK: int = 3
+    MIN_DAYS_TO_EXPIRY_STOCK: int = 2
     WEEKLY_INDICES: list[str] = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"]
     SKIP_EXPIRY_DAY_CUTOFF_HOUR: int = 14    # legacy; superseded by SKIP_EXPIRY_CUTOFF_NSE
     SKIP_EXPIRY_DAY_CUTOFF_MINUTE: int = 30
