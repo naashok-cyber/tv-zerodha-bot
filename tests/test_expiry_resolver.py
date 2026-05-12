@@ -102,33 +102,50 @@ def test_skip_expiry_mcx_after_cutoff(monkeypatch):
 
 # ── MIN_DAYS_TO_EXPIRY ────────────────────────────────────────────────────────
 
-def test_min_days_index_raises(monkeypatch):
-    # MIN_DAYS_TO_EXPIRY_INDEX=1 → expiry today with days=0 → raise (NIFTY index).
-    # But we're before the cutoff, so today IS selected, and 0 < 1 → raise.
+def test_min_days_index_raises_when_no_later_expiry(monkeypatch):
+    # Only one expiry (today), can't roll → raise.
     today = date(2025, 1, 16)
     available = [today]
     monkeypatch.setattr("app.expiry_resolver.list_expiries", lambda *_: available)
     now = _now(today, 10, 0)
 
-    with pytest.raises(NoEligibleExpiryError, match="0 day"):
+    with pytest.raises(NoEligibleExpiryError, match="meets the 1-day minimum"):
         resolve_expiry(
             "NIFTY", session=None, segment="NFO", now=now,
             settings=_s(MIN_DAYS_TO_EXPIRY_INDEX=1),  # type: ignore[arg-type]
         )
 
 
-def test_min_days_stock_raises(monkeypatch):
-    # MIN_DAYS_TO_EXPIRY_STOCK=3; nearest expiry is 2 days away → raise.
+def test_min_days_stock_raises_when_no_later_expiry(monkeypatch):
+    # Only one expiry (2 days away) and MIN_DAYS=3, no later expiry to roll to → raise.
     today = date(2025, 1, 9)
-    available = [date(2025, 1, 11)]  # 2 days away
+    available = [date(2025, 1, 11)]  # 2 days away, nothing later
     monkeypatch.setattr("app.expiry_resolver.list_expiries", lambda *_: available)
     now = _now(today, 10, 0)
 
-    with pytest.raises(NoEligibleExpiryError, match="minimum is 3"):
+    with pytest.raises(NoEligibleExpiryError, match="meets the 3-day minimum"):
         resolve_expiry(
             "RELIANCE", session=None, segment="NFO", now=now,
             settings=_s(MIN_DAYS_TO_EXPIRY_STOCK=3),  # type: ignore[arg-type]
         )
+
+
+def test_min_days_stock_rolls_to_next_expiry(monkeypatch):
+    # CRUDEOILM scenario: nearest expiry is 2 days away (< MIN_DAYS=3), but a later
+    # expiry exists 21 days out → resolver should roll forward instead of raising.
+    today = date(2026, 5, 12)
+    near = date(2026, 5, 14)   # 2 days away — too close
+    far  = date(2026, 6, 17)   # 36 days away — eligible
+    monkeypatch.setattr("app.expiry_resolver.list_expiries", lambda *_: [near, far])
+    now = _now(today, 10, 0)
+
+    result = resolve_expiry(
+        "CRUDEOILM", session=None, segment="MCX", now=now,
+        settings=_s(MIN_DAYS_TO_EXPIRY_STOCK=3),  # type: ignore[arg-type]
+    )
+
+    assert result.expiry_date == far
+    assert result.days_to_expiry == (far - today).days
 
 
 # ── Empty expiry list ─────────────────────────────────────────────────────────

@@ -77,14 +77,18 @@ def resolve_expiry(
 
     days_to_expiry = (selected - today).days
 
-    # Minimum days guard.
+    # Minimum days guard — roll forward to next expiry that meets the threshold.
     upper = underlying.upper()
     min_days = s.MIN_DAYS_TO_EXPIRY_INDEX if upper in weekly_set else s.MIN_DAYS_TO_EXPIRY_STOCK
     if days_to_expiry < min_days:
-        raise NoEligibleExpiryError(
-            f"Nearest eligible expiry {selected} is only {days_to_expiry} day(s) away; "
-            f"minimum is {min_days} for {underlying!r}"
-        )
+        eligible = [e for e in future if (e - today).days >= min_days]
+        if not eligible:
+            raise NoEligibleExpiryError(
+                f"No expiry for {underlying!r} meets the {min_days}-day minimum "
+                f"(nearest was {selected}, only {days_to_expiry} day(s) away)"
+            )
+        selected = eligible[0]
+        days_to_expiry = (selected - today).days
 
     return ResolvedExpiry(
         expiry_date=selected,
