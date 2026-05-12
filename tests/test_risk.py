@@ -366,11 +366,14 @@ def test_risk_halt_error_causes_early_return_no_broker_calls():
 
     main_module._SessionFactory = factory
 
+    mock_token_info = {"is_valid": True, "age_hours": 1.0, "reason": None}
     with (
+        patch("app.main.get_session_manager") as mock_gsm,
         patch("app.risk.check_risk_gates", side_effect=RiskHaltError("daily loss cap exhausted")),
         patch("app.main.place_entry") as mock_pe,
         patch("app.main.select_strike") as mock_ss,
     ):
+        mock_gsm.return_value.get_token_info.return_value = mock_token_info
         _process_alert(alert_id, _alert_data("NIFTY"), s)
 
     mock_pe.assert_not_called()

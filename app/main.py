@@ -1184,7 +1184,10 @@ def health() -> dict:
 
 @app.get("/auth/status")
 async def auth_status(settings: Settings = Depends(get_current_settings)) -> dict:
-    token_info = get_session_manager().get_token_info()
+    try:
+        token_info = get_session_manager().get_token_info()
+    except ValueError as exc:
+        raise HTTPException(status_code=503, detail=f"Session manager not configured: {exc}")
     checked_at = get_last_checked_at()
     return {
         "session_valid": token_info["is_valid"],
