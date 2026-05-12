@@ -491,7 +491,11 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
 
             sl_frac = settings.SL_PERCENT
             entry_px_d = alert_data.price
-            sl_distance_d = entry_px_d * sl_frac
+            # Kite's instruments.csv stores lot_size=1 for MCX futures; the true
+            # contract size (MMBtu/lot) lives in MCX_LOT_UNITS.  SL must be in
+            # INR-per-contract so compute_futures_qty produces contracts, not units.
+            mcx_lot_units = Decimal(str(settings.MCX_LOT_UNITS.get(underlying.name, 1)))
+            sl_distance_d = entry_px_d * sl_frac * mcx_lot_units
             sl_distance = float(sl_distance_d)
             target_distance = settings.RR_RATIO * sl_distance
 

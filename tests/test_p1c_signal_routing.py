@@ -227,11 +227,12 @@ def _seed_open_position(
 
 def test_ng_sizing_math():
     """qty is capped at MAX_LOTS_PER_ORDER * lot_size when raw sizing exceeds it."""
-    # capital_risk = 10_000 (RISK_PCT=100%, daily cap=100k so not binding)
-    # entry=200, sl_frac=0.005, sl_distance=1.0
-    # raw qty = floor(10_000 / 1.0 / 2) * 2 = 10_000; capped to MAX_LOTS_PER_ORDER(5) * lot_size(2) = 10
+    # capital_risk = 15_000 (RISK_PCT=100%, daily cap=100k so not binding)
+    # entry=200, sl_frac=0.005, mcx_units=1250 (NATURALGAS default)
+    # sl_per_contract = 200 * 0.005 * 1250 = 1250
+    # raw qty = floor(15_000 / 1250 / 2) * 2 = floor(6) * 2 = 12; capped to MAX_LOTS_PER_ORDER(5) * lot_size(2) = 10
     factory = _make_factory()
-    s = _s(CAPITAL_PER_TRADE=10_000.0, RISK_PER_TRADE_PCT=100.0, FUTURES_SL_PCT=0.005)
+    s = _s(CAPITAL_PER_TRADE=15_000.0, RISK_PER_TRADE_PCT=100.0, FUTURES_SL_PCT=0.005)
 
     with factory() as session:
         _seed_instrument(session, name="NATURALGAS", exchange="MCX", itype="FUT",
