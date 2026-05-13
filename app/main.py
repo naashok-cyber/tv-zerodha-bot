@@ -524,6 +524,21 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
             if not settings.DRY_RUN:
                 kite_client = get_session_manager().get_kite()
                 kite_order_id = place_entry(kite_client, fut_instr, "BUY", qty, "MARKET", product)
+                if kite_order_id:
+                    _pending_order_meta[kite_order_id] = {
+                        "instrument_type": "FUT",
+                        "sl_distance": sl_distance,
+                        "target_distance": target_distance,
+                        "underlying": underlying.name,
+                        "dry_run": False,
+                    }
+                    if _watcher is not None:
+                        _watcher.watch_order(kite_order_id)
+                    else:
+                        log.error(
+                            "Alert %d: _watcher is None — GTT will not be placed for %s",
+                            alert_id, fut_instr.tradingsymbol,
+                        )
             else:
                 log.info(
                     "Alert %d: DRY_RUN — would place MARKET BUY %d lots %s (sl_dist=%.4f)",
@@ -547,17 +562,6 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
             )
             session.add(order)
             session.flush()
-
-            if kite_order_id and _watcher is not None:
-                _pending_order_meta[kite_order_id] = {
-                    "instrument_type": "FUT",
-                    "sl_distance": sl_distance,
-                    "target_distance": target_distance,
-                    "order_db_id": order.id,
-                    "underlying": underlying.name,
-                    "dry_run": settings.DRY_RUN,
-                }
-                _watcher.watch_order(kite_order_id)
 
             alert.processed = True
             session.commit()
@@ -616,6 +620,19 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
             kite_order_id = None
             if not settings.DRY_RUN:
                 kite_order_id = place_entry(kite_client, eq_instrument, "BUY", qty, "MARKET", "CNC")
+                if kite_order_id:
+                    _pending_order_meta[kite_order_id] = {
+                        "instrument_type": "EQ",
+                        "underlying": underlying.name,
+                        "dry_run": False,
+                    }
+                    if _watcher is not None:
+                        _watcher.watch_order(kite_order_id)
+                    else:
+                        log.error(
+                            "Alert %d: _watcher is None — GTT will not be placed for %s",
+                            alert_id, eq_instrument.tradingsymbol,
+                        )
             else:
                 log.info(
                     "Alert %d: DRY_RUN — would BUY %d shares %s MARKET CNC at ltp=%.2f",
@@ -639,15 +656,6 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
             )
             session.add(order)
             session.flush()
-
-            if kite_order_id and _watcher is not None:
-                _pending_order_meta[kite_order_id] = {
-                    "instrument_type": "EQ",
-                    "order_db_id": order.id,
-                    "underlying": underlying.name,
-                    "dry_run": settings.DRY_RUN,
-                }
-                _watcher.watch_order(kite_order_id)
 
             alert.processed = True
             session.commit()
@@ -947,6 +955,19 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
         kite_order_id = place_entry(
             kite_client, selection.instrument, "BUY", qty, "MARKET", product
         )
+        if kite_order_id:
+            _pending_order_meta[kite_order_id] = {
+                "instrument_type": flag,
+                "underlying": underlying.name,
+                "dry_run": False,
+            }
+            if _watcher is not None:
+                _watcher.watch_order(kite_order_id)
+            else:
+                log.error(
+                    "Alert %d: _watcher is None — GTT will not be placed for %s",
+                    alert_id, selection.instrument.tradingsymbol,
+                )
 
         order = Order(
             alert_id=alert_id,
@@ -965,15 +986,6 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
         )
         session.add(order)
         session.flush()
-
-        if kite_order_id and _watcher is not None:
-            _pending_order_meta[kite_order_id] = {
-                "instrument_type": flag,
-                "order_db_id": order.id,
-                "underlying": underlying.name,
-                "dry_run": False,
-            }
-            _watcher.watch_order(kite_order_id)
 
         alert.processed = True
         session.commit()
