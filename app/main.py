@@ -1234,7 +1234,9 @@ async def gtts_page(
             "<th>Entry Price</th><th>DB Status</th><th>Kite GTT ID</th>"
             f"<th>Kite Live Status</th><th>Placed At</th></tr>{rows_html}"
             "</table>"
-            "<p><small>Kite Live Status: active | triggered | disabled | cancelled | N/A=no session</small></p>"
+            "<p><small>Kite Live Status: <b>active</b>=SL live on Kite | "
+            "<b>triggered</b>=fired, position closed | "
+            "<b>N/A</b>=not found on Kite (already triggered+cleaned up, or GTT_FAILED)</small></p>"
             "</body></html>"
         ),
         media_type="text/html",
