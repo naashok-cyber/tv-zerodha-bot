@@ -14,6 +14,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     create_engine,
+    text,
 )
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -246,7 +247,16 @@ def init_db(database_url: str | None = None) -> Engine:
         parent = os.path.dirname(path)
         if parent:
             os.makedirs(parent, exist_ok=True)
-    connect_args = {"check_same_thread": False} if "sqlite" in url else {}
-    engine = create_engine(url, connect_args=connect_args)
+    if "sqlite" in url:
+        # timeout=30: wait up to 30s for a write lock before raising OperationalError.
+        # WAL journal mode lets readers proceed concurrently with the one active writer.
+        connect_args = {"check_same_thread": False, "timeout": 30}
+        engine = create_engine(url, connect_args=connect_args)
+        with engine.connect() as conn:
+            conn.execute(text("PRAGMA journal_mode=WAL"))
+            conn.execute(text("PRAGMA busy_timeout=30000"))
+            conn.commit()
+    else:
+        engine = create_engine(url)
     Base.metadata.create_all(engine)
     return engine
