@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import MagicMock, patch
+from datetime import date, datetime
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 from cachetools import TTLCache
@@ -12,9 +13,10 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 import app.main as main_module
-from app.config import Settings
+from app.config import IST, Settings
 from app.main import app, get_current_settings, get_db_session
-from app.storage import Alert, Base
+from app.storage import Alert, AppError, Base, Gtt, Instrument, Order, Position
+from app.watcher import EntryFilledEvent
 
 
 # ── Shared test config ────────────────────────────────────────────────────────
@@ -230,3 +232,190 @@ def test_health_returns_ok(client) -> None:
     resp = c.get("/health")
     assert resp.status_code == 200
     assert resp.json() == {"status": "ok"}
+
+
+# ── _on_entry_filled: GTT placement pipeline ──────────────────────────────────
+
+def _seed_alert_order_instrument(factory, kite_order_id="ORD001",
+                                  tradingsymbol="NIFTY2651923400CE", exchange="NFO"):
+    """Insert Alert + Instrument + Order and return (alert_id, order_id)."""
+    now = datetime.now(IST)
+    with factory() as s:
+        alert = Alert(
+            received_at=now, strategy_id="t", tv_ticker="NIFTY1!", tv_exchange="",
+            action="BUY", product="NRML", idempotency_key=f"k_{kite_order_id}",
+            raw_payload="{}", processed=True,
+        )
+        s.add(alert)
+        s.flush()
+        instr = Instrument(
+            instrument_token=99999, exchange_token=999,
+            tradingsymbol=tradingsymbol, name="NIFTY",
+            expiry=date(2026, 5, 19), strike=23400.0,
+            tick_size=0.05, lot_size=75,
+            instrument_type="CE", segment="NFO", exchange=exchange,
+        )
+        s.add(instr)
+        order = Order(
+            alert_id=alert.id, kite_order_id=kite_order_id,
+            variety="regular", exchange=exchange, tradingsymbol=tradingsymbol,
+            transaction_type="BUY", order_type="MARKET", product="NRML",
+            quantity=75, status="PENDING", placed_at=now, updated_at=now, dry_run=False,
+        )
+        s.add(order)
+        s.commit()
+        return alert.id, order.id
+
+
+def test_on_entry_filled_creates_position_and_gtt(monkeypatch) -> None:
+    """Happy path: fill event → Position created, GTT placed on Kite, Gtt row ACTIVE."""
+    factory = _make_session_factory()
+    monkeypatch.setattr(main_module, "_SessionFactory", factory)
+    _seed_alert_order_instrument(factory)
+
+    mock_kite = MagicMock()
+    mock_kite.place_gtt.return_value = {"trigger_id": 42}
+    mock_mgr = MagicMock()
+    mock_mgr.get_kite.return_value = mock_kite
+    monkeypatch.setattr(main_module, "get_session_manager", lambda: mock_mgr)
+    monkeypatch.setattr(main_module, "_pending_order_meta",
+                        {"ORD001": {"instrument_type": "CE", "underlying": "NIFTY"}})
+
+    settings = _test_settings(DRY_RUN=False, SL_PREMIUM_PCT=0.30, RR_RATIO=2.0)
+    monkeypatch.setattr(main_module, "get_settings", lambda: settings)
+
+    from app.main import _on_entry_filled
+    _on_entry_filled(EntryFilledEvent(kite_order_id="ORD001", fill_price=300.0, fill_qty=75))
+
+    with factory() as s:
+        positions = s.query(Position).all()
+        gtts = s.query(Gtt).all()
+        order = s.query(Order).filter_by(kite_order_id="ORD001").first()
+
+    assert len(positions) == 1, "Position must be created on fill"
+    assert positions[0].entry_premium == pytest.approx(300.0)
+    assert positions[0].current_sl == pytest.approx(210.0)   # 300 * (1 - 0.30)
+
+    assert len(gtts) == 1, "Gtt row must be created"
+    assert gtts[0].status == "ACTIVE"
+    assert gtts[0].kite_gtt_id == 42
+    assert gtts[0].sl_trigger == pytest.approx(210.0)
+    assert gtts[0].target_trigger == pytest.approx(480.0)    # 300 + 2 * (300*0.30)
+
+    assert order.status == "COMPLETE"
+    assert mock_kite.place_gtt.call_count == 1
+
+
+def test_on_entry_filled_gtt_failure_saves_position_and_logs_error(monkeypatch) -> None:
+    """GTT placement fails → Position is still committed, AppError written, Gtt marked GTT_FAILED."""
+    factory = _make_session_factory()
+    monkeypatch.setattr(main_module, "_SessionFactory", factory)
+    _seed_alert_order_instrument(factory, kite_order_id="ORD002")
+
+    mock_kite = MagicMock()
+    mock_kite.place_gtt.side_effect = Exception("Kite rejected GTT")
+    mock_mgr = MagicMock()
+    mock_mgr.get_kite.return_value = mock_kite
+    monkeypatch.setattr(main_module, "get_session_manager", lambda: mock_mgr)
+    monkeypatch.setattr(main_module, "_pending_order_meta",
+                        {"ORD002": {"instrument_type": "CE", "underlying": "NIFTY"}})
+
+    settings = _test_settings(DRY_RUN=False, SL_PREMIUM_PCT=0.30, RR_RATIO=2.0)
+    monkeypatch.setattr(main_module, "get_settings", lambda: settings)
+
+    from app.main import _on_entry_filled
+    _on_entry_filled(EntryFilledEvent(kite_order_id="ORD002", fill_price=300.0, fill_qty=75))
+
+    with factory() as s:
+        positions = s.query(Position).all()
+        gtts = s.query(Gtt).all()
+        errors = s.query(AppError).all()
+
+    assert len(positions) == 1, "Position must be saved even when GTT placement fails"
+    assert len(gtts) == 1, "Gtt row must be created (as audit trail)"
+    assert gtts[0].status == "GTT_FAILED"
+    assert gtts[0].kite_gtt_id is None
+
+    assert len(errors) == 1, "AppError must be written so /status shows the failure"
+    assert errors[0].error_type == "GttPlacementError"
+    assert "Kite rejected GTT" in errors[0].message
+
+
+def test_watch_order_registered_after_session_commit(monkeypatch) -> None:
+    """watch_order must be called only after the Order row is committed.
+
+    Before the fix, watch_order was called before session.commit(), so
+    _on_entry_filled could not find the Order (race condition). This test
+    verifies the fix: when watch_order fires, the Order is already visible
+    in a fresh DB session.
+    """
+    factory = _make_session_factory()
+    settings = _test_settings(DRY_RUN=False)
+    monkeypatch.setattr(main_module, "_SessionFactory", factory)
+
+    # Seed Alert + Instrument so resolve_expiry / select_strike can be mocked
+    now = datetime.now(IST)
+    with factory() as s:
+        alert = Alert(
+            received_at=now, strategy_id="t", tv_ticker="NIFTY1!", tv_exchange="",
+            action="BUY", product="NRML", idempotency_key="race_test_key",
+            raw_payload="{}", processed=False,
+        )
+        s.add(alert)
+        s.commit()
+        alert_id = alert.id
+
+    committed_when_watched: list[bool] = []
+
+    mock_watcher = MagicMock()
+    def _check_committed(order_id: str) -> None:
+        # Open a fresh session — exactly what _on_entry_filled does
+        with factory() as s:
+            row = s.query(Order).filter_by(kite_order_id=order_id).first()
+            committed_when_watched.append(row is not None)
+    mock_watcher.watch_order.side_effect = _check_committed
+    monkeypatch.setattr(main_module, "_watcher", mock_watcher)
+
+    # Mock Kite + expiry/strike chain
+    from app.expiry_resolver import ResolvedExpiry
+    from app.strike_selector import StrikeSelection
+
+    mock_instr = MagicMock()
+    mock_instr.lot_size = 75
+    mock_instr.exchange = "NFO"
+    mock_instr.tradingsymbol = "NIFTY2651923400CE"
+
+    mock_selection = MagicMock()
+    mock_selection.instrument = mock_instr
+    mock_selection.option_ltp = 300.0
+
+    mock_kite = MagicMock()
+    mock_kite.quote.return_value = {"NSE:NIFTY 50": {"last_price": 23400.0}}
+    mock_mgr = MagicMock()
+    mock_mgr.get_token_info.return_value = {"is_valid": True, "age_hours": 1, "reason": None}
+    mock_mgr.get_kite.return_value = mock_kite
+    monkeypatch.setattr(main_module, "get_session_manager", lambda: mock_mgr)
+
+    monkeypatch.setattr(main_module, "resolve_expiry",
+                        lambda *a, **kw: ResolvedExpiry(date(2026, 5, 21), 7, "NEAREST_WEEKLY"))
+    monkeypatch.setattr(main_module, "select_strike", lambda *a, **kw: mock_selection)
+    monkeypatch.setattr(main_module, "place_entry", lambda *a, **kw: "RACE_ORD_001")
+    monkeypatch.setattr(main_module, "risk", MagicMock(
+        check_risk_gates=lambda *a, **kw: None,
+        compute_option_qty=lambda *a, **kw: 75,
+        daily_loss_remaining=MagicMock(return_value=__import__("decimal").Decimal("10000")),
+    ))
+
+    from app.main import _process_alert
+    from app.schemas import AlertPayload
+    payload = AlertPayload(
+        symbol="NIFTY1!", action="BUY", price=23400.0,
+        timeframe="5", alert_id="race_test_key",
+        timestamp=now,
+    )
+    _process_alert(alert_id, payload, settings)
+
+    assert committed_when_watched, "watch_order was never called"
+    assert all(committed_when_watched), (
+        "watch_order fired before Order was committed — race condition still present"
+    )

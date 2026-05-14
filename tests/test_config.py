@@ -75,20 +75,20 @@ def test_sizing_mode_string_coercion():
 
 def test_capital_defaults():
     s = _s()
-    assert s.CAPITAL_PER_TRADE == 30_000.0
+    assert s.CAPITAL_PER_TRADE == 100_000.0
     assert s.TOTAL_CAPITAL == 100_000.0
     assert s.RISK_PER_TRADE_PCT == 1.0
 
 
 def test_max_daily_loss_defaults():
     s = _s()
-    assert s.MAX_DAILY_LOSS_ABS == 2_000.0
-    assert s.MAX_DAILY_LOSS_PCT == 2.0
+    assert s.MAX_DAILY_LOSS_ABS == 10_000.0
+    assert s.MAX_DAILY_LOSS_PCT == 10.0
 
 
 def test_effective_max_daily_loss_both_equal():
-    # 2% of ₹1L = ₹2000 == ABS ₹2000 → min = ₹2000
-    assert _s().effective_max_daily_loss == 2_000.0
+    # 10% of ₹1L = ₹10000 == ABS ₹10000 → min = ₹10000
+    assert _s().effective_max_daily_loss == 10_000.0
 
 
 def test_effective_max_daily_loss_abs_lower():

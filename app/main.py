@@ -185,20 +185,36 @@ def _on_entry_filled(event: EntryFilledEvent) -> None:
         session.flush()  # get position.id
 
         kite_gtt_id = None
+        gtt_error: str | None = None
         if not settings.DRY_RUN:
             from decimal import Decimal
             kite_client = get_session_manager().get_kite()
-            kite_gtt_id = place_gtt_oco(
-                kite_client,
-                instrument,
-                event.fill_qty,
-                sl_trigger=Decimal(str(sl_price)),
-                sl_limit=Decimal(str(sl_price)),
-                target_trigger=Decimal(str(target_price)),
-                target_limit=Decimal(str(target_price)),
-                last_price=Decimal(str(fill_price)),
-                product=order.product,
-            )
+            try:
+                kite_gtt_id = place_gtt_oco(
+                    kite_client,
+                    instrument,
+                    event.fill_qty,
+                    sl_trigger=Decimal(str(sl_price)),
+                    sl_limit=Decimal(str(sl_price)),
+                    target_trigger=Decimal(str(target_price)),
+                    target_limit=Decimal(str(target_price)),
+                    last_price=Decimal(str(fill_price)),
+                    product=order.product,
+                )
+            except Exception as exc:
+                gtt_error = str(exc)
+                log.error(
+                    "_on_entry_filled: GTT placement failed for %s — %s. "
+                    "Position saved without SL; manual intervention required.",
+                    order.tradingsymbol, exc, exc_info=True,
+                )
+                session.add(AppError(
+                    alert_id=order.alert_id,
+                    error_type="GttPlacementError",
+                    message=f"GTT OCO failed for {order.tradingsymbol}: {exc}",
+                    traceback=traceback.format_exc(),
+                    occurred_at=now,
+                ))
         else:
             log.info(
                 "_on_entry_filled DRY_RUN: would place GTT OCO sl=%.4f target=%.4f for %s",
@@ -216,7 +232,7 @@ def _on_entry_filled(event: EntryFilledEvent) -> None:
             sl_order_price=sl_price,
             target_order_price=target_price,
             last_price_at_placement=fill_price,
-            status="ACTIVE" if not settings.DRY_RUN else "DRY_RUN",
+            status="ACTIVE" if (not settings.DRY_RUN and gtt_error is None) else ("GTT_FAILED" if gtt_error else "DRY_RUN"),
             placed_at=now,
             updated_at=now,
             dry_run=settings.DRY_RUN,
@@ -532,13 +548,6 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
                         "underlying": underlying.name,
                         "dry_run": False,
                     }
-                    if _watcher is not None:
-                        _watcher.watch_order(kite_order_id)
-                    else:
-                        log.error(
-                            "Alert %d: _watcher is None — GTT will not be placed for %s",
-                            alert_id, fut_instr.tradingsymbol,
-                        )
             else:
                 log.info(
                     "Alert %d: DRY_RUN — would place MARKET BUY %d lots %s (sl_dist=%.4f)",
@@ -565,6 +574,16 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
 
             alert.processed = True
             session.commit()
+            # Register AFTER commit so _on_entry_filled can find the Order row.
+            # MARKET orders fill in milliseconds; committing first closes the race.
+            if kite_order_id and not settings.DRY_RUN:
+                if _watcher is not None:
+                    _watcher.watch_order(kite_order_id)
+                else:
+                    log.error(
+                        "Alert %d: _watcher is None — GTT will not be placed for %s",
+                        alert_id, fut_instr.tradingsymbol,
+                    )
             return
 
         # ── EQUITY (CNC) entry ────────────────────────────────────────────────
@@ -626,13 +645,6 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
                         "underlying": underlying.name,
                         "dry_run": False,
                     }
-                    if _watcher is not None:
-                        _watcher.watch_order(kite_order_id)
-                    else:
-                        log.error(
-                            "Alert %d: _watcher is None — GTT will not be placed for %s",
-                            alert_id, eq_instrument.tradingsymbol,
-                        )
             else:
                 log.info(
                     "Alert %d: DRY_RUN — would BUY %d shares %s MARKET CNC at ltp=%.2f",
@@ -659,6 +671,15 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
 
             alert.processed = True
             session.commit()
+            # Register AFTER commit so _on_entry_filled can find the Order row.
+            if kite_order_id and not settings.DRY_RUN:
+                if _watcher is not None:
+                    _watcher.watch_order(kite_order_id)
+                else:
+                    log.error(
+                        "Alert %d: _watcher is None — GTT will not be placed for %s",
+                        alert_id, eq_instrument.tradingsymbol,
+                    )
             return
 
         # ── EXIT ──────────────────────────────────────────────────────────────
@@ -961,13 +982,6 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
                 "underlying": underlying.name,
                 "dry_run": False,
             }
-            if _watcher is not None:
-                _watcher.watch_order(kite_order_id)
-            else:
-                log.error(
-                    "Alert %d: _watcher is None — GTT will not be placed for %s",
-                    alert_id, selection.instrument.tradingsymbol,
-                )
 
         order = Order(
             alert_id=alert_id,
@@ -989,6 +1003,16 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
 
         alert.processed = True
         session.commit()
+        # Register AFTER commit so _on_entry_filled can find the Order row.
+        # MARKET orders fill in milliseconds; committing first closes the race.
+        if kite_order_id:
+            if _watcher is not None:
+                _watcher.watch_order(kite_order_id)
+            else:
+                log.error(
+                    "Alert %d: _watcher is None — GTT will not be placed for %s",
+                    alert_id, selection.instrument.tradingsymbol,
+                )
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
@@ -1165,6 +1189,53 @@ async def history(
             "<html><body><h2>Trade History</h2>"
             "<table border='1'><tr><th>ID</th><th>Symbol</th><th>PnL</th>"
             f"<th>Reason</th><th>Closed</th></tr>{rows_html}</table></body></html>"
+        ),
+        media_type="text/html",
+    )
+
+
+@app.get("/gtts")
+async def gtts_page(
+    session: Session = Depends(get_db_session),
+    _: None = Depends(_auth_guard),
+    settings: Settings = Depends(get_current_settings),
+) -> Response:
+    """Show every GTT row from the DB alongside its live status on Kite."""
+    rows = session.query(Gtt).order_by(Gtt.placed_at.desc()).limit(50).all()
+
+    live_map: dict[int, str] = {}
+    if not settings.DRY_RUN:
+        try:
+            kite_client = get_session_manager().get_kite()
+            for g in kite_client.get_gtts():
+                live_map[g["id"]] = g["status"]
+        except Exception as exc:
+            log.warning("gtts_page: could not fetch live GTTs from Kite: %s", exc)
+
+    rows_html = "".join(
+        "<tr>"
+        f"<td>{r.id}</td>"
+        f"<td>{r.tradingsymbol}</td>"
+        f"<td>{r.sl_trigger:.2f}</td>"
+        f"<td>{r.target_trigger:.2f}</td>"
+        f"<td>{r.last_price_at_placement:.2f}</td>"
+        f"<td>{r.status}</td>"
+        f"<td>{r.kite_gtt_id or '-'}</td>"
+        f"<td>{live_map.get(r.kite_gtt_id, 'N/A') if r.kite_gtt_id else '-'}</td>"
+        f"<td>{r.placed_at}</td>"
+        "</tr>"
+        for r in rows
+    )
+    return Response(
+        content=(
+            "<html><body><h2>GTT / Stop-Loss Orders</h2>"
+            "<table border='1'>"
+            "<tr><th>ID</th><th>Symbol</th><th>SL Trigger</th><th>Target Trigger</th>"
+            "<th>Entry Price</th><th>DB Status</th><th>Kite GTT ID</th>"
+            f"<th>Kite Live Status</th><th>Placed At</th></tr>{rows_html}"
+            "</table>"
+            "<p><small>Kite Live Status: active | triggered | disabled | cancelled | N/A=no session</small></p>"
+            "</body></html>"
         ),
         media_type="text/html",
     )
