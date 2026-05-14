@@ -587,7 +587,9 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
             return
 
         # ── EQUITY (CNC) entry ────────────────────────────────────────────────
-        if alert_data.instrument_type == "EQUITY":
+        # MCX symbols (CRUDEOILM, GOLD, etc.) sometimes arrive with instrument_type="EQUITY"
+        # due to a TradingView alert template misconfiguration. Guard against misrouting them.
+        if alert_data.instrument_type == "EQUITY" and underlying.segment != "MCX":
             if alert_data.action != "BUY":
                 log.warning(
                     "Alert %d: EQUITY only supports BUY action (got %s) — skipping",
