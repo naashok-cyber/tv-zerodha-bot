@@ -1293,7 +1293,7 @@ async def status_page(
     from app.storage import AppError
     errors = session.query(AppError).order_by(AppError.occurred_at.desc()).limit(10).all()
     errors_html = "".join(
-        f"<tr><td>{e.id}</td><td>{e.error_type}</td><td>{e.message[:80]}</td></tr>"
+        f"<tr><td>{e.id}</td><td>{e.error_type}</td><td>{e.message}</td></tr>"
         for e in errors
     )
     trade_mode = state.get_trade_mode()
