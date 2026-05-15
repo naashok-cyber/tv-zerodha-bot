@@ -3,8 +3,14 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import secrets
 import traceback
+
+logging.basicConfig(
+    level=os.environ.get("LOG_LEVEL", "INFO").upper(),
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from decimal import Decimal
