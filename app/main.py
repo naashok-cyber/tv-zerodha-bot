@@ -999,6 +999,17 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
                 Decimal(str(lot_size)),
             )
 
+        # For SELL_OPTIONS, premium-based sizing is wrong (margin drives the constraint).
+        # Cap at SELL_OPTIONS_MAX_LOTS; user controls this via .env.
+        if trade_mode == "SELL_OPTIONS":
+            max_qty = settings.SELL_OPTIONS_MAX_LOTS * lot_size
+            if qty > max_qty:
+                log.info(
+                    "[SELL_OPTIONS] Alert %d: qty %d lots capped to %d (SELL_OPTIONS_MAX_LOTS=%d)",
+                    alert_id, qty // lot_size, settings.SELL_OPTIONS_MAX_LOTS, settings.SELL_OPTIONS_MAX_LOTS,
+                )
+                qty = max_qty
+
         lots_count = qty // lot_size
         total_premium = option_ltp * mcx_units * qty
         log.info(
