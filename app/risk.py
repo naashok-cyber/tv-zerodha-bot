@@ -18,12 +18,24 @@ def compute_option_qty(
     option_ltp: Decimal,
     lot_size: Decimal,
 ) -> int:
-    """qty = floor(capital / ltp / lot_size) * lot_size; 0 if result < 1 lot."""
+    """Return qty (units) affordable within capital_per_trade.
+
+    Sizing rule:
+    - Trade the maximum number of whole lots that fit within capital_per_trade.
+    - If the total cost of the computed lots exceeds capital_per_trade (e.g. due
+      to rounding or a last-price drift), cap at exactly 1 lot.
+    - Return 0 if even 1 lot is unaffordable (caller should try lower delta).
+    """
     if option_ltp <= 0 or lot_size <= 0:
         return 0
     lots = (capital_per_trade / option_ltp / lot_size).to_integral_value(rounding=ROUND_DOWN)
     qty = int(lots) * int(lot_size)
-    return qty if qty >= int(lot_size) else 0
+    if qty < int(lot_size):
+        return 0
+    # Safety cap: if total cost exceeds capital (rounding/drift), fall back to 1 lot
+    if option_ltp * Decimal(str(qty)) > capital_per_trade:
+        return int(lot_size)
+    return qty
 
 
 def compute_equity_qty(

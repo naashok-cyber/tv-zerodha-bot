@@ -993,6 +993,20 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
                 Decimal(str(lot_size)),
             )
 
+        lots_count = qty // lot_size
+        total_premium = option_ltp * mcx_units * qty
+        log.info(
+            "[%s] Alert %d: placing %d lot(s) %s @ ltp=%.2f → total ₹%.0f (CAPITAL=%.0f)",
+            trade_mode, alert_id, lots_count, selection.instrument.tradingsymbol,
+            option_ltp, total_premium, settings.CAPITAL_PER_TRADE,
+        )
+        if lots_count > 1 and total_premium > settings.CAPITAL_PER_TRADE:
+            log.warning(
+                "Alert %d: %d lots × ₹%.0f = ₹%.0f exceeds CAPITAL_PER_TRADE — capped to 1 lot",
+                alert_id, lots_count, option_ltp * mcx_units, total_premium,
+            )
+            qty = lot_size
+
         kite_order_id = place_entry(
             kite_client, selection.instrument, entry_side, qty, "MARKET", product
         )
