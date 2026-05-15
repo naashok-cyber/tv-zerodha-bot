@@ -28,6 +28,13 @@ class SizingMode(str, Enum):
     UNDERLYING_RISK_BASED = "UNDERLYING_RISK_BASED"
 
 
+class TradeMode(str, Enum):
+    # BUY_OPTIONS: BUY signal → buy CE, SELL signal → buy PE  (default)
+    # SELL_OPTIONS: BUY signal → sell PE, SELL signal → sell CE  (write/short options)
+    BUY_OPTIONS = "BUY_OPTIONS"
+    SELL_OPTIONS = "SELL_OPTIONS"
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -106,6 +113,7 @@ class Settings(BaseSettings):
     MIN_OI_STOCK: int = 100
     MAX_SPREAD_PCT: float = 0.05             # 5% of LTP bid-ask limit
     SIZING_MODE: SizingMode = SizingMode.PREMIUM_BASED
+    TRADE_MODE: TradeMode = TradeMode.BUY_OPTIONS   # override in .env; can also be toggled live via /trade-mode/toggle
     RISK_FREE_RATE: float = 0.065            # India 10-yr G-sec proxy for Black-Scholes / Black-76
     DIVIDEND_YIELD_DEFAULT: float = 0.0     # q for all underlyings not in OVERRIDES
     DIVIDEND_YIELD_OVERRIDES: dict[str, float] = {}  # per-symbol q; e.g. {"INFY": 0.025}

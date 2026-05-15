@@ -138,6 +138,7 @@ def _on_entry_filled(event: EntryFilledEvent) -> None:
 
         meta = _pending_order_meta.pop(event.kite_order_id, {})
         instrument_type = meta.get("instrument_type", "CE")
+        entry_side = meta.get("entry_side", "BUY")
 
         instrument = (
             session.query(Instrument)
@@ -165,8 +166,14 @@ def _on_entry_filled(event: EntryFilledEvent) -> None:
             target_price = fill_price + target_distance
         else:  # CE / PE options
             sl_risk = fill_price * settings.SL_PREMIUM_PCT
-            sl_price = fill_price - sl_risk
-            target_price = fill_price + settings.RR_RATIO * sl_risk
+            if entry_side == "BUY":
+                # Long: SL when premium falls, target when it rises
+                sl_price = fill_price - sl_risk
+                target_price = fill_price + settings.RR_RATIO * sl_risk
+            else:
+                # Short (written option): SL when premium rises, target when it falls
+                sl_price = fill_price + sl_risk
+                target_price = fill_price - settings.RR_RATIO * sl_risk
 
         position = Position(
             order_id=order.id,
@@ -200,6 +207,7 @@ def _on_entry_filled(event: EntryFilledEvent) -> None:
                     target_limit=Decimal(str(target_price)),
                     last_price=Decimal(str(fill_price)),
                     product=order.product,
+                    entry_side=entry_side,
                 )
             except Exception as exc:
                 gtt_error = str(exc)
@@ -217,8 +225,8 @@ def _on_entry_filled(event: EntryFilledEvent) -> None:
                 ))
         else:
             log.info(
-                "_on_entry_filled DRY_RUN: would place GTT OCO sl=%.4f target=%.4f for %s",
-                sl_price, target_price, order.tradingsymbol,
+                "_on_entry_filled DRY_RUN [%s]: would place GTT OCO sl=%.4f target=%.4f for %s",
+                entry_side, sl_price, target_price, order.tradingsymbol,
             )
 
         gtt = Gtt(
@@ -304,6 +312,7 @@ async def lifespan(app: FastAPI):
         engine = init_db(get_settings().DATABASE_URL)
         _SessionFactory = sessionmaker(bind=engine, expire_on_commit=False)
     _watcher = OrderWatcher(on_entry_filled=_on_entry_filled, on_gtt_filled=_on_gtt_filled)
+    state.set_trade_mode(get_settings().TRADE_MODE.value)
     _scheduler = make_scheduler(session_factory=_SessionFactory)
     _scheduler.start()
     daily_session_check(now=datetime.now(IST))
@@ -818,13 +827,20 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
             session.commit()
             return
 
-        # ── Non-NG options entry (BUY → CE, SELL → PE) ───────────────────────
-        flag = "CE" if alert_data.action == "BUY" else "PE"
+        # ── Non-NG options entry ───────────────────────────────────────────────
+        trade_mode = state.get_trade_mode()
+        if trade_mode == "BUY_OPTIONS":
+            flag = "CE" if alert_data.action == "BUY" else "PE"
+            entry_side = "BUY"
+        else:  # SELL_OPTIONS: write the opposite type
+            flag = "PE" if alert_data.action == "BUY" else "CE"
+            entry_side = "SELL"
+        log.info("[%s] Alert %d: %s signal → %s %s", trade_mode, alert_id, alert_data.action, entry_side, flag)
 
         if settings.DRY_RUN:
             log.info(
-                "Alert %d: DRY_RUN — would place %s %s option for %s (segment=%s)",
-                alert_id, alert_data.action, flag, underlying.name, underlying.segment,
+                "[%s] Alert %d: DRY_RUN — would %s %s option for %s (segment=%s)",
+                trade_mode, alert_id, entry_side, flag, underlying.name, underlying.segment,
             )
             order = Order(
                 alert_id=alert_id,
@@ -832,7 +848,7 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
                 variety="regular",
                 exchange=underlying.segment,
                 tradingsymbol=underlying.name,
-                transaction_type="BUY",
+                transaction_type=entry_side,
                 order_type="MARKET",
                 product=product,
                 quantity=0,
@@ -976,12 +992,13 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
             )
 
         kite_order_id = place_entry(
-            kite_client, selection.instrument, "BUY", qty, "MARKET", product
+            kite_client, selection.instrument, entry_side, qty, "MARKET", product
         )
         if kite_order_id:
             _pending_order_meta[kite_order_id] = {
                 "instrument_type": flag,
                 "underlying": underlying.name,
+                "entry_side": entry_side,
                 "dry_run": False,
             }
 
@@ -991,7 +1008,7 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
             variety="regular",
             exchange=selection.instrument.exchange,
             tradingsymbol=selection.instrument.tradingsymbol,
-            transaction_type="BUY",
+            transaction_type=entry_side,
             order_type="MARKET",
             product=product,
             quantity=qty,
@@ -1257,15 +1274,52 @@ async def status_page(
         f"<tr><td>{e.id}</td><td>{e.error_type}</td><td>{e.message[:80]}</td></tr>"
         for e in errors
     )
+    trade_mode = state.get_trade_mode()
+    if trade_mode == "BUY_OPTIONS":
+        mode_color = "#155724"
+        mode_bg = "#d4edda"
+        btn_color = "#dc3545"
+        btn_label = "Switch to SELL_OPTIONS (write options)"
+    else:
+        mode_color = "#721c24"
+        mode_bg = "#f8d7da"
+        btn_color = "#28a745"
+        btn_label = "Switch to BUY_OPTIONS (buy options)"
     return Response(
         content=(
-            f"<html><body><h2>Bot Status</h2>"
+            f"<html><head>"
+            f"<meta name='viewport' content='width=device-width,initial-scale=1'>"
+            f"<style>"
+            f"body{{font-family:sans-serif;padding:16px;max-width:600px;margin:auto}}"
+            f".badge{{font-size:1.3em;font-weight:bold;padding:8px 14px;border-radius:8px;"
+            f"display:inline-block;color:{mode_color};background:{mode_bg}}}"
+            f".toggle{{display:block;width:100%;padding:18px;font-size:1.1em;border:none;"
+            f"border-radius:10px;cursor:pointer;background:{btn_color};color:white;margin:14px 0}}"
+            f"table{{width:100%;border-collapse:collapse}}th,td{{padding:6px;border:1px solid #ddd;text-align:left}}"
+            f"</style></head>"
+            f"<body>"
+            f"<h2>Bot Status</h2>"
             f"<p>DRY_RUN: {settings.DRY_RUN} | TRADING_ENABLED: {settings.TRADING_ENABLED}</p>"
-            f"<h3>Recent Errors</h3><table border='1'><tr><th>ID</th><th>Type</th>"
-            f"<th>Message</th></tr>{errors_html}</table></body></html>"
+            f"<h3>Trade Mode</h3>"
+            f"<div class='badge'>{trade_mode}</div>"
+            f"<form method='post' action='/trade-mode/toggle'>"
+            f"<button class='toggle' type='submit'>{btn_label}</button>"
+            f"</form>"
+            f"<h3>Recent Errors</h3>"
+            f"<table><tr><th>ID</th><th>Type</th><th>Message</th></tr>{errors_html}</table>"
+            f"</body></html>"
         ),
         media_type="text/html",
     )
+
+
+@app.post("/trade-mode/toggle")
+async def toggle_trade_mode(
+    _: None = Depends(_auth_guard),
+) -> Response:
+    new_mode = state.toggle_trade_mode()
+    log.info("Trade mode toggled to %s", new_mode)
+    return Response(status_code=302, headers={"Location": "/status"})
 
 
 @app.get("/health")
