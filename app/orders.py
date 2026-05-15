@@ -136,35 +136,38 @@ def place_gtt_oco(
     target_limit_r = float(round_to_tick(target_limit, tick))
     last_price_r = float(round_to_tick(last_price, tick))
 
-    order_dict = [
-        {
+    def _leg(price: float) -> dict:
+        return {
             "exchange": instrument.exchange,
             "tradingsymbol": instrument.tradingsymbol,
             "transaction_type": exit_side,
             "quantity": qty,
             "order_type": "LIMIT",
             "product": product,
-            "price": sl_limit_r,
-        },
-        {
-            "exchange": instrument.exchange,
-            "tradingsymbol": instrument.tradingsymbol,
-            "transaction_type": exit_side,
-            "quantity": qty,
-            "order_type": "LIMIT",
-            "product": product,
-            "price": target_limit_r,
-        },
-    ]
+            "price": price,
+        }
+
+    sl_leg = _leg(sl_limit_r)
+    tgt_leg = _leg(target_limit_r)
+
+    if entry_side.upper() == "BUY":
+        # Long: SL trigger is below last_price, target trigger is above — Kite needs [low, high]
+        trigger_values = [sl_trigger_r, target_trigger_r]
+        orders = [sl_leg, tgt_leg]
+    else:
+        # Short: target trigger is below last_price (profit when premium falls),
+        # SL trigger is above (loss when premium rises) — still pass [low, high] to Kite
+        trigger_values = [target_trigger_r, sl_trigger_r]
+        orders = [tgt_leg, sl_leg]
 
     raw = backoff_call(
         kite_client.place_gtt,
         trigger_type=kite_client.GTT_TYPE_OCO,
         tradingsymbol=instrument.tradingsymbol,
         exchange=instrument.exchange,
-        trigger_values=[sl_trigger_r, target_trigger_r],
+        trigger_values=trigger_values,
         last_price=last_price_r,
-        orders=order_dict,
+        orders=orders,
     )
     # Kite returns either an int or {"trigger_id": <int>} depending on SDK version.
     gtt_id: int = raw["trigger_id"] if isinstance(raw, dict) else int(raw)

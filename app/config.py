@@ -94,6 +94,8 @@ class Settings(BaseSettings):
     # ── Options (v2) ──────────────────────────────────────────────────────────
     TARGET_DELTA: float = 0.65
     DELTA_FALLBACK_STEPS: list[float] = [0.50, 0.35, 0.25]  # tried in order when primary delta strike exceeds capital
+    SELL_OPTIONS_TARGET_DELTA: float = 0.50          # ATM for writing options (SELL_OPTIONS mode)
+    SELL_OPTIONS_DELTA_FALLBACK_STEPS: list[float] = [0.40, 0.30, 0.20]  # OTM fallback for writing
     DELTA_TOLERANCE: float = 0.05
     OPTION_EXPIRY_RULE: ExpiryRule = ExpiryRule.NEAREST_WEEKLY
     MIN_DAYS_TO_EXPIRY_INDEX: int = 1

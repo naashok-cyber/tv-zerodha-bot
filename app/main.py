@@ -836,6 +836,8 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
             flag = "PE" if alert_data.action == "BUY" else "CE"
             entry_side = "SELL"
         log.info("[%s] Alert %d: %s signal → %s %s", trade_mode, alert_id, alert_data.action, entry_side, flag)
+        target_delta = settings.TARGET_DELTA if trade_mode == "BUY_OPTIONS" else settings.SELL_OPTIONS_TARGET_DELTA
+        delta_fallbacks = settings.DELTA_FALLBACK_STEPS if trade_mode == "BUY_OPTIONS" else settings.SELL_OPTIONS_DELTA_FALLBACK_STEPS
 
         if settings.DRY_RUN:
             log.info(
@@ -910,7 +912,7 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
                 session,
                 alert_id=alert_id,
                 segment=underlying.segment,
-                target_delta=settings.TARGET_DELTA,
+                target_delta=target_delta,
                 settings=settings,
             )
         except NoValidStrikeError as exc:
@@ -934,11 +936,11 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
                 "Alert %d: options sizing — 0 lots at ltp=%.4f mcx_units=%d CAPITAL=%.0f; "
                 "retrying with lower deltas %s",
                 alert_id, option_ltp, mcx_units,
-                settings.CAPITAL_PER_TRADE, settings.DELTA_FALLBACK_STEPS,
+                settings.CAPITAL_PER_TRADE, delta_fallbacks,
             )
             fallback_selection = None
-            for fallback_delta in settings.DELTA_FALLBACK_STEPS:
-                if fallback_delta >= settings.TARGET_DELTA:
+            for fallback_delta in delta_fallbacks:
+                if fallback_delta >= target_delta:
                     continue
                 try:
                     candidate = select_strike(
@@ -976,7 +978,7 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
             if fallback_selection is None:
                 log.warning(
                     "Alert %d: no affordable strike at any delta %s within CAPITAL=%.0f — skipping",
-                    alert_id, settings.DELTA_FALLBACK_STEPS, settings.CAPITAL_PER_TRADE,
+                    alert_id, delta_fallbacks, settings.CAPITAL_PER_TRADE,
                 )
                 alert.processed = True
                 session.commit()
