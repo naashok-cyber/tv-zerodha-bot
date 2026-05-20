@@ -104,8 +104,8 @@ def _consecutive_losses(session: Any) -> int:
 
 def _check_risk_guards(session: Any, settings: Settings) -> tuple[bool, str]:
     loss = _realised_loss_today(session)
-    if loss >= settings.effective_max_daily_loss:
-        return False, f"daily loss ₹{loss:.2f} >= limit ₹{settings.effective_max_daily_loss:.2f}"
+    if loss >= settings.MAX_DAILY_LOSS_ABS:
+        return False, f"daily loss ₹{loss:.2f} >= limit ₹{settings.MAX_DAILY_LOSS_ABS:.2f}"
     trades = _trades_today_count(session)
     if trades >= settings.MAX_TRADES_PER_DAY:
         return False, f"trades today {trades} >= MAX_TRADES_PER_DAY {settings.MAX_TRADES_PER_DAY}"
@@ -166,10 +166,17 @@ def _on_entry_filled(event: EntryFilledEvent) -> None:
             sl_price = fill_price - sl_distance
             target_price = fill_price + target_distance
         elif instrument_type == "FUT":
-            sl_distance = meta.get("sl_distance", fill_price * settings.FUTURES_SL_PCT)
-            target_distance = meta.get("target_distance", settings.RR_RATIO * sl_distance)
-            sl_price = fill_price - sl_distance
-            target_price = fill_price + target_distance
+            # sl_distance is always price-per-unit (FUTURES_SL_PCT × fill_price).
+            # Do NOT pull from meta — the NG branch stored the lot-scaled INR value
+            # which, subtracted from fill_price, produces a negative trigger price.
+            sl_distance = fill_price * settings.FUTURES_SL_PCT
+            target_distance = settings.RR_RATIO * sl_distance
+            if entry_side == "BUY":
+                sl_price = fill_price - sl_distance
+                target_price = fill_price + target_distance
+            else:  # short futures
+                sl_price = fill_price + sl_distance
+                target_price = fill_price - target_distance
         else:  # CE / PE options
             sl_risk = fill_price * settings.SL_PREMIUM_PCT
             if entry_side == "BUY":
@@ -543,30 +550,24 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
                 session.commit()
                 return
 
-            max_qty = settings.MAX_LOTS_PER_ORDER * fut_instr.lot_size
-            if qty > max_qty:
-                log.warning(
-                    "Alert %d: NG qty %d capped to %d (MAX_LOTS_PER_ORDER=%d)",
-                    alert_id, qty, max_qty, settings.MAX_LOTS_PER_ORDER,
-                )
-                qty = max_qty
+            qty = min(qty, settings.MAX_LOTS_PER_TRADE * fut_instr.lot_size)
 
+            ng_side = "BUY" if alert_data.action == "BUY" else "SELL"
             kite_order_id = None
             if not settings.DRY_RUN:
                 kite_client = get_session_manager().get_kite()
-                kite_order_id = place_entry(kite_client, fut_instr, "BUY", qty, "MARKET", product)
+                kite_order_id = place_entry(kite_client, fut_instr, ng_side, qty, "MARKET", product)
                 if kite_order_id:
                     _pending_order_meta[kite_order_id] = {
                         "instrument_type": "FUT",
-                        "sl_distance": sl_distance,
-                        "target_distance": target_distance,
+                        "entry_side": ng_side,
                         "underlying": underlying.name,
                         "dry_run": False,
                     }
             else:
                 log.info(
-                    "Alert %d: DRY_RUN — would place MARKET BUY %d lots %s (sl_dist=%.4f)",
-                    alert_id, qty // fut_instr.lot_size, fut_instr.tradingsymbol, sl_distance,
+                    "Alert %d: DRY_RUN — would place MARKET %s %d lots %s (sl_dist=%.4f)",
+                    alert_id, ng_side, qty // fut_instr.lot_size, fut_instr.tradingsymbol, sl_distance,
                 )
 
             order = Order(
@@ -575,7 +576,7 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
                 variety="regular",
                 exchange=fut_instr.exchange,
                 tradingsymbol=fut_instr.tradingsymbol,
-                transaction_type="BUY",
+                transaction_type=ng_side,
                 order_type="MARKET",
                 product=product,
                 quantity=qty,
@@ -640,14 +641,14 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
             else:
                 ltp = float(alert_data.price)
 
-            qty = risk.compute_equity_qty(
-                Decimal(str(settings.CAPITAL_PER_TRADE)),
-                Decimal(str(ltp)),
-            )
+            risk_amount = Decimal(str(settings.CAPITAL_PER_TRADE)) * settings.RISK_PCT
+            sl_per_share = Decimal(str(ltp)) * Decimal(str(settings.EQUITY_SL_PCT))
+            qty = floor(float(risk_amount / sl_per_share)) if sl_per_share > 0 else 0
+            qty = min(qty, settings.MAX_LOTS_PER_TRADE)
             if qty < 1:
                 log.warning(
-                    "Alert %d: EQUITY sizing — 0 shares at ltp=%.2f CAPITAL=%.0f",
-                    alert_id, ltp, settings.CAPITAL_PER_TRADE,
+                    "Alert %d: EQUITY sizing — 0 shares at ltp=%.2f risk_amount=%.0f",
+                    alert_id, ltp, float(risk_amount),
                 )
                 alert.processed = True
                 session.commit()
@@ -931,18 +932,24 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
         # MCX: Kite quotes LTP per underlying unit (barrel/gram/kg) but orders are placed in lots.
         # Multiply by units-per-lot so sizing reflects the true premium per lot.
         mcx_units = settings.MCX_LOT_UNITS.get(underlying.name, 1) if underlying.segment == "MCX" else 1
-        qty = risk.compute_option_qty(
-            Decimal(str(settings.CAPITAL_PER_TRADE)),
-            Decimal(str(option_ltp * mcx_units)),
-            Decimal(str(lot_size)),
+
+        # Risk-based sizing: cap position so loss at SL ≤ capital_risk (mirrors NG futures).
+        # For NSE (mcx_units=1): sl_per_unit = ltp×SL_PCT; compute_futures_qty divides by lot_size.
+        # For MCX (lot_size=1):  sl_per_unit = ltp×mcx_units×SL_PCT (= risk per Kite lot directly).
+        daily_remaining_opt = risk.daily_loss_remaining(session, now)
+        capital_risk_opt = min(
+            Decimal(str(settings.CAPITAL_PER_TRADE)) * settings.RISK_PCT,
+            daily_remaining_opt,
         )
+        sl_per_unit = Decimal(str(option_ltp * mcx_units)) * Decimal(str(settings.SL_PREMIUM_PCT))
+        qty = risk.compute_futures_qty(capital_risk_opt, sl_per_unit, Decimal(str(lot_size)))
 
         if qty < lot_size:
             log.warning(
-                "Alert %d: options sizing — 0 lots at ltp=%.4f mcx_units=%d CAPITAL=%.0f; "
+                "Alert %d: options sizing — 0 lots at ltp=%.4f mcx_units=%d risk_budget=%.0f; "
                 "retrying with lower deltas %s",
                 alert_id, option_ltp, mcx_units,
-                settings.CAPITAL_PER_TRADE, delta_fallbacks,
+                float(capital_risk_opt), delta_fallbacks,
             )
             fallback_selection = None
             for fallback_delta in delta_fallbacks:
@@ -967,24 +974,28 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
                         alert_id, fallback_delta,
                     )
                     continue
-                fallback_qty = risk.compute_option_qty(
-                    Decimal(str(settings.CAPITAL_PER_TRADE)),
-                    Decimal(str(float(candidate.option_ltp) * mcx_units)),
+                fallback_sl_per_unit = (
+                    Decimal(str(float(candidate.option_ltp) * mcx_units))
+                    * Decimal(str(settings.SL_PREMIUM_PCT))
+                )
+                fallback_qty = risk.compute_futures_qty(
+                    capital_risk_opt,
+                    fallback_sl_per_unit,
                     Decimal(str(candidate.instrument.lot_size)),
                 )
                 if fallback_qty >= candidate.instrument.lot_size:
                     log.info(
-                        "Alert %d: fallback delta=%.2f → %s ltp=%.4f fits CAPITAL=%.0f",
+                        "Alert %d: fallback delta=%.2f → %s ltp=%.4f fits risk_budget=%.0f",
                         alert_id, fallback_delta, candidate.instrument.tradingsymbol,
-                        candidate.option_ltp, settings.CAPITAL_PER_TRADE,
+                        candidate.option_ltp, float(capital_risk_opt),
                     )
                     fallback_selection = candidate
                     break
 
             if fallback_selection is None:
                 log.warning(
-                    "Alert %d: no affordable strike at any delta %s within CAPITAL=%.0f — skipping",
-                    alert_id, delta_fallbacks, settings.CAPITAL_PER_TRADE,
+                    "Alert %d: no affordable strike at any delta %s within risk_budget=%.0f — skipping",
+                    alert_id, delta_fallbacks, float(capital_risk_opt),
                 )
                 alert.processed = True
                 session.commit()
@@ -993,36 +1004,20 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
             selection = fallback_selection
             lot_size = selection.instrument.lot_size
             option_ltp = float(selection.option_ltp)
-            qty = risk.compute_option_qty(
-                Decimal(str(settings.CAPITAL_PER_TRADE)),
-                Decimal(str(option_ltp * mcx_units)),
-                Decimal(str(lot_size)),
+            sl_per_unit = (
+                Decimal(str(option_ltp * mcx_units)) * Decimal(str(settings.SL_PREMIUM_PCT))
             )
+            qty = risk.compute_futures_qty(capital_risk_opt, sl_per_unit, Decimal(str(lot_size)))
 
-        # For SELL_OPTIONS, premium-based sizing is wrong (margin drives the constraint).
-        # Cap at SELL_OPTIONS_MAX_LOTS; user controls this via .env.
-        if trade_mode == "SELL_OPTIONS":
-            max_qty = settings.SELL_OPTIONS_MAX_LOTS * lot_size
-            if qty > max_qty:
-                log.info(
-                    "[SELL_OPTIONS] Alert %d: qty %d lots capped to %d (SELL_OPTIONS_MAX_LOTS=%d)",
-                    alert_id, qty // lot_size, settings.SELL_OPTIONS_MAX_LOTS, settings.SELL_OPTIONS_MAX_LOTS,
-                )
-                qty = max_qty
+        qty = min(qty, settings.MAX_LOTS_PER_TRADE * lot_size)
 
         lots_count = qty // lot_size
         total_premium = option_ltp * mcx_units * qty
         log.info(
-            "[%s] Alert %d: placing %d lot(s) %s @ ltp=%.2f → total ₹%.0f (CAPITAL=%.0f)",
+            "[%s] Alert %d: placing %d lot(s) %s @ ltp=%.2f → total ₹%.0f (risk_budget=%.0f)",
             trade_mode, alert_id, lots_count, selection.instrument.tradingsymbol,
-            option_ltp, total_premium, settings.CAPITAL_PER_TRADE,
+            option_ltp, total_premium, float(capital_risk_opt),
         )
-        if lots_count > 1 and total_premium > settings.CAPITAL_PER_TRADE:
-            log.warning(
-                "Alert %d: %d lots × ₹%.0f = ₹%.0f exceeds CAPITAL_PER_TRADE — capped to 1 lot",
-                alert_id, lots_count, option_ltp * mcx_units, total_premium,
-            )
-            qty = lot_size
 
         kite_order_id = place_entry(
             kite_client, selection.instrument, entry_side, qty, "MARKET", product
@@ -1123,6 +1118,14 @@ async def webhook(
     except IntegrityError:
         session.rollback()
         return {"status": "duplicate"}
+
+    trades_today = _trades_today_count(session)
+    if trades_today >= settings.MAX_TRADES_PER_DAY:
+        log.warning(
+            "Alert %d: Max daily trades reached (%d/%d) — rejecting",
+            alert_row.id, trades_today, settings.MAX_TRADES_PER_DAY,
+        )
+        return {"status": "rejected", "reason": "max_daily_trades"}
 
     background_tasks.add_task(_process_alert, alert_row.id, payload, settings)
 

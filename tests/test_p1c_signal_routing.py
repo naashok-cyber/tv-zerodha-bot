@@ -226,13 +226,12 @@ def _seed_open_position(
 # ── NATURALGAS branch ─────────────────────────────────────────────────────────
 
 def test_ng_sizing_math():
-    """qty is capped at MAX_LOTS_PER_ORDER * lot_size when raw sizing exceeds it."""
-    # capital_risk = 15_000 (RISK_PCT=100%, daily cap=100k so not binding)
-    # entry=200, sl_frac=0.005, mcx_units=1250 (NATURALGAS default)
-    # sl_per_contract = 200 * 0.005 * 1250 = 1250
-    # raw qty = floor(15_000 / 1250 / 2) * 2 = floor(6) * 2 = 12; capped to MAX_LOTS_PER_ORDER(5) * lot_size(2) = 10
+    """qty is capped at MAX_LOTS_PER_TRADE(1) * lot_size unconditionally."""
+    # capital_risk = 15_000 * 0.05 = 750; sl_per_contract = 200 * 0.008 * 1250 = 2000
+    # raw qty = floor(750 / 2000 / 2) * 2 = 0 → but MAX_LOTS_PER_TRADE clamps after sizing.
+    # With RISK_PCT=1.0: capital_risk=15000, qty=floor(15000/2000/2)*2=6; capped to 1*2=2.
     factory = _make_factory()
-    s = _s(CAPITAL_PER_TRADE=15_000.0, RISK_PER_TRADE_PCT=100.0, FUTURES_SL_PCT=0.005)
+    s = _s(CAPITAL_PER_TRADE=15_000.0, RISK_PCT=Decimal("1.0"), FUTURES_SL_PCT=0.005)
 
     with factory() as session:
         _seed_instrument(session, name="NATURALGAS", exchange="MCX", itype="FUT",
@@ -255,7 +254,7 @@ def test_ng_sizing_math():
         order = session.query(Order).filter_by(alert_id=alert_id).first()
     assert order is not None
     assert order.dry_run is True
-    assert order.quantity == 10        # capped: MAX_LOTS_PER_ORDER(5) * lot_size(2)
+    assert order.quantity == 2         # capped: MAX_LOTS_PER_TRADE(1) * lot_size(2)
     mock_pe.assert_not_called()
 
 
@@ -285,8 +284,9 @@ def test_ng_dry_run_skips_place_entry():
 def test_ng_live_calls_place_entry_with_correct_args():
     """DRY_RUN=False: place_entry called with FUT instrument, BUY, qty, MARKET."""
     factory = _make_factory()
-    # capital_risk=10000, sl_distance=1.0, lot_size=1 → raw qty=10000, capped to MAX_LOTS_PER_ORDER(5)*lot_size(1)=5
-    s = _s(DRY_RUN=False, CAPITAL_PER_TRADE=10_000.0, RISK_PER_TRADE_PCT=100.0, FUTURES_SL_PCT=0.005)
+    # RISK_PCT=100% → capital_risk=10000; SL_PERCENT=0.008; mcx_units=1250; lot_size=1
+    # sl_per_contract=200*0.008*1250=2000; raw qty=floor(10000/2000/1)*1=5; capped to MAX_LOTS_PER_TRADE(1)=1
+    s = _s(DRY_RUN=False, CAPITAL_PER_TRADE=10_000.0, RISK_PCT=Decimal("1.0"))
 
     with factory() as session:
         _seed_instrument(session, name="NATURALGAS", exchange="MCX", itype="FUT",
@@ -312,8 +312,45 @@ def test_ng_live_calls_place_entry_with_correct_args():
     mock_pe.assert_called_once()
     args = mock_pe.call_args.args
     assert args[2] == "BUY"
-    assert args[3] == 5          # capped: MAX_LOTS_PER_ORDER(5) * lot_size(1)
+    assert args[3] == 1          # capped: MAX_LOTS_PER_TRADE(1) * lot_size(1)
     assert args[4] == "MARKET"
+
+
+def test_ng_sell_signal_places_sell_order():
+    """SELL signal must place a SELL (short) futures order, not BUY."""
+    factory = _make_factory()
+    s = _s(DRY_RUN=False, CAPITAL_PER_TRADE=10_000.0, RISK_PER_TRADE_PCT=100.0, FUTURES_SL_PCT=0.005)
+
+    with factory() as session:
+        _seed_instrument(session, name="NATURALGAS", exchange="MCX", itype="FUT",
+                         lot_size=1, expiry=date(2026, 5, 19), tradingsymbol="NATGAS_FUT_SELL")
+        alert = _seed_alert(session, tv_ticker="NATURALGAS", action="SELL", suffix="sell")
+        alert_id = alert.id
+        session.commit()
+
+    resolved = ResolvedExpiry(expiry_date=date(2026, 5, 19), days_to_expiry=22, rule_used="NEAREST_MONTHLY")
+    mock_kite = MagicMock()
+
+    with (
+        patch("app.main.resolve_expiry", return_value=resolved),
+        patch("app.main.place_entry", return_value="ORD_NG_SELL") as mock_pe,
+        patch("app.main.get_session_manager") as mock_sm,
+        patch("app.risk.daily_loss_remaining", return_value=Decimal("100000")),
+        patch("app.risk.check_risk_gates"),
+    ):
+        mock_sm.return_value.get_kite.return_value = mock_kite
+        main_module._SessionFactory = factory
+        sell_alert = _make_alert("SELL", symbol="NATURALGAS", price=200.0)
+        _process_alert(alert_id, sell_alert, s)
+
+    mock_pe.assert_called_once()
+    args = mock_pe.call_args.args
+    assert args[2] == "SELL"
+
+    with factory() as session:
+        order = session.query(Order).filter_by(alert_id=alert_id).first()
+    assert order is not None
+    assert order.transaction_type == "SELL"
 
 
 def test_ng_insufficient_capital_rejected(caplog):
@@ -412,10 +449,22 @@ def test_non_ng_sell_routes_to_pe():
 
 
 def test_non_ng_sizing_math():
-    """qty = floor(CAPITAL / option_ltp / lot_size) * lot_size."""
-    # CAPITAL=10_000, ltp=50, lot_size=50 → floor(10000/50/50)*50 = 4*50 = 200
+    """qty is risk-bounded then hard-capped at MAX_LOTS_PER_TRADE(1) * lot_size.
+
+    RISK_PCT=5%, CAPITAL=100,000 → capital_risk=5,000.
+    ltp=50, lot_size=50, SL_PCT=0.30:
+      sl_per_unit = 50 * 0.30 = 15
+      lots = floor(5,000 / 15 / 50) = 6  → qty=300
+      cap  = MAX_LOTS_PER_TRADE(1) * lot_size(50) = 50
+      final qty = min(300, 50) = 50
+    """
     factory = _make_factory()
-    s = _s(DRY_RUN=False, CAPITAL_PER_TRADE=10_000.0)
+    s = _s(
+        DRY_RUN=False,
+        CAPITAL_PER_TRADE=100_000.0,
+        RISK_PCT=Decimal("0.05"),
+        SL_PREMIUM_PCT=0.30,
+    )
 
     with factory() as session:
         alert = _seed_alert(session, tv_ticker="NIFTY", action="BUY", suffix="sz2")
@@ -431,6 +480,8 @@ def test_non_ng_sizing_math():
         patch("app.main.select_strike", return_value=_mock_selection(ltp=50.0, lot_size=50)),
         patch("app.main.place_entry", return_value="ORD3"),
         patch("app.main.get_session_manager") as mock_sm,
+        patch("app.risk.daily_loss_remaining", return_value=Decimal("100000")),
+        patch("app.risk.check_risk_gates"),
     ):
         mock_sm.return_value.get_kite.return_value = mock_kite
         main_module._SessionFactory = factory
@@ -438,7 +489,7 @@ def test_non_ng_sizing_math():
 
     with factory() as session:
         order = session.query(Order).filter_by(alert_id=alert_id).first()
-    assert order.quantity == 200
+    assert order.quantity == 50    # capped at MAX_LOTS_PER_TRADE(1)*lot_size(50)
 
 
 def test_non_ng_dry_run_skips_broker_calls():
@@ -460,6 +511,52 @@ def test_non_ng_dry_run_skips_broker_calls():
 
     mock_ss.assert_not_called()
     mock_pe.assert_not_called()
+
+
+def test_non_ng_max_loss_capped_at_risk_budget():
+    """Max loss per trade = qty × sl_per_unit ≤ CAPITAL × RISK_PCT (≤₹5,000 at defaults)."""
+    # CAPITAL=100,000, RISK_PCT=5% → capital_risk=5,000.
+    # ltp=100, lot_size=75, SL_PCT=0.30 → sl_per_unit=30, lots=floor(5000/30/75)=2, qty=150.
+    # cap = MAX_LOTS_PER_TRADE(1) * lot_size(75) = 75  → final qty=75.
+    # max_loss = 30 × 75 = 2,250 ≤ 5,000  ✓
+    factory = _make_factory()
+    s = _s(
+        DRY_RUN=False,
+        CAPITAL_PER_TRADE=100_000.0,
+        RISK_PCT=Decimal("0.05"),
+        SL_PREMIUM_PCT=0.30,
+    )
+
+    with factory() as session:
+        alert = _seed_alert(session, tv_ticker="NIFTY", action="BUY", suffix="riskmax")
+        alert_id = alert.id
+        session.commit()
+
+    resolved = ResolvedExpiry(expiry_date=date(2026, 5, 1), days_to_expiry=4, rule_used="NEAREST_WEEKLY")
+    mock_kite = MagicMock()
+    mock_kite.quote.return_value = {"NSE:NIFTY 50": {"last_price": 19_500.0}}
+
+    with (
+        patch("app.main.resolve_expiry", return_value=resolved),
+        patch("app.main.select_strike", return_value=_mock_selection(ltp=100.0, lot_size=75)),
+        patch("app.main.place_entry", return_value="ORD_RISK"),
+        patch("app.main.get_session_manager") as mock_sm,
+        patch("app.risk.check_risk_gates"),
+        patch("app.risk.daily_loss_remaining", return_value=Decimal("100000")),
+    ):
+        mock_sm.return_value.get_kite.return_value = mock_kite
+        main_module._SessionFactory = factory
+        _process_alert(alert_id, _make_alert("BUY", symbol="NIFTY"), s)
+
+    with factory() as session:
+        order = session.query(Order).filter_by(alert_id=alert_id).first()
+    assert order is not None
+    assert order.quantity == 75    # 1 lot × 75 (MAX_LOTS_PER_TRADE cap)
+
+    # Verify max loss ≤ risk budget
+    sl_per_unit = 100.0 * 0.30   # ₹30/unit
+    max_loss = sl_per_unit * order.quantity
+    assert max_loss <= 100_000 * 0.05   # ₹2,250 ≤ ₹5,000
 
 
 # ── EXIT branch ───────────────────────────────────────────────────────────────
@@ -665,9 +762,10 @@ def test_entry_filled_options_gtt_prices():
 
 
 def test_entry_filled_futures_gtt_prices():
-    """Futures fill: sl = fill_price - sl_distance, target = fill_price + target_distance."""
+    """Long FUT fill: sl = fill_price*(1-FUTURES_SL_PCT), target above entry."""
     factory = _make_factory()
-    s = _s(DRY_RUN=True)
+    # FUTURES_SL_PCT=0.005 → sl_distance=200*0.005=1.0 → sl=199.0, target=202.0 (RR=2)
+    s = _s(DRY_RUN=True, FUTURES_SL_PCT=0.005)
 
     with factory() as session:
         inst = _seed_instrument(session, name="NATURALGAS", exchange="MCX", itype="FUT",
@@ -694,8 +792,7 @@ def test_entry_filled_futures_gtt_prices():
     main_module._SessionFactory = factory
     main_module._pending_order_meta["ORD_FUT_FILL"] = {
         "instrument_type": "FUT",
-        "sl_distance": 5.0,
-        "target_distance": 10.0,
+        "entry_side": "BUY",
         "underlying": "NATURALGAS",
     }
 
@@ -709,7 +806,61 @@ def test_entry_filled_futures_gtt_prices():
 
     with factory() as session:
         pos = session.query(Position).first()
-    assert pos.current_sl == pytest.approx(195.0)   # 200 - 5
+        gtt = session.query(Gtt).first()
+    assert pos.current_sl == pytest.approx(199.0)   # 200 - 200*0.005
+    assert gtt.sl_trigger == pytest.approx(199.0)
+    assert gtt.target_trigger == pytest.approx(202.0)   # 200 + 2*(200*0.005)
+    mock_gtt.assert_not_called()   # DRY_RUN=True
+
+
+def test_entry_filled_futures_sell_gtt_prices():
+    """Short FUT fill: sl ABOVE entry, target BELOW entry."""
+    factory = _make_factory()
+    s = _s(DRY_RUN=True, FUTURES_SL_PCT=0.005)
+
+    with factory() as session:
+        inst = _seed_instrument(session, name="NATURALGAS", exchange="MCX", itype="FUT",
+                                lot_size=1, tradingsymbol="NATGAS_FUT_SHORT")
+        seed_alert = _seed_alert(session, tv_ticker="NATURALGAS", action="SELL", suffix="ef3")
+        order = Order(
+            alert_id=seed_alert.id,
+            kite_order_id="ORD_FUT_SHORT",
+            variety="regular",
+            exchange="MCX",
+            tradingsymbol=inst.tradingsymbol,
+            transaction_type="SELL",
+            order_type="MARKET",
+            product="NRML",
+            quantity=100,
+            status="PENDING",
+            placed_at=datetime.now(IST),
+            updated_at=datetime.now(IST),
+            dry_run=False,
+        )
+        session.add(order)
+        session.commit()
+
+    main_module._SessionFactory = factory
+    main_module._pending_order_meta["ORD_FUT_SHORT"] = {
+        "instrument_type": "FUT",
+        "entry_side": "SELL",
+        "underlying": "NATURALGAS",
+    }
+
+    event = EntryFilledEvent(kite_order_id="ORD_FUT_SHORT", fill_price=200.0, fill_qty=100)
+
+    with (
+        patch("app.main.get_settings", return_value=s),
+        patch("app.main.place_gtt_oco") as mock_gtt,
+    ):
+        _on_entry_filled(event)
+
+    with factory() as session:
+        pos = session.query(Position).first()
+        gtt = session.query(Gtt).first()
+    assert pos.current_sl == pytest.approx(201.0)   # 200 + 200*0.005 — SL above entry for short
+    assert gtt.sl_trigger == pytest.approx(201.0)
+    assert gtt.target_trigger == pytest.approx(198.0)   # 200 - 2*(200*0.005) — target below entry
     mock_gtt.assert_not_called()   # DRY_RUN=True
 
 
@@ -756,13 +907,19 @@ from app.strike_selector import NoValidStrikeError as _NoValidStrikeError
 
 
 def test_options_delta_fallback_succeeds_on_lower_delta():
-    """When primary delta strike is too expensive, bot retries at lower delta and places the order."""
-    # CAPITAL=5000, primary ltp=200 × lot_size=50 = 10000 → 0 lots
-    # fallback delta=0.50: ltp=80 × lot_size=50 = 4000 → 1 lot (qty=50)
+    """When primary strike SL exceeds risk budget, bot retries at lower delta and places the order.
+
+    capital_risk = 5,000 * 100% = 5,000.
+    Primary (ltp=400, lot_size=50): sl_per_lot = 400*0.30*50 = 6,000 > 5,000 → 0 lots.
+    Fallback delta=0.50 (ltp=100, lot_size=50): sl_per_lot = 100*0.30*50 = 1,500 → 3 lots (qty=150).
+    cap = MAX_LOTS_PER_TRADE(1) * lot_size(50) = 50 → final qty=50.
+    """
     factory = _make_factory()
     s = _s(
         DRY_RUN=False,
         CAPITAL_PER_TRADE=5_000.0,
+        RISK_PCT=Decimal("1.0"),
+        SL_PREMIUM_PCT=0.30,
         TARGET_DELTA=0.65,
         DELTA_FALLBACK_STEPS=[0.50, 0.35],
     )
@@ -772,9 +929,9 @@ def test_options_delta_fallback_succeeds_on_lower_delta():
         alert_id = alert.id
         session.commit()
 
-    expensive = _mock_selection(ltp=200.0, lot_size=50, delta=0.65)
+    expensive = _mock_selection(ltp=400.0, lot_size=50, delta=0.65)
     expensive.instrument.tradingsymbol = "NIFTY26APR26CE19500"
-    affordable = _mock_selection(ltp=80.0, lot_size=50, delta=0.50)
+    affordable = _mock_selection(ltp=100.0, lot_size=50, delta=0.50)
     affordable.instrument.tradingsymbol = "NIFTY26APR26CE19700"
 
     def _ss_side_effect(*args, **kwargs):
@@ -795,6 +952,7 @@ def test_options_delta_fallback_succeeds_on_lower_delta():
         patch("app.main.place_entry", return_value="ORD_FB") as mock_pe,
         patch("app.main.get_session_manager") as mock_sm,
         patch("app.risk.check_risk_gates"),
+        patch("app.risk.daily_loss_remaining", return_value=Decimal("100000")),
     ):
         mock_sm.return_value.get_kite.return_value = mock_kite
         main_module._SessionFactory = factory
@@ -802,16 +960,22 @@ def test_options_delta_fallback_succeeds_on_lower_delta():
 
     mock_pe.assert_called_once()
     assert mock_pe.call_args.args[1].tradingsymbol == "NIFTY26APR26CE19700"
-    assert mock_pe.call_args.args[3] == 50  # floor(5000/80/50)*50 = 1*50
+    # sl_per_unit=30, qty=floor(5000/30/50)*50=150; cap=MAX_LOTS_PER_TRADE(1)*50=50
+    assert mock_pe.call_args.args[3] == 50
 
 
 def test_options_all_fallback_deltas_exhausted_skips():
-    """When every fallback delta is also too expensive, the alert is skipped with no order placed."""
-    # CAPITAL=5000, all strikes ltp=200 × lot_size=50 = 10000 → 0 lots at every delta
+    """When every strike's SL exceeds the risk budget, the alert is skipped with no order placed.
+
+    capital_risk=5,000; all strikes ltp=400, lot_size=50:
+      sl_per_lot = 400*0.30*50 = 6,000 > 5,000 → 0 lots at every delta → skip.
+    """
     factory = _make_factory()
     s = _s(
         DRY_RUN=False,
         CAPITAL_PER_TRADE=5_000.0,
+        RISK_PCT=Decimal("1.0"),
+        SL_PREMIUM_PCT=0.30,
         TARGET_DELTA=0.65,
         DELTA_FALLBACK_STEPS=[0.50, 0.35],
     )
@@ -822,7 +986,7 @@ def test_options_all_fallback_deltas_exhausted_skips():
         session.commit()
 
     def _ss_always_expensive(*args, **kwargs):
-        return _mock_selection(ltp=200.0, lot_size=50, delta=kwargs.get("target_delta", 0.65))
+        return _mock_selection(ltp=400.0, lot_size=50, delta=kwargs.get("target_delta", 0.65))
 
     mock_kite = MagicMock()
     mock_kite.quote.return_value = {"NSE:NIFTY 50": {"last_price": 19_600.0}}
@@ -834,6 +998,7 @@ def test_options_all_fallback_deltas_exhausted_skips():
         patch("app.main.place_entry") as mock_pe,
         patch("app.main.get_session_manager") as mock_sm,
         patch("app.risk.check_risk_gates"),
+        patch("app.risk.daily_loss_remaining", return_value=Decimal("100000")),
     ):
         mock_sm.return_value.get_kite.return_value = mock_kite
         main_module._SessionFactory = factory

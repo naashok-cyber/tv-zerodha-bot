@@ -79,11 +79,11 @@ class Settings(BaseSettings):
     CAPITAL_PER_TRADE: float = 100_000.0      # ₹ premium budget per trade
     TOTAL_CAPITAL: float = 100_000.0          # ₹ 1 Lakh; base for % loss cap
     RISK_PER_TRADE_PCT: float = 1.0           # used in UNDERLYING_RISK_BASED mode
-    MAX_DAILY_LOSS_ABS: float = 10_000.0      # ₹ absolute; kill switch on whichever hits first
-    MAX_DAILY_LOSS_PCT: float = 10.0          # % of TOTAL_CAPITAL
-    MAX_TRADES_PER_DAY: int = 10
+    MAX_DAILY_LOSS_ABS: float = 10_000.0      # ₹ absolute daily loss cap
+    MAX_TRADES_PER_DAY: int = 3
     MAX_OPEN_POSITIONS: int = 3
     MAX_LOTS_PER_ORDER: int = 5               # exchange freeze-quantity guard for futures
+    MAX_LOTS_PER_TRADE: int = 1               # hard cap: at most 1 lot per trade, all instruments
     CONSECUTIVE_LOSSES_LIMIT: int = 3         # circuit breaker; resets only on manual intervention
     RR_RATIO: float = 2.0                     # target_dist = RR_RATIO × sl_dist
     MARKET_PROTECTION_PCT: float = -1.0       # -1 = kiteconnect default; mandatory on MARKET/SL-M
@@ -108,7 +108,7 @@ class Settings(BaseSettings):
     SKIP_EXPIRY_CUTOFF_MCX: str = "22:00"    # HH:MM IST; roll MCX expiry after this time
     SESSION_CLOSE_NSE: str = "15:30"         # HH:MM IST; used for time_to_expiry in greeks
     SESSION_CLOSE_MCX: str = "23:30"
-    SL_PREMIUM_PCT: float = 0.30             # Option A: SL if premium drops 30%
+    SL_PREMIUM_PCT: float = 0.15             # Option A: SL if premium drops 15%; target = 2× SL dist (30%)
     USE_DELTA_TRANSLATED_SL: bool = False    # Option B: translate underlying SL via delta
     MIN_OPTION_PREMIUM_INDEX: float = 5.0    # ₹; sub-₹5 index options are illiquid
     MIN_OPTION_PREMIUM_STOCK: float = 2.0
@@ -140,13 +140,13 @@ class Settings(BaseSettings):
         "ALUMINIUM":  5000,  # kg/lot (1 lot = 5 MT)
         "NICKEL":     1500,  # kg/lot (1 lot = 1500 kg)
     }
-    FUTURES_SL_PCT: float = 0.005   # SL distance as fraction of price for NG near-month futures
+    FUTURES_SL_PCT: float = 0.008   # SL distance as fraction of price for NG near-month futures
     EQUITY_SL_PCT: float = 0.01     # SL = 1% of fill price for CNC equity trades; target = RR_RATIO × SL
 
     # ── Risk module (risk.py) — Decimal for monetary precision ───────────────
     RISK_PCT: Decimal = Decimal("0.05")        # 5% per-trade risk fraction → ₹5,000 on ₹1L capital (futures sizing)
     MAX_DAILY_LOSS: Decimal = Decimal("10000") # absolute ₹ daily loss cap for risk.py
-    SL_PERCENT: Decimal = Decimal("0.005")     # 0.5% futures SL distance fraction (risk.py default)
+    SL_PERCENT: Decimal = Decimal("0.008")     # 0.8% futures SL distance fraction (risk.py default)
 
     # ── Breakeven & Trail (on option premium; future price for NATURALGAS) ────
     # BUY CE at ₹100, SL_PREMIUM_PCT=30% → SL=₹70, risk=₹30:
@@ -184,11 +184,6 @@ class Settings(BaseSettings):
     BACKOFF_MAX_TRIES: int = 5
     BACKOFF_INITIAL_WAIT_SECS: float = 1.0
 
-    @property
-    def effective_max_daily_loss(self) -> float:
-        """Smaller of the absolute and percentage-based daily loss caps."""
-        pct_limit = self.TOTAL_CAPITAL * self.MAX_DAILY_LOSS_PCT / 100.0
-        return min(self.MAX_DAILY_LOSS_ABS, pct_limit)
 
 
 @lru_cache(maxsize=1)

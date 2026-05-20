@@ -83,29 +83,11 @@ def test_capital_defaults():
 def test_max_daily_loss_defaults():
     s = _s()
     assert s.MAX_DAILY_LOSS_ABS == 10_000.0
-    assert s.MAX_DAILY_LOSS_PCT == 10.0
 
 
-def test_effective_max_daily_loss_both_equal():
-    # 10% of ₹1L = ₹10000 == ABS ₹10000 → min = ₹10000
-    assert _s().effective_max_daily_loss == 10_000.0
-
-
-def test_effective_max_daily_loss_abs_lower():
-    s = _s(MAX_DAILY_LOSS_ABS=1_000.0, TOTAL_CAPITAL=100_000.0, MAX_DAILY_LOSS_PCT=2.0)
-    assert s.effective_max_daily_loss == 1_000.0
-
-
-def test_effective_max_daily_loss_pct_lower():
-    # 1% of ₹1L = ₹1000 < ABS ₹2000
-    s = _s(MAX_DAILY_LOSS_ABS=2_000.0, TOTAL_CAPITAL=100_000.0, MAX_DAILY_LOSS_PCT=1.0)
-    assert s.effective_max_daily_loss == 1_000.0
-
-
-def test_effective_max_daily_loss_fractional():
-    # 1.5% of ₹80000 = ₹1200 < ABS ₹1500
-    s = _s(MAX_DAILY_LOSS_ABS=1_500.0, TOTAL_CAPITAL=80_000.0, MAX_DAILY_LOSS_PCT=1.5)
-    assert s.effective_max_daily_loss == pytest.approx(1_200.0)
+def test_max_daily_loss_abs_configurable():
+    s = _s(MAX_DAILY_LOSS_ABS=5_000.0)
+    assert s.MAX_DAILY_LOSS_ABS == 5_000.0
 
 
 def test_consecutive_losses_default():
@@ -129,7 +111,7 @@ def test_options_delta_defaults():
 
 
 def test_sl_premium_pct_default():
-    assert _s().SL_PREMIUM_PCT == pytest.approx(0.30)
+    assert _s().SL_PREMIUM_PCT == pytest.approx(0.15)
 
 
 def test_delta_translated_sl_disabled_by_default():

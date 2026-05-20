@@ -402,7 +402,7 @@ def test_watch_order_registered_after_session_commit(monkeypatch) -> None:
     monkeypatch.setattr(main_module, "place_entry", lambda *a, **kw: "RACE_ORD_001")
     monkeypatch.setattr(main_module, "risk", MagicMock(
         check_risk_gates=lambda *a, **kw: None,
-        compute_option_qty=lambda *a, **kw: 75,
+        compute_futures_qty=lambda *a, **kw: 75,
         daily_loss_remaining=MagicMock(return_value=__import__("decimal").Decimal("10000")),
     ))
 
