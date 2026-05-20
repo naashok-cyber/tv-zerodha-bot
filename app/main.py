@@ -594,7 +594,7 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
             # MARKET orders fill in milliseconds; committing first closes the race.
             if kite_order_id and not settings.DRY_RUN:
                 if _watcher is not None:
-                    _watcher.watch_order(kite_order_id)
+                    _watcher.watch_order(kite_order_id, kite_fetcher=get_session_manager().get_kite)
                 else:
                     log.error(
                         "Alert %d: _watcher is None — GTT will not be placed for %s",
@@ -692,7 +692,7 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
             # Register AFTER commit so _on_entry_filled can find the Order row.
             if kite_order_id and not settings.DRY_RUN:
                 if _watcher is not None:
-                    _watcher.watch_order(kite_order_id)
+                    _watcher.watch_order(kite_order_id, kite_fetcher=get_session_manager().get_kite)
                 else:
                     log.error(
                         "Alert %d: _watcher is None — GTT will not be placed for %s",
@@ -1054,7 +1054,7 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
         # MARKET orders fill in milliseconds; committing first closes the race.
         if kite_order_id:
             if _watcher is not None:
-                _watcher.watch_order(kite_order_id)
+                _watcher.watch_order(kite_order_id, kite_fetcher=get_session_manager().get_kite)
             else:
                 log.error(
                     "Alert %d: _watcher is None — GTT will not be placed for %s",

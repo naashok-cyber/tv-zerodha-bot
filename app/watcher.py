@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -45,6 +46,8 @@ class OrderWatcher:
         self._ticker: Any = None
         self._subscribed_tokens: set[int] = set()
         self._watched_order_ids: set[str] = set()
+        self._pending_timers: dict[str, threading.Timer] = {}
+        self._lock = threading.Lock()
         self._started: bool = False
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
@@ -81,11 +84,63 @@ class OrderWatcher:
 
     # ── Entry order tracking ──────────────────────────────────────────────────
 
-    def watch_order(self, kite_order_id: str) -> None:
-        self._watched_order_ids.add(kite_order_id)
+    def watch_order(self, kite_order_id: str, kite_fetcher: Callable[[], Any] | None = None) -> None:
+        """Register an entry order to watch for fill confirmation.
+
+        kite_fetcher: zero-arg callable returning a KiteConnect instance.
+        If provided, a fallback poll fires after 7 s in case the WebSocket
+        postback is delayed or missed.
+        """
+        with self._lock:
+            self._watched_order_ids.add(kite_order_id)
+        if kite_fetcher is not None:
+            timer = threading.Timer(7.0, self._fallback_check, args=(kite_order_id, kite_fetcher))
+            with self._lock:
+                self._pending_timers[kite_order_id] = timer
+            timer.start()
+
+    def _fallback_check(self, kite_order_id: str, kite_fetcher: Callable[[], Any]) -> None:
+        """Poll Kite order history if the WebSocket postback has not arrived yet."""
+        with self._lock:
+            if kite_order_id not in self._watched_order_ids:
+                return  # WebSocket already handled it
+        try:
+            kite = kite_fetcher()
+            history = kite.order_history(kite_order_id)
+        except Exception as exc:
+            log.error("Fallback poll: order_history(%s) failed — %s", kite_order_id, exc)
+            return
+        for update in reversed(history):
+            if update.get("status") == "COMPLETE":
+                with self._lock:
+                    if kite_order_id not in self._watched_order_ids:
+                        return  # WebSocket fired between our check and now
+                    self._watched_order_ids.discard(kite_order_id)
+                    self._pending_timers.pop(kite_order_id, None)
+                log.info(
+                    "Fallback poll: order %s COMPLETE (WebSocket missed) fill_price=%.4f",
+                    kite_order_id, float(update.get("average_price", 0)),
+                )
+                event = EntryFilledEvent(
+                    kite_order_id=kite_order_id,
+                    fill_price=float(update.get("average_price", 0.0)),
+                    fill_qty=int(update.get("filled_quantity", 0)),
+                    data=update,
+                )
+                if self._on_entry_filled is not None:
+                    self._on_entry_filled(event)
+                return
+        log.warning(
+            "Fallback poll: order %s not yet COMPLETE after 7 s — still watching for WebSocket",
+            kite_order_id,
+        )
 
     def unwatch_order(self, kite_order_id: str) -> None:
-        self._watched_order_ids.discard(kite_order_id)
+        with self._lock:
+            self._watched_order_ids.discard(kite_order_id)
+            timer = self._pending_timers.pop(kite_order_id, None)
+        if timer:
+            timer.cancel()
 
     # ── Subscription management ───────────────────────────────────────────────
 
@@ -127,8 +182,21 @@ class OrderWatcher:
         status = data.get("status", "")
         log.info("Order update: id=%s status=%s", order_id, status)
 
-        if status == "COMPLETE" and order_id in self._watched_order_ids:
-            self._watched_order_ids.discard(order_id)
+        if status != "COMPLETE":
+            return
+
+        with self._lock:
+            is_entry = order_id in self._watched_order_ids
+            if is_entry:
+                self._watched_order_ids.discard(order_id)
+                timer = self._pending_timers.pop(order_id, None)
+            else:
+                timer = None
+
+        if timer:
+            timer.cancel()
+
+        if is_entry:
             event = EntryFilledEvent(
                 kite_order_id=order_id,
                 fill_price=float(data.get("average_price", 0.0)),
@@ -137,14 +205,14 @@ class OrderWatcher:
             )
             if self._on_entry_filled is not None:
                 self._on_entry_filled(event)
-        elif status == "COMPLETE" and data.get("transaction_type") == "SELL":
-            # GTT exit fill — any COMPLETE SELL not tracked as an entry
+        else:
+            # GTT exit fill — handles both long exits (SELL) and short covers (BUY)
             event = GttFilledEvent(
                 kite_order_id=order_id,
                 tradingsymbol=str(data.get("tradingsymbol", "")),
                 fill_price=float(data.get("average_price", 0.0)),
                 fill_qty=int(data.get("filled_quantity", 0)),
-                transaction_type="SELL",
+                transaction_type=str(data.get("transaction_type", "SELL")),
                 data=data,
             )
             if self._on_gtt_filled is not None:
