@@ -12,13 +12,13 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from math import floor
 from typing import Any
 
 from cachetools import TTLCache
-from fastapi import BackgroundTasks, Depends, FastAPI, Form, HTTPException, Request, Response
+from fastapi import BackgroundTasks, Depends, FastAPI, Form, HTTPException, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
@@ -1273,7 +1273,7 @@ _CSS = (
 )
 
 
-def _shell(active: str, content: str, wide: bool = False) -> str:
+def _shell(active: str, content: str, wide: bool = False, refresh: bool = False) -> str:
     """Wrap page content in the shared header / nav / CSS."""
     pages = [("control","Control"),("orders","Orders"),("gtts","GTTs"),
              ("history","History"),("dashboard","Alerts")]
@@ -1282,11 +1282,25 @@ def _shell(active: str, content: str, wide: bool = False) -> str:
         for p, lbl in pages
     )
     wrap_cls = "wrap wrap-lg" if wide else "wrap wrap-sm"
+    refresh_meta = "<meta http-equiv='refresh' content='30'>" if refresh else ""
+    lut_html = (
+        "<span id='lut' style='font-size:.68em;color:rgba(255,255,255,.35);"
+        "margin-left:auto;padding:10px 14px;white-space:nowrap'></span>"
+        if refresh else ""
+    )
+    lut_js = (
+        "<script>window.addEventListener('load',function(){"
+        "var e=document.getElementById('lut');"
+        "if(e)e.textContent='Updated '+new Date().toLocaleTimeString();})"
+        "</script>"
+        if refresh else ""
+    )
     return (
         "<!DOCTYPE html><html lang='en'><head>"
         "<meta charset='UTF-8'>"
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
         "<title>ZeroBot</title>"
+        + refresh_meta +
         "<link href='https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;display=swap' rel='stylesheet'>"
         "<style>" + _CSS + "</style>"
         "</head><body>"
@@ -1294,8 +1308,9 @@ def _shell(active: str, content: str, wide: bool = False) -> str:
         "<div class='hdr-icon'>&#x1F4C8;</div>"
         "<div><div class='hdr-t'>ZeroBot</div><div class='hdr-s'>Zerodha Algo Trading</div></div>"
         "</div>"
-        "<div class='nav'>" + nav + "</div>"
+        "<div class='nav'>" + nav + lut_html + "</div>"
         "<div class='" + wrap_cls + "'>" + content + "</div>"
+        + lut_js +
         "</body></html>"
     )
 
@@ -1352,8 +1367,31 @@ async def positions(
 async def history(
     session: Session = Depends(get_db_session),
     _: None = Depends(_auth_guard),
+    days: int = Query(default=1, ge=0),
 ) -> Response:
-    rows = session.query(ClosedTrade).order_by(ClosedTrade.closed_at.desc()).limit(50).all()
+    q = session.query(ClosedTrade)
+    if days > 0:
+        q = q.filter(ClosedTrade.closed_at >= datetime.now(IST) - timedelta(days=days))
+    rows = q.order_by(ClosedTrade.closed_at.desc()).limit(200).all()
+
+    total_pnl = sum((r.pnl or 0) for r in rows)
+    pnl_vc = "ok" if total_pnl >= 0 else "bd"
+
+    day_opts = [(1, "Today"), (3, "3 Days"), (7, "7 Days"), (0, "All")]
+    filters = "<div style='display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px'>" + "".join(
+        f"<a href='/history?days={d}' class='btn {'bp' if d == days else 'bm'}' "
+        f"style='text-decoration:none'>{lbl}</a>"
+        for d, lbl in day_opts
+    ) + "</div>"
+
+    summary = (
+        f"<div class='card' style='display:flex;gap:16px;align-items:center;padding:11px 18px;margin-bottom:14px'>"
+        f"<span style='font-size:.78em;color:#8492a6'>Period P&amp;L</span>"
+        f"<span class='mv {pnl_vc}' style='font-size:.95em'>&#x20B9;{total_pnl:+.2f}</span>"
+        f"<span style='font-size:.78em;color:#8492a6;margin-left:auto'>{len(rows)} trade(s)</span>"
+        f"</div>"
+    )
+
     rows_html = "".join(
         f"<tr><td>{r.id}</td><td style='font-weight:600'>{r.tradingsymbol}</td>"
         f"<td class='tr {'ok' if (r.pnl or 0) >= 0 else 'bd'}'>&#x20B9;{(r.pnl or 0):+.2f}</td>"
@@ -1363,7 +1401,8 @@ async def history(
     )
     return Response(
         content=_shell("history",
-            "<div class='card'><div class='ct'>Trade History</div>"
+            filters + summary
+            + "<div class='card'><div class='ct'>Trade History</div>"
             "<table><thead><tr><th>ID</th><th>Symbol</th><th class='tr'>PnL</th>"
             "<th>Reason</th><th>Closed</th></tr></thead>"
             "<tbody>" + rows_html + "</tbody></table></div>",
@@ -1378,9 +1417,13 @@ async def gtts_page(
     session: Session = Depends(get_db_session),
     _: None = Depends(_auth_guard),
     settings: Settings = Depends(get_current_settings),
+    show_all: int = Query(default=0, ge=0, le=1),
 ) -> Response:
-    """Show every GTT row from the DB alongside its live status on Kite."""
-    rows = session.query(Gtt).order_by(Gtt.placed_at.desc()).limit(50).all()
+    """Show GTT rows alongside live Kite status. Default: ACTIVE only."""
+    q = session.query(Gtt).order_by(Gtt.placed_at.desc())
+    if not show_all:
+        q = q.filter(Gtt.status == "ACTIVE")
+    rows = q.limit(100).all()
 
     live_map: dict[int, str] = {}
     if not _dry_run(settings):
@@ -1412,9 +1455,18 @@ async def gtts_page(
         "</tr>"
         for r in rows
     )
+    toggle_lbl = "Show All" if not show_all else "Active Only"
+    toggle_cls = "bm" if not show_all else "bp"
+    toggle_bar = (
+        f"<div style='display:flex;align-items:center;gap:10px;margin-bottom:14px'>"
+        f"<span style='font-size:.82em;color:#636e72'>{len(rows)} row(s) shown</span>"
+        f"<a href='/gtts?show_all={1 - show_all}' class='btn {toggle_cls}' "
+        f"style='text-decoration:none;margin-left:auto'>{toggle_lbl}</a></div>"
+    )
     return Response(
         content=_shell("gtts",
-            "<div class='card'><div class='ct'>GTT / Stop-Loss Orders</div>"
+            toggle_bar
+            + "<div class='card'><div class='ct'>GTT / Stop-Loss Orders</div>"
             "<table><thead><tr><th>ID</th><th>Symbol</th><th class='tr'>SL Trigger</th>"
             "<th class='tr'>Target</th><th class='tr'>Entry Price</th><th>DB Status</th>"
             "<th class='tc'>Kite GTT ID</th><th class='tc'>Kite Live</th><th>Placed At</th>"
@@ -1423,6 +1475,7 @@ async def gtts_page(
             "Kite Live: <b>active</b>=SL live | <b>triggered</b>=fired | "
             "<b>N/A</b>=not found (triggered+cleaned up or GTT_FAILED)</p></div>",
             wide=True,
+            refresh=True,
         ),
         media_type="text/html",
     )
@@ -1517,14 +1570,45 @@ async def control_page(
             if overrides.get(key) is not None else ""
         )
 
-    errors = session.query(AppError).order_by(AppError.occurred_at.desc()).limit(5).all()
+    # ── Kite session status ───────────────────────────────────────────────────
+    try:
+        token_info = get_session_manager().get_token_info()
+        sess_valid = token_info["is_valid"]
+        sess_age   = token_info.get("age_hours")
+        sess_reason = token_info.get("reason") or ""
+    except Exception:
+        sess_valid = False
+        sess_age   = None
+        sess_reason = "unavailable"
+
+    checked_at = get_last_checked_at()
+    checked_str = (
+        "Checked " + checked_at.astimezone(IST).strftime("%H:%M") if checked_at else "Not checked yet"
+    )
+    if sess_valid:
+        sess_pill  = "pg"
+        sess_label = f"Valid&ensp;({sess_age:.1f}h old)" if sess_age is not None else "Valid"
+    else:
+        sess_pill  = "pr"
+        sess_label = f"Invalid &mdash; {sess_reason}" if sess_reason else "Invalid"
+
+    # ── errors: last 48 h ─────────────────────────────────────────────────────
+    err_cutoff = datetime.now(IST) - timedelta(hours=48)
+    errors = (
+        session.query(AppError)
+        .filter(AppError.occurred_at >= err_cutoff)
+        .order_by(AppError.occurred_at.desc())
+        .limit(20)
+        .all()
+    )
     errors_html = "".join(
-        f"<tr><td style='color:#8492a6'>{e.occurred_at.strftime('%H:%M')}</td>"
+        f"<tr><td style='color:#8492a6;white-space:nowrap'>"
+        f"{e.occurred_at.astimezone(IST).strftime('%m/%d %H:%M')}</td>"
         f"<td>{e.error_type}</td>"
-        f"<td style='max-width:240px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis'>"
-        f"{e.message[:120]}</td></tr>"
+        f"<td style='max-width:260px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis'>"
+        f"{e.message[:140]}</td></tr>"
         for e in errors
-    ) or "<tr><td colspan='3' style='text-align:center;color:#aaa'>No errors</td></tr>"
+    ) or "<tr><td colspan='3' style='text-align:center;color:#aaa'>No errors in last 48h</td></tr>"
 
     body = (
         stop_banner
@@ -1543,6 +1627,13 @@ async def control_page(
         + f"<div class='mr'><div class='ml'>Consec. losses</div>"
         + f"<div class='mw'><div class='mb {consec_bar}' style='width:{min(consec_pct,100):.0f}%'></div></div>"
         + f"<div class='mv {consec_vc}'>{consec}&thinsp;/&thinsp;{settings.CONSECUTIVE_LOSSES_LIMIT}</div></div>"
+        + "</div>"
+
+        # kite session
+        + "<div class='card'><div class='ct'>Kite Session</div>"
+        + f"<div class='mdr'><div class='mdl'>Status&ensp;<span class='pill {sess_pill}'>{sess_label}</span>"
+        + f"<span style='font-size:.72em;color:#aaa'>&ensp;{checked_str}</span></div>"
+        + "<a href='/kite/login' class='btn bn' style='text-decoration:none'>Re-login</a></div>"
         + "</div>"
 
         # mode / switches
@@ -1582,7 +1673,7 @@ async def control_page(
         + "<table><thead><tr><th>Time</th><th>Type</th><th>Message</th></tr></thead><tbody>"
         + errors_html + "</tbody></table></div>"
     )
-    return Response(content=_shell("control", body), media_type="text/html")
+    return Response(content=_shell("control", body, refresh=True), media_type="text/html")
 
 
 @app.post("/control/paper-mode/toggle")
@@ -1643,16 +1734,17 @@ async def update_risk(
 async def orders_page(
     session: Session = Depends(get_db_session),
     _: None = Depends(_auth_guard),
+    days: int = Query(default=1, ge=0),
 ) -> Response:
-    rows = (
+    q = (
         session.query(Order, Position, Gtt, ClosedTrade)
         .outerjoin(Position, Position.order_id == Order.id)
         .outerjoin(Gtt, Gtt.order_id == Order.id)
         .outerjoin(ClosedTrade, ClosedTrade.position_id == Position.id)
-        .order_by(Order.placed_at.desc())
-        .limit(60)
-        .all()
     )
+    if days > 0:
+        q = q.filter(Order.placed_at >= datetime.now(IST) - timedelta(days=days))
+    rows = q.order_by(Order.placed_at.desc()).limit(200).all()
 
     def pnl_cls(pnl):
         if pnl is None:
@@ -1670,6 +1762,28 @@ async def orders_page(
         if s in ("PENDING", "COMPLETE"):
             return "<span class='pill pb'>OPEN</span>"
         return f"<span class='pill pm'>{s}</span>"
+
+    # summary stats
+    total_pnl  = sum((ct.pnl or 0) for _, _, _, ct in rows if ct is not None)
+    open_count = sum(1 for _, pos, _, ct in rows if pos is not None and ct is None)
+    closed_count = sum(1 for _, _, _, ct in rows if ct is not None)
+    pnl_vc = "ok" if total_pnl >= 0 else "bd"
+
+    day_opts = [(1, "Today"), (3, "3 Days"), (7, "7 Days"), (0, "All")]
+    filters = "<div style='display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px'>" + "".join(
+        f"<a href='/orders?days={d}' class='btn {'bp' if d == days else 'bm'}' "
+        f"style='text-decoration:none'>{lbl}</a>"
+        for d, lbl in day_opts
+    ) + "</div>"
+
+    summary = (
+        f"<div class='card' style='display:flex;gap:16px;align-items:center;padding:11px 18px;margin-bottom:14px'>"
+        f"<span style='font-size:.78em;color:#8492a6'>Period P&amp;L</span>"
+        f"<span class='mv {pnl_vc}' style='font-size:.95em'>&#x20B9;{total_pnl:+.2f}</span>"
+        f"<span style='font-size:.78em;color:#8492a6;margin-left:auto'>"
+        f"Open: <b>{open_count}</b>&ensp;Closed: <b>{closed_count}</b></span>"
+        f"</div>"
+    )
 
     rows_html = ""
     for order, pos, gtt, ct in rows:
@@ -1696,12 +1810,14 @@ async def orders_page(
 
     return Response(
         content=_shell("orders",
-            "<div class='card'><div class='ct'>Orders</div>"
+            filters + summary
+            + "<div class='card'><div class='ct'>Orders</div>"
             "<table><thead><tr><th>Time</th><th>Symbol</th><th>Side</th><th class='tr'>Lots</th>"
             "<th class='tr'>Entry</th><th class='tr'>SL</th><th class='tr'>Target</th>"
             "<th class='tr'>P&amp;L</th><th>Status</th></tr></thead>"
             "<tbody>" + rows_html + "</tbody></table></div>",
             wide=True,
+            refresh=True,
         ),
         media_type="text/html",
     )
