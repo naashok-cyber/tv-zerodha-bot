@@ -188,15 +188,27 @@ def _on_entry_filled(event: EntryFilledEvent) -> None:
                 sl_price = fill_price + sl_distance
                 target_price = fill_price - target_distance
         else:  # CE / PE options
-            sl_risk = fill_price * state.get_sl_pct(settings.SL_PREMIUM_PCT)
+            sl_pct = state.get_sl_pct(settings.SL_PREMIUM_PCT)
+            sl_risk_pct = fill_price * sl_pct          # percentage-based SL distance
+            qty = event.fill_qty
+
+            # Ensure the SL band is wide enough that:
+            #   (a) max loss >= ₹1000 (loss-floor widening for cheap options), and
+            #   (b) absolute distance >= ₹1 (avoids GTT rejection on near-zero premiums).
+            _MIN_GTT_LOSS_INR = 1000.0
+            min_loss_dist = _MIN_GTT_LOSS_INR / qty if qty > 0 else sl_risk_pct
+            sl_distance = max(sl_risk_pct, min_loss_dist, 1.0)
+            # Target keeps original %-based distance (preserves R:R intent) with ₹1 floor.
+            target_distance = max(rr * sl_risk_pct, 1.0)
+
             if entry_side == "BUY":
                 # Long: SL when premium falls, target when it rises
-                sl_price = fill_price - sl_risk
-                target_price = fill_price + rr * sl_risk
+                sl_price = max(fill_price - sl_distance, 0.05)
+                target_price = fill_price + target_distance
             else:
                 # Short (written option): SL when premium rises, target when it falls
-                sl_price = fill_price + sl_risk
-                target_price = fill_price - rr * sl_risk
+                sl_price = fill_price + sl_distance
+                target_price = max(fill_price - target_distance, 0.05)
 
         position = Position(
             order_id=order.id,
@@ -219,33 +231,91 @@ def _on_entry_filled(event: EntryFilledEvent) -> None:
         if not _dry_run(settings):
             from decimal import Decimal
             kite_client = get_session_manager().get_kite()
+
+            # Pre-check: fetch current LTP to detect if the GTT band is already breached.
+            # For a short option this happens when the premium collapses to/below the
+            # target trigger before we can place the GTT (cheap options, ~5-min delay).
+            _ltp_now: float | None = None
+            _needs_immediate_exit = False
             try:
-                kite_gtt_id = place_gtt_oco(
-                    kite_client,
-                    instrument,
-                    event.fill_qty,
-                    sl_trigger=Decimal(str(sl_price)),
-                    sl_limit=Decimal(str(sl_price)),
-                    target_trigger=Decimal(str(target_price)),
-                    target_limit=Decimal(str(target_price)),
-                    last_price=Decimal(str(fill_price)),
-                    product=order.product,
-                    entry_side=entry_side,
+                _ltp_data = kite_client.ltp(f"{order.exchange}:{order.tradingsymbol}")
+                _ltp_now = float(_ltp_data[f"{order.exchange}:{order.tradingsymbol}"]["last_price"])
+                if entry_side == "SELL":
+                    _needs_immediate_exit = _ltp_now >= sl_price or _ltp_now <= target_price
+                else:
+                    _needs_immediate_exit = _ltp_now <= sl_price or _ltp_now >= target_price
+                if _needs_immediate_exit:
+                    log.warning(
+                        "_on_entry_filled: LTP %.4f already outside GTT band "
+                        "[%.4f–%.4f] for %s — will square off immediately",
+                        _ltp_now, target_price, sl_price, order.tradingsymbol,
+                    )
+            except Exception as _ltp_exc:
+                log.warning(
+                    "_on_entry_filled: LTP pre-fetch failed for %s: %s",
+                    order.tradingsymbol, _ltp_exc,
                 )
-            except Exception as exc:
-                gtt_error = str(exc)
-                log.error(
-                    "_on_entry_filled: GTT placement failed for %s — %s. "
-                    "Position saved without SL; manual intervention required.",
-                    order.tradingsymbol, exc, exc_info=True,
-                )
-                session.add(AppError(
-                    alert_id=order.alert_id,
-                    error_type="GttPlacementError",
-                    message=f"GTT OCO failed for {order.tradingsymbol}: {exc}",
-                    traceback=traceback.format_exc(),
-                    occurred_at=now,
-                ))
+
+            if not _needs_immediate_exit:
+                try:
+                    kite_gtt_id = place_gtt_oco(
+                        kite_client,
+                        instrument,
+                        event.fill_qty,
+                        sl_trigger=Decimal(str(sl_price)),
+                        sl_limit=Decimal(str(sl_price)),
+                        target_trigger=Decimal(str(target_price)),
+                        target_limit=Decimal(str(target_price)),
+                        last_price=Decimal(str(fill_price)),
+                        product=order.product,
+                        entry_side=entry_side,
+                    )
+                except Exception as exc:
+                    gtt_error = str(exc)
+                    _needs_immediate_exit = "trigger already met" in str(exc).lower()
+                    log.error(
+                        "_on_entry_filled: GTT placement failed for %s — %s. %s",
+                        order.tradingsymbol, exc,
+                        "Attempting immediate square-off." if _needs_immediate_exit
+                        else "Position saved without SL; manual intervention required.",
+                        exc_info=True,
+                    )
+                    session.add(AppError(
+                        alert_id=order.alert_id,
+                        error_type="GttPlacementError",
+                        message=f"GTT OCO failed for {order.tradingsymbol}: {exc}",
+                        traceback=traceback.format_exc(),
+                        occurred_at=now,
+                    ))
+
+            # Square off immediately if the GTT band was already breached (either from
+            # the LTP pre-check or a "Trigger already met" rejection from Kite).
+            if _needs_immediate_exit:
+                try:
+                    _sq_order_id = square_off(
+                        kite_client, instrument, event.fill_qty,
+                        product=order.product, entry_side=entry_side,
+                    )
+                    _sq_msg = (
+                        f"GTT band [{target_price:.4f}–{sl_price:.4f}] already breached "
+                        f"(LTP {_ltp_now}); immediate square-off order {_sq_order_id}"
+                    )
+                    log.info("_on_entry_filled: %s for %s", _sq_msg, order.tradingsymbol)
+                    gtt_error = ((gtt_error + " | ") if gtt_error else "") + _sq_msg
+                except Exception as _sq_exc:
+                    _sq_msg = (
+                        f"GTT band breached AND immediate square-off FAILED "
+                        f"for {order.tradingsymbol}: {_sq_exc}"
+                    )
+                    log.error("_on_entry_filled: CRITICAL — %s", _sq_msg, exc_info=True)
+                    gtt_error = ((gtt_error + " | ") if gtt_error else "") + _sq_msg
+                    session.add(AppError(
+                        alert_id=order.alert_id,
+                        error_type="GttPlacementError",
+                        message=_sq_msg,
+                        traceback=traceback.format_exc(),
+                        occurred_at=now,
+                    ))
         else:
             log.info(
                 "_on_entry_filled DRY_RUN [%s]: would place GTT OCO sl=%.4f target=%.4f for %s",
