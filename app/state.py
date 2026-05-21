@@ -16,6 +16,11 @@ _MAX_LOTS_OVERRIDE: Optional[int] = None
 _MAX_DAILY_LOSS_OVERRIDE: Optional[float] = None
 _SL_PCT_OVERRIDE: Optional[float] = None
 _RR_RATIO_OVERRIDE: Optional[float] = None
+_DAILY_PROFIT_TARGET_OVERRIDE: Optional[float] = None
+_SELL_OPTIONS_PROFIT_PCT_OVERRIDE: Optional[float] = None
+_ENTRY_WINDOW_START_OVERRIDE: Optional[str] = None  # "HH:MM"
+_ENTRY_WINDOW_END_OVERRIDE: Optional[str] = None    # "HH:MM"
+_NO_ENTRY_ON_EXPIRY_DAY_OVERRIDE: Optional[bool] = None
 
 
 # ── Session ───────────────────────────────────────────────────────────────────
@@ -130,6 +135,61 @@ def set_rr_ratio(value: Optional[float]) -> None:
         _RR_RATIO_OVERRIDE = value if (value is not None and value > 0) else None
 
 
+def get_daily_profit_target(env_default: float) -> float:
+    with _lock:
+        return _DAILY_PROFIT_TARGET_OVERRIDE if _DAILY_PROFIT_TARGET_OVERRIDE is not None else env_default
+
+
+def set_daily_profit_target(value: Optional[float]) -> None:
+    global _DAILY_PROFIT_TARGET_OVERRIDE
+    with _lock:
+        _DAILY_PROFIT_TARGET_OVERRIDE = value if (value is not None and value >= 0) else None
+
+
+def get_sell_options_profit_pct(env_default: float) -> float:
+    with _lock:
+        return _SELL_OPTIONS_PROFIT_PCT_OVERRIDE if _SELL_OPTIONS_PROFIT_PCT_OVERRIDE is not None else env_default
+
+
+def set_sell_options_profit_pct(value: Optional[float]) -> None:
+    global _SELL_OPTIONS_PROFIT_PCT_OVERRIDE
+    with _lock:
+        _SELL_OPTIONS_PROFIT_PCT_OVERRIDE = value if (value is not None and 0 < value <= 1) else None
+
+
+def get_entry_window_start(env_default: str) -> str:
+    with _lock:
+        return _ENTRY_WINDOW_START_OVERRIDE if _ENTRY_WINDOW_START_OVERRIDE is not None else env_default
+
+
+def set_entry_window_start(value: Optional[str]) -> None:
+    global _ENTRY_WINDOW_START_OVERRIDE
+    with _lock:
+        _ENTRY_WINDOW_START_OVERRIDE = value or None
+
+
+def get_entry_window_end(env_default: str) -> str:
+    with _lock:
+        return _ENTRY_WINDOW_END_OVERRIDE if _ENTRY_WINDOW_END_OVERRIDE is not None else env_default
+
+
+def set_entry_window_end(value: Optional[str]) -> None:
+    global _ENTRY_WINDOW_END_OVERRIDE
+    with _lock:
+        _ENTRY_WINDOW_END_OVERRIDE = value or None
+
+
+def get_no_entry_on_expiry_day(env_default: bool) -> bool:
+    with _lock:
+        return _NO_ENTRY_ON_EXPIRY_DAY_OVERRIDE if _NO_ENTRY_ON_EXPIRY_DAY_OVERRIDE is not None else env_default
+
+
+def set_no_entry_on_expiry_day(value: Optional[bool]) -> None:
+    global _NO_ENTRY_ON_EXPIRY_DAY_OVERRIDE
+    with _lock:
+        _NO_ENTRY_ON_EXPIRY_DAY_OVERRIDE = value
+
+
 def get_all_overrides() -> dict:
     """Return current effective override state for display."""
     with _lock:
@@ -140,4 +200,9 @@ def get_all_overrides() -> dict:
             "max_daily_loss": _MAX_DAILY_LOSS_OVERRIDE,
             "sl_pct": _SL_PCT_OVERRIDE,
             "rr_ratio": _RR_RATIO_OVERRIDE,
+            "daily_profit_target": _DAILY_PROFIT_TARGET_OVERRIDE,
+            "sell_options_profit_pct": _SELL_OPTIONS_PROFIT_PCT_OVERRIDE,
+            "entry_window_start": _ENTRY_WINDOW_START_OVERRIDE,
+            "entry_window_end": _ENTRY_WINDOW_END_OVERRIDE,
+            "no_entry_on_expiry_day": _NO_ENTRY_ON_EXPIRY_DAY_OVERRIDE,
         }

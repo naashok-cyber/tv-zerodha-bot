@@ -105,14 +105,6 @@ def check_risk_gates(db: Any, today_ist: Any) -> None:
     if consecutive >= 3:
         raise RiskHaltError(f"consecutive losing trades: {consecutive}")
 
-    settings = get_settings()
-    if settings.DAILY_PROFIT_TARGET > 0:
-        pnl = daily_realized_pnl(db, today_ist)
-        if pnl >= Decimal(str(settings.DAILY_PROFIT_TARGET)):
-            raise RiskHaltError(
-                f"daily profit target ₹{settings.DAILY_PROFIT_TARGET:.0f} reached "
-                f"(realized ₹{float(pnl):.0f})"
-            )
 
 
 def record_trade_result(

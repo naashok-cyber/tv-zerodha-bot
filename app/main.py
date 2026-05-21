@@ -214,7 +214,7 @@ def _on_entry_filled(event: EntryFilledEvent) -> None:
             else:
                 # Short (written option): SL when premium rises, target when it falls
                 sl_price = fill_price + sl_distance
-                target_price = max(fill_price * (1.0 - settings.SELL_OPTIONS_PROFIT_PCT), 0.05)
+                target_price = max(fill_price * (1.0 - state.get_sell_options_profit_pct(settings.SELL_OPTIONS_PROFIT_PCT)), 0.05)
 
         position = Position(
             order_id=order.id,
@@ -641,10 +641,24 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
                 session.commit()
                 return
 
+        # ── Daily profit target circuit breaker ───────────────────────────────
+        if not _dry_run(settings):
+            _profit_target = state.get_daily_profit_target(settings.DAILY_PROFIT_TARGET)
+            if _profit_target > 0:
+                _today_pnl = risk.daily_realized_pnl(session, now)
+                if _today_pnl >= Decimal(str(_profit_target)):
+                    log.info(
+                        "Alert %d: blocked — daily profit target ₹%.0f reached (realized ₹%.0f)",
+                        alert_id, _profit_target, float(_today_pnl),
+                    )
+                    alert.processed = True
+                    session.commit()
+                    return
+
         # ── Time-of-day entry filter ──────────────────────────────────────────
         if alert_data.action in ("BUY", "SELL"):
-            _entry_start = _parse_hhmm(settings.ENTRY_WINDOW_START)
-            _entry_end = _parse_hhmm(settings.ENTRY_WINDOW_END)
+            _entry_start = _parse_hhmm(state.get_entry_window_start(settings.ENTRY_WINDOW_START))
+            _entry_end = _parse_hhmm(state.get_entry_window_end(settings.ENTRY_WINDOW_END))
             _now_time = now.time().replace(second=0, microsecond=0)
             if not (_entry_start <= _now_time <= _entry_end):
                 log.info(
@@ -1008,7 +1022,7 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
             flag = "PE" if alert_data.action == "BUY" else "CE"
             entry_side = "SELL"
         # Block new SELL_OPTIONS entries on weekly expiry day
-        if entry_side == "SELL" and settings.NO_ENTRY_ON_EXPIRY_DAY:
+        if entry_side == "SELL" and state.get_no_entry_on_expiry_day(settings.NO_ENTRY_ON_EXPIRY_DAY):
             _is_expiry = (
                 session.query(Instrument)
                 .filter(
@@ -1789,10 +1803,15 @@ async def control_page(
     estop = state.is_emergency_stop()
     overrides = state.get_all_overrides()
 
-    eff_max_lots = state.get_max_lots(settings.MAX_LOTS_PER_TRADE)
-    eff_max_loss = state.get_max_daily_loss(settings.MAX_DAILY_LOSS_ABS)
-    eff_sl_pct   = state.get_sl_pct(settings.SL_PREMIUM_PCT)
-    eff_rr       = state.get_rr_ratio(settings.RR_RATIO)
+    eff_max_lots       = state.get_max_lots(settings.MAX_LOTS_PER_TRADE)
+    eff_max_loss       = state.get_max_daily_loss(settings.MAX_DAILY_LOSS_ABS)
+    eff_sl_pct         = state.get_sl_pct(settings.SL_PREMIUM_PCT)
+    eff_rr             = state.get_rr_ratio(settings.RR_RATIO)
+    eff_profit_target  = state.get_daily_profit_target(settings.DAILY_PROFIT_TARGET)
+    eff_sell_ppt       = state.get_sell_options_profit_pct(settings.SELL_OPTIONS_PROFIT_PCT)
+    eff_entry_start    = state.get_entry_window_start(settings.ENTRY_WINDOW_START)
+    eff_entry_end      = state.get_entry_window_end(settings.ENTRY_WINDOW_END)
+    eff_no_expiry      = state.get_no_entry_on_expiry_day(settings.NO_ENTRY_ON_EXPIRY_DAY)
 
     # ── today's risk summary ──────────────────────────────────────────────────
     today_loss = _realised_loss_today(session)
@@ -1934,6 +1953,23 @@ async def control_page(
         + f"<div class='pr2'><div class='pl'>R:R ratio{src('rr_ratio')}</div>"
         + f"<input class='pi' type='number' name='rr_ratio' value='{eff_rr:.1f}' min='0.5' max='10' step='0.1'>"
         + "<div class='pu'>&#xD7;</div></div>"
+        + f"<div class='pr2'><div class='pl'>Daily profit target{src('daily_profit_target')}</div>"
+        + f"<input class='pi' type='number' name='daily_profit_target' value='{eff_profit_target:.0f}' min='0' step='500'>"
+        + "<div class='pu'>&#x20B9;</div></div>"
+        + f"<div class='pr2'><div class='pl'>SELL options profit %{src('sell_options_profit_pct')}</div>"
+        + f"<input class='pi' type='number' name='sell_options_profit_pct' value='{eff_sell_ppt*100:.0f}' min='5' max='95' step='5'>"
+        + "<div class='pu'>%</div></div>"
+        + f"<div class='pr2'><div class='pl'>Entry window start{src('entry_window_start')}</div>"
+        + f"<input class='pi' type='time' name='entry_window_start' value='{eff_entry_start}' style='width:92px'>"
+        + "<div class='pu'></div></div>"
+        + f"<div class='pr2'><div class='pl'>Entry window end{src('entry_window_end')}</div>"
+        + f"<input class='pi' type='time' name='entry_window_end' value='{eff_entry_end}' style='width:92px'>"
+        + "<div class='pu'></div></div>"
+        + f"<div class='pr2'><div class='pl'>Block SELL on expiry day{src('no_entry_on_expiry_day')}</div>"
+        + f"<select class='pi' name='no_entry_on_expiry_day' style='width:86px'>"
+        + f"<option value='1'{' selected' if eff_no_expiry else ''}>Yes</option>"
+        + f"<option value='0'{' selected' if not eff_no_expiry else ''}>No</option>"
+        + "</select><div class='pu'></div></div>"
         + "<div style='display:flex;gap:8px;margin-top:12px'>"
         + "<button class='btn bp' type='submit' style='flex:1'>Apply</button>"
         + "<button class='btn bm' type='submit' name='reset' value='1' style='flex:1'>Reset to defaults</button>"
@@ -1975,12 +2011,22 @@ async def update_risk(
     max_daily_loss: str = Form(default=""),
     sl_pct: str = Form(default=""),
     rr_ratio: str = Form(default=""),
+    daily_profit_target: str = Form(default=""),
+    sell_options_profit_pct: str = Form(default=""),
+    entry_window_start: str = Form(default=""),
+    entry_window_end: str = Form(default=""),
+    no_entry_on_expiry_day: str = Form(default=""),
 ) -> Response:
     if reset == "1":
         state.set_max_lots(None)
         state.set_max_daily_loss(None)
         state.set_sl_pct(None)
         state.set_rr_ratio(None)
+        state.set_daily_profit_target(None)
+        state.set_sell_options_profit_pct(None)
+        state.set_entry_window_start(None)
+        state.set_entry_window_end(None)
+        state.set_no_entry_on_expiry_day(None)
         log.info("Risk params reset to .env defaults")
     else:
         try:
@@ -1992,8 +2038,23 @@ async def update_risk(
                 state.set_sl_pct(float(sl_pct) / 100.0)
             if rr_ratio.strip():
                 state.set_rr_ratio(float(rr_ratio))
-            log.info("Risk params updated: max_lots=%s max_loss=%s sl_pct=%s rr=%s",
-                     max_lots, max_daily_loss, sl_pct, rr_ratio)
+            if daily_profit_target.strip():
+                state.set_daily_profit_target(float(daily_profit_target))
+            if sell_options_profit_pct.strip():
+                state.set_sell_options_profit_pct(float(sell_options_profit_pct) / 100.0)
+            if entry_window_start.strip():
+                state.set_entry_window_start(entry_window_start.strip())
+            if entry_window_end.strip():
+                state.set_entry_window_end(entry_window_end.strip())
+            if no_entry_on_expiry_day.strip():
+                state.set_no_entry_on_expiry_day(no_entry_on_expiry_day == "1")
+            log.info(
+                "Risk params updated: max_lots=%s max_loss=%s sl_pct=%s rr=%s "
+                "profit_target=%s sell_ppt=%s entry_start=%s entry_end=%s no_expiry=%s",
+                max_lots, max_daily_loss, sl_pct, rr_ratio,
+                daily_profit_target, sell_options_profit_pct,
+                entry_window_start, entry_window_end, no_entry_on_expiry_day,
+            )
         except ValueError:
             pass
     return Response(status_code=302, headers={"Location": "/control"})
