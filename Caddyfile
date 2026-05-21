@@ -1,0 +1,3 @@
+naashshla.duckdns.org {
+    reverse_proxy bot:8000
+}
