@@ -1202,27 +1202,102 @@ async def healthz(settings: Settings = Depends(get_current_settings)) -> dict:
     return {"status": "ok", "token_age_hours": token_age_hours, "dry_run": settings.DRY_RUN}
 
 
-_NAV = (
-    "<nav style='display:flex;gap:8px;flex-wrap:wrap;margin-bottom:18px'>"
-    "<a href='/control' style='padding:6px 12px;background:#333;color:#fff;border-radius:6px;text-decoration:none;font-size:.9em'>Control</a>"
-    "<a href='/orders' style='padding:6px 12px;background:#fff;border:1px solid #ccc;border-radius:6px;text-decoration:none;color:#333;font-size:.9em'>Orders</a>"
-    "<a href='/gtts' style='padding:6px 12px;background:#fff;border:1px solid #ccc;border-radius:6px;text-decoration:none;color:#333;font-size:.9em'>GTTs</a>"
-    "<a href='/history' style='padding:6px 12px;background:#fff;border:1px solid #ccc;border-radius:6px;text-decoration:none;color:#333;font-size:.9em'>History</a>"
-    "<a href='/dashboard' style='padding:6px 12px;background:#fff;border:1px solid #ccc;border-radius:6px;text-decoration:none;color:#333;font-size:.9em'>Alerts</a>"
-    "</nav>"
+_CSS = (
+    "*{box-sizing:border-box;margin:0;padding:0}"
+    "body{font-family:'Inter',sans-serif;background:#f0f2f8;color:#2d3436;min-height:100vh}"
+    ".hdr{background:linear-gradient(135deg,#1a1f3c 0%,#2d3561 100%);padding:14px 20px;"
+    "display:flex;align-items:center;gap:10px}"
+    ".hdr-icon{font-size:1.4em}"
+    ".hdr-t{color:#fff;font-size:1.05em;font-weight:700;letter-spacing:.02em}"
+    ".hdr-s{color:rgba(255,255,255,.5);font-size:.72em;margin-top:1px}"
+    ".nav{background:#252b4a;display:flex;padding:0 12px;overflow-x:auto;"
+    "scrollbar-width:none;-ms-overflow-style:none}"
+    ".nav::-webkit-scrollbar{display:none}"
+    ".nav a{color:rgba(255,255,255,.5);text-decoration:none;padding:10px 15px;font-size:.8em;"
+    "font-weight:500;border-bottom:3px solid transparent;transition:all .2s;white-space:nowrap}"
+    ".nav a:hover{color:#fff}"
+    ".nav a.on{color:#a78bfa;border-bottom-color:#a78bfa}"
+    ".wrap{padding:16px;margin:0 auto}"
+    ".wrap-sm{max-width:560px}.wrap-lg{max-width:960px}"
+    ".card{background:#fff;border-radius:12px;padding:16px 18px;margin-bottom:14px;"
+    "box-shadow:0 2px 10px rgba(0,0,0,.06)}"
+    ".ct{font-size:.68em;font-weight:700;text-transform:uppercase;letter-spacing:.09em;"
+    "color:#8492a6;margin-bottom:12px;display:flex;align-items:center;gap:6px}"
+    ".ct::before{content:'';display:block;width:3px;height:13px;border-radius:2px;background:#6c5ce7}"
+    ".pill{display:inline-block;padding:3px 10px;border-radius:20px;font-size:.73em;font-weight:700;letter-spacing:.02em}"
+    ".pg{background:#e8faf5;color:#00875a}.pr{background:#fff0ed;color:#c0392b}"
+    ".pa{background:#fff8e1;color:#b7791f}.pb{background:#eef2ff;color:#4c51bf}"
+    ".pm{background:#f0f2f8;color:#636e72}.pp{background:#f3f0ff;color:#6c5ce7}"
+    ".mr{display:flex;align-items:center;gap:10px;margin:8px 0}"
+    ".ml{font-size:.78em;color:#8492a6;width:130px;flex-shrink:0}"
+    ".mw{flex:1;height:5px;background:#e8ecf0;border-radius:3px;overflow:hidden}"
+    ".mb{height:100%;border-radius:3px;transition:width .4s}"
+    ".mv{font-size:.78em;font-weight:700;min-width:90px;text-align:right}"
+    ".ok{color:#00b894}.wn{color:#f0a500}.bd{color:#e17055}"
+    ".bok{background:#00b894}.bwn{background:#f0a500}.bbd{background:#e17055}"
+    ".mdr{display:flex;align-items:center;justify-content:space-between;"
+    "padding:9px 0;border-bottom:1px solid #f5f6fa}"
+    ".mdr:last-of-type{border-bottom:none}"
+    ".mdl{font-size:.82em;color:#444;font-weight:500;display:flex;align-items:center;gap:8px}"
+    ".btn{padding:8px 16px;border:none;border-radius:8px;font-size:.8em;font-weight:700;"
+    "cursor:pointer;transition:opacity .15s,transform .1s;color:#fff;"
+    "font-family:'Inter',sans-serif;letter-spacing:.02em}"
+    ".btn:active{transform:scale(.97)}.btn:hover{opacity:.88}"
+    ".bn{background:linear-gradient(135deg,#2d3561,#1a1f3c)}"
+    ".bg2{background:linear-gradient(135deg,#00cba1,#00b894)}"
+    ".br2{background:linear-gradient(135deg,#ff6b6b,#e17055)}"
+    ".ba{background:linear-gradient(135deg,#ffd93d,#f0a500);color:#333}"
+    ".bp{background:linear-gradient(135deg,#a78bfa,#6c5ce7)}"
+    ".bm{background:#b2bec3}"
+    ".bfull{display:block;width:100%;padding:13px;font-size:.9em;margin:5px 0;text-align:center}"
+    ".sbanner{background:linear-gradient(135deg,#e17055,#c0392b);color:#fff;"
+    "padding:12px 16px;border-radius:10px;font-weight:700;text-align:center;"
+    "margin-bottom:14px;font-size:.88em;letter-spacing:.02em;"
+    "box-shadow:0 4px 14px rgba(225,112,85,.4)}"
+    ".pr2{display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid #f5f6fa}"
+    ".pr2:last-of-type{border-bottom:none}"
+    ".pl{flex:1;font-size:.8em;color:#555}"
+    ".pi{width:86px;padding:7px 8px;border:1.5px solid #e0e7ef;border-radius:7px;"
+    "font-size:.84em;text-align:right;font-family:'Inter',sans-serif;transition:border-color .2s}"
+    ".pi:focus{outline:none;border-color:#6c5ce7;box-shadow:0 0 0 3px rgba(108,92,231,.12)}"
+    ".pu{font-size:.74em;color:#aaa;width:22px}"
+    ".od{display:inline-block;width:6px;height:6px;border-radius:50%;"
+    "background:#f0a500;margin-left:4px;vertical-align:middle}"
+    "table{width:100%;border-collapse:collapse}"
+    "th{font-size:.68em;font-weight:700;text-transform:uppercase;letter-spacing:.07em;"
+    "color:#8492a6;padding:9px 10px;border-bottom:2px solid #f0f2f8;background:#fafbff;text-align:left}"
+    "td{padding:9px 10px;font-size:.81em;border-bottom:1px solid #f5f6fa}"
+    "tr:last-child td{border-bottom:none}"
+    "tbody tr:hover td{background:#fafbff}"
+    ".tc{text-align:center}.tr{text-align:right}"
 )
-_PAGE_HEAD = (
-    "<html><head>"
-    "<meta name='viewport' content='width=device-width,initial-scale=1'>"
-    "<style>"
-    "body{font-family:sans-serif;padding:16px;max-width:900px;margin:auto;background:#f5f5f5}"
-    "h2{margin:0 0 4px}h3{margin:14px 0 6px;color:#555;font-size:.95em;text-transform:uppercase;letter-spacing:.04em}"
-    "table{width:100%;border-collapse:collapse;background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,.08)}"
-    "th{background:#f0f0f0;padding:8px 10px;text-align:left;font-size:.85em}"
-    "td{padding:7px 10px;border-top:1px solid #f0f0f0;font-size:.85em}"
-    "tr:hover td{background:#fafafa}"
-    "</style></head><body>"
-)
+
+
+def _shell(active: str, content: str, wide: bool = False) -> str:
+    """Wrap page content in the shared header / nav / CSS."""
+    pages = [("control","Control"),("orders","Orders"),("gtts","GTTs"),
+             ("history","History"),("dashboard","Alerts")]
+    nav = "".join(
+        "<a href='/" + p + "'" + (" class='on'" if p == active else "") + ">" + lbl + "</a>"
+        for p, lbl in pages
+    )
+    wrap_cls = "wrap wrap-lg" if wide else "wrap wrap-sm"
+    return (
+        "<!DOCTYPE html><html lang='en'><head>"
+        "<meta charset='UTF-8'>"
+        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+        "<title>ZeroBot</title>"
+        "<link href='https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;display=swap' rel='stylesheet'>"
+        "<style>" + _CSS + "</style>"
+        "</head><body>"
+        "<div class='hdr'>"
+        "<div class='hdr-icon'>&#x1F4C8;</div>"
+        "<div><div class='hdr-t'>ZeroBot</div><div class='hdr-s'>Zerodha Algo Trading</div></div>"
+        "</div>"
+        "<div class='nav'>" + nav + "</div>"
+        "<div class='" + wrap_cls + "'>" + content + "</div>"
+        "</body></html>"
+    )
 
 
 @app.get("/dashboard")
@@ -1232,16 +1307,19 @@ async def dashboard(
 ) -> Response:
     rows = session.query(Alert).order_by(Alert.received_at.desc()).limit(50).all()
     rows_html = "".join(
-        f"<tr><td>{r.id}</td><td>{r.tv_ticker}</td><td>{r.action}</td>"
-        f"<td>{r.received_at}</td><td>{r.processed}</td></tr>"
+        f"<tr><td>{r.id}</td><td style='font-weight:600'>{r.tv_ticker}</td><td>{r.action}</td>"
+        f"<td>{r.received_at.strftime('%m/%d %H:%M') if r.received_at else '—'}</td>"
+        f"<td><span class='pill {'pg' if r.processed else 'pa'}'>"
+        f"{'YES' if r.processed else 'PENDING'}</span></td></tr>"
         for r in rows
     )
     return Response(
-        content=(
-            _PAGE_HEAD + _NAV
-            + "<h2>Recent Alerts</h2>"
-            "<table><tr><th>ID</th><th>Ticker</th><th>Action</th>"
-            f"<th>Time</th><th>Processed</th></tr>{rows_html}</table></body></html>"
+        content=_shell("dashboard",
+            "<div class='card'><div class='ct'>Recent Alerts</div>"
+            "<table><thead><tr><th>ID</th><th>Ticker</th><th>Action</th>"
+            "<th>Time</th><th>Processed</th></tr></thead>"
+            "<tbody>" + rows_html + "</tbody></table></div>",
+            wide=True,
         ),
         media_type="text/html",
     )
@@ -1254,16 +1332,17 @@ async def positions(
 ) -> Response:
     rows = session.query(Position).all()
     rows_html = "".join(
-        f"<tr><td>{r.id}</td><td>{r.tradingsymbol}</td>"
-        f"<td>{r.quantity}</td><td>{r.entry_premium}</td></tr>"
+        f"<tr><td>{r.id}</td><td style='font-weight:600'>{r.tradingsymbol}</td>"
+        f"<td class='tr'>{r.quantity}</td><td class='tr'>&#x20B9;{r.entry_premium:.2f}</td></tr>"
         for r in rows
     )
     return Response(
-        content=(
-            _PAGE_HEAD + _NAV
-            + "<h2>Open Positions</h2>"
-            "<table><tr><th>ID</th><th>Symbol</th>"
-            f"<th>Qty</th><th>Entry Premium</th></tr>{rows_html}</table></body></html>"
+        content=_shell("",
+            "<div class='card'><div class='ct'>Open Positions</div>"
+            "<table><thead><tr><th>ID</th><th>Symbol</th>"
+            "<th class='tr'>Qty</th><th class='tr'>Entry Premium</th></tr></thead>"
+            "<tbody>" + rows_html + "</tbody></table></div>",
+            wide=True,
         ),
         media_type="text/html",
     )
@@ -1276,16 +1355,19 @@ async def history(
 ) -> Response:
     rows = session.query(ClosedTrade).order_by(ClosedTrade.closed_at.desc()).limit(50).all()
     rows_html = "".join(
-        f"<tr><td>{r.id}</td><td>{r.tradingsymbol}</td>"
-        f"<td>{r.pnl}</td><td>{r.exit_reason}</td><td>{r.closed_at}</td></tr>"
+        f"<tr><td>{r.id}</td><td style='font-weight:600'>{r.tradingsymbol}</td>"
+        f"<td class='tr {'ok' if (r.pnl or 0) >= 0 else 'bd'}'>&#x20B9;{(r.pnl or 0):+.2f}</td>"
+        f"<td>{r.exit_reason}</td>"
+        f"<td>{r.closed_at.strftime('%m/%d %H:%M') if r.closed_at else '—'}</td></tr>"
         for r in rows
     )
     return Response(
-        content=(
-            _PAGE_HEAD + _NAV
-            + "<h2>Trade History</h2>"
-            "<table><tr><th>ID</th><th>Symbol</th><th>PnL</th>"
-            f"<th>Reason</th><th>Closed</th></tr>{rows_html}</table></body></html>"
+        content=_shell("history",
+            "<div class='card'><div class='ct'>Trade History</div>"
+            "<table><thead><tr><th>ID</th><th>Symbol</th><th class='tr'>PnL</th>"
+            "<th>Reason</th><th>Closed</th></tr></thead>"
+            "<tbody>" + rows_html + "</tbody></table></div>",
+            wide=True,
         ),
         media_type="text/html",
     )
@@ -1309,33 +1391,38 @@ async def gtts_page(
         except Exception as exc:
             log.warning("gtts_page: could not fetch live GTTs from Kite: %s", exc)
 
+    def _gtt_pill(status: str) -> str:
+        if status == "ACTIVE":
+            return "pg"
+        if status == "DRY_RUN":
+            return "pa"
+        return "pr"
+
     rows_html = "".join(
         "<tr>"
         f"<td>{r.id}</td>"
-        f"<td>{r.tradingsymbol}</td>"
-        f"<td>{r.sl_trigger:.2f}</td>"
-        f"<td>{r.target_trigger:.2f}</td>"
-        f"<td>{r.last_price_at_placement:.2f}</td>"
-        f"<td>{r.status}</td>"
-        f"<td>{r.kite_gtt_id or '-'}</td>"
-        f"<td>{live_map.get(r.kite_gtt_id, 'N/A') if r.kite_gtt_id else '-'}</td>"
-        f"<td>{r.placed_at}</td>"
+        f"<td style='font-weight:600'>{r.tradingsymbol}</td>"
+        f"<td class='tr bd'>&#x20B9;{r.sl_trigger:.2f}</td>"
+        f"<td class='tr ok'>&#x20B9;{r.target_trigger:.2f}</td>"
+        f"<td class='tr'>&#x20B9;{r.last_price_at_placement:.2f}</td>"
+        f"<td><span class='pill {_gtt_pill(r.status)}'>{r.status}</span></td>"
+        f"<td class='tc'>{r.kite_gtt_id or '—'}</td>"
+        f"<td class='tc'>{live_map.get(r.kite_gtt_id, 'N/A') if r.kite_gtt_id else '—'}</td>"
+        f"<td>{r.placed_at.strftime('%m/%d %H:%M') if r.placed_at else '—'}</td>"
         "</tr>"
         for r in rows
     )
     return Response(
-        content=(
-            _PAGE_HEAD + _NAV
-            + "<h2>GTT / Stop-Loss Orders</h2>"
-            "<table>"
-            "<tr><th>ID</th><th>Symbol</th><th>SL Trigger</th><th>Target Trigger</th>"
-            "<th>Entry Price</th><th>DB Status</th><th>Kite GTT ID</th>"
-            f"<th>Kite Live Status</th><th>Placed At</th></tr>{rows_html}"
-            "</table>"
-            "<p style='font-size:.8em;color:#888'>Kite Live: <b>active</b>=SL live | "
-            "<b>triggered</b>=fired | "
-            "<b>N/A</b>=not found (triggered+cleaned up, or GTT_FAILED)</p>"
-            "</body></html>"
+        content=_shell("gtts",
+            "<div class='card'><div class='ct'>GTT / Stop-Loss Orders</div>"
+            "<table><thead><tr><th>ID</th><th>Symbol</th><th class='tr'>SL Trigger</th>"
+            "<th class='tr'>Target</th><th class='tr'>Entry Price</th><th>DB Status</th>"
+            "<th class='tc'>Kite GTT ID</th><th class='tc'>Kite Live</th><th>Placed At</th>"
+            "</tr></thead><tbody>" + rows_html + "</tbody></table>"
+            "<p style='font-size:.73em;color:#aaa;margin-top:8px'>"
+            "Kite Live: <b>active</b>=SL live | <b>triggered</b>=fired | "
+            "<b>N/A</b>=not found (triggered+cleaned up or GTT_FAILED)</p></div>",
+            wide=True,
         ),
         media_type="text/html",
     )
@@ -1362,61 +1449,6 @@ async def toggle_trade_mode(
 
 # ── /control — unified dashboard ──────────────────────────────────────────────
 
-_CTRL_CSS = (
-    "<style>"
-    "body{font-family:sans-serif;padding:16px;max-width:520px;margin:auto;background:#f5f5f5}"
-    "h2{margin:0 0 4px}.card{background:#fff;border-radius:10px;padding:16px;margin-bottom:14px;"
-    "box-shadow:0 1px 3px rgba(0,0,0,.1)}.card h3{margin:0 0 10px;font-size:.85em;color:#777;"
-    "text-transform:uppercase;letter-spacing:.05em}"
-    ".btn{display:block;width:100%;padding:14px;font-size:1em;border:none;border-radius:8px;"
-    "cursor:pointer;margin:6px 0;color:#fff;font-weight:bold}"
-    ".btn-green{background:#28a745}.btn-red{background:#dc3545}.btn-orange{background:#e67e22}"
-    ".btn-gray{background:#6c757d}.btn-blue{background:#007bff}"
-    ".badge{display:inline-block;padding:5px 14px;border-radius:20px;font-weight:bold;font-size:.95em}"
-    ".bg{background:#d4edda;color:#155724}.br{background:#f8d7da;color:#721c24}"
-    ".bo{background:#fff3cd;color:#856404}"
-    ".switch-row{display:flex;align-items:center;justify-content:space-between;margin:8px 0}"
-    ".switch-row label{font-size:.9em;color:#444}"
-    ".sw{position:relative;display:inline-block;width:52px;height:28px}"
-    ".sw input{opacity:0;width:0;height:0}"
-    ".slider{position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background:#ccc;"
-    "border-radius:28px;transition:.3s}"
-    ".slider:before{position:absolute;content:'';height:22px;width:22px;left:3px;bottom:3px;"
-    "background:white;border-radius:50%;transition:.3s}"
-    "input:checked+.slider{background:#28a745}"
-    "input:checked+.slider:before{transform:translateX(24px)}"
-    ".risk-row{display:flex;align-items:center;gap:8px;margin:8px 0}"
-    ".risk-row label{flex:1;font-size:.88em;color:#555}"
-    ".risk-row input[type=number]{width:90px;padding:6px 8px;border:1px solid #ccc;"
-    "border-radius:6px;font-size:.92em;text-align:right}"
-    ".risk-row .unit{color:#999;font-size:.82em;min-width:28px}"
-    ".apply-btn{padding:8px 16px;font-size:.9em;border:none;border-radius:6px;cursor:pointer;"
-    "background:#007bff;color:#fff;margin-top:6px}"
-    ".reset-btn{padding:8px 16px;font-size:.9em;border:none;border-radius:6px;cursor:pointer;"
-    "background:#6c757d;color:#fff;margin-top:6px;margin-left:6px}"
-    ".sum-row{display:flex;justify-content:space-between;padding:5px 0;"
-    "border-bottom:1px solid #f0f0f0;font-size:.88em}"
-    ".sum-row:last-child{border-bottom:none}"
-    ".ok{color:#28a745;font-weight:bold}.warn{color:#e67e22;font-weight:bold}"
-    ".bad{color:#dc3545;font-weight:bold}"
-    ".stop-banner{background:#f8d7da;color:#721c24;padding:10px 14px;border-radius:8px;"
-    "font-weight:bold;margin-bottom:12px;text-align:center;font-size:1.05em}"
-    "nav{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:18px}"
-    "nav a{padding:6px 12px;background:#fff;border:1px solid #ccc;border-radius:6px;"
-    "text-decoration:none;color:#333;font-size:.88em}"
-    "nav a.active{background:#333;color:#fff;border-color:#333}"
-    "</style>"
-)
-
-_CTRL_NAV = (
-    "<nav>"
-    "<a href='/control' class='active'>Control</a>"
-    "<a href='/orders'>Orders</a>"
-    "<a href='/gtts'>GTTs</a>"
-    "<a href='/history'>History</a>"
-    "<a href='/dashboard'>Alerts</a>"
-    "</nav>"
-)
 
 
 @app.get("/control")
@@ -1445,116 +1477,112 @@ async def control_page(
     open_pos = _open_position_count(session)
     loss_pct = (today_loss / eff_max_loss * 100) if eff_max_loss > 0 else 0
 
-    def risk_cls(used, cap):
-        r = used / cap if cap else 0
-        return "bad" if r >= 1 else "warn" if r >= 0.6 else "ok"
+    # ── meter helpers ─────────────────────────────────────────────────────────
+    def _bar(pct: float) -> tuple[str, str]:
+        if pct >= 100:
+            return "bbd", "bd"
+        if pct >= 60:
+            return "bwn", "wn"
+        return "bok", "ok"
 
-    def consec_cls(c):
-        return "bad" if c >= settings.CONSECUTIVE_LOSSES_LIMIT else "warn" if c >= 2 else "ok"
+    loss_pct_c = min(loss_pct, 100)
+    loss_bar, loss_vc = _bar(loss_pct)
+
+    trades_pct = (trades_today / settings.MAX_TRADES_PER_DAY * 100) if settings.MAX_TRADES_PER_DAY else 0
+    trades_bar, trades_vc = _bar(trades_pct)
+
+    pos_pct = (open_pos / settings.MAX_OPEN_POSITIONS * 100) if settings.MAX_OPEN_POSITIONS else 0
+    pos_bar, pos_vc = _bar(pos_pct)
+
+    consec_pct = (consec / settings.CONSECUTIVE_LOSSES_LIMIT * 100) if settings.CONSECUTIVE_LOSSES_LIMIT else 0
+    consec_bar, consec_vc = _bar(consec_pct)
+
+    # ── badges / buttons ──────────────────────────────────────────────────────
+    mode_pill    = "pg" if trade_mode == "BUY_OPTIONS" else "pr"
+    mode_display = trade_mode.replace("_", " ")
+    paper_pill   = "pa" if paper else "pp"
+    paper_label  = "PAPER MODE" if paper else "LIVE TRADING"
+    paper_lbl    = "Go LIVE" if paper else "Go PAPER"
+    paper_cls    = "bg2" if paper else "ba"
+    estop_lbl    = "&#x2714; Resume Trading" if estop else "&#x26D4; Emergency Stop"
+    estop_cls    = "bg2" if estop else "br2"
+    stop_banner  = (
+        "<div class='sbanner'>&#x26D4; EMERGENCY STOP ACTIVE &mdash; No new trades will execute</div>"
+        if estop else ""
+    )
+
+    def src(key: str) -> str:
+        return (
+            " <span style='color:#f0a500;font-size:.72em'>(overridden)</span>"
+            if overrides.get(key) is not None else ""
+        )
 
     errors = session.query(AppError).order_by(AppError.occurred_at.desc()).limit(5).all()
     errors_html = "".join(
-        f"<tr><td style='font-size:.8em;color:#888'>{e.occurred_at.strftime('%H:%M')}</td>"
-        f"<td style='font-size:.8em'>{e.error_type}</td>"
-        f"<td style='font-size:.8em;max-width:200px;overflow:hidden;white-space:nowrap;"
-        f"text-overflow:ellipsis'>{e.message[:80]}</td></tr>"
+        f"<tr><td style='color:#8492a6'>{e.occurred_at.strftime('%H:%M')}</td>"
+        f"<td>{e.error_type}</td>"
+        f"<td style='max-width:240px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis'>"
+        f"{e.message[:120]}</td></tr>"
         for e in errors
-    ) or "<tr><td colspan='3' style='color:#888;font-size:.85em'>No errors</td></tr>"
+    ) or "<tr><td colspan='3' style='text-align:center;color:#aaa'>No errors</td></tr>"
 
-    # ── trade-mode badge ──────────────────────────────────────────────────────
-    if trade_mode == "BUY_OPTIONS":
-        mode_badge = "<span class='badge bg'>BUY OPTIONS</span>"
-        mode_btn   = "<button class='btn btn-red' type='submit'>Switch to SELL OPTIONS</button>"
-    else:
-        mode_badge = "<span class='badge br'>SELL OPTIONS</span>"
-        mode_btn   = "<button class='btn btn-green' type='submit'>Switch to BUY OPTIONS</button>"
+    body = (
+        stop_banner
 
-    # ── paper/live badge ──────────────────────────────────────────────────────
-    paper_label  = "PAPER MODE" if paper else "LIVE TRADING"
-    paper_badge  = f"<span class='badge {'bo' if paper else 'bg'}'>{paper_label}</span>"
-    paper_btn_lbl = "Switch to LIVE TRADING" if paper else "Switch to PAPER MODE"
-    paper_btn_cls = "btn-green" if paper else "btn-orange"
+        # risk summary
+        + "<div class='card'><div class='ct'>Today's Risk Summary</div>"
+        + f"<div class='mr'><div class='ml'>Daily loss</div>"
+        + f"<div class='mw'><div class='mb {loss_bar}' style='width:{loss_pct_c:.0f}%'></div></div>"
+        + f"<div class='mv {loss_vc}'>&#x20B9;{today_loss:.0f}&thinsp;/&thinsp;&#x20B9;{eff_max_loss:.0f}</div></div>"
+        + f"<div class='mr'><div class='ml'>Trades today</div>"
+        + f"<div class='mw'><div class='mb {trades_bar}' style='width:{min(trades_pct,100):.0f}%'></div></div>"
+        + f"<div class='mv {trades_vc}'>{trades_today}&thinsp;/&thinsp;{settings.MAX_TRADES_PER_DAY}</div></div>"
+        + f"<div class='mr'><div class='ml'>Open positions</div>"
+        + f"<div class='mw'><div class='mb {pos_bar}' style='width:{min(pos_pct,100):.0f}%'></div></div>"
+        + f"<div class='mv {pos_vc}'>{open_pos}&thinsp;/&thinsp;{settings.MAX_OPEN_POSITIONS}</div></div>"
+        + f"<div class='mr'><div class='ml'>Consec. losses</div>"
+        + f"<div class='mw'><div class='mb {consec_bar}' style='width:{min(consec_pct,100):.0f}%'></div></div>"
+        + f"<div class='mv {consec_vc}'>{consec}&thinsp;/&thinsp;{settings.CONSECUTIVE_LOSSES_LIMIT}</div></div>"
+        + "</div>"
 
-    # ── emergency stop ────────────────────────────────────────────────────────
-    stop_banner = (
-        "<div class='stop-banner'>⛔ EMERGENCY STOP ACTIVE — No new trades will execute</div>"
-        if estop else ""
+        # mode / switches
+        + "<div class='card'><div class='ct'>Mode</div>"
+        + f"<div class='mdr'><div class='mdl'>Trade Mode&ensp;<span class='pill {mode_pill}'>{mode_display}</span></div>"
+        + "<form method='post' action='/trade-mode/toggle' style='margin:0'>"
+        + "<button class='btn bn' type='submit'>Toggle</button></form></div>"
+        + f"<div class='mdr'><div class='mdl'>Paper / Live&ensp;<span class='pill {paper_pill}'>{paper_label}</span></div>"
+        + "<form method='post' action='/control/paper-mode/toggle' style='margin:0'>"
+        + f"<button class='btn {paper_cls}' type='submit'>{paper_lbl}</button></form></div>"
+        + "<div style='margin-top:10px'><form method='post' action='/control/emergency-stop/toggle'>"
+        + f"<button class='btn bfull {estop_cls}' type='submit'>{estop_lbl}</button>"
+        + "</form></div></div>"
+
+        # risk params
+        + "<div class='card'><div class='ct'>Risk Parameters</div>"
+        + "<form method='post' action='/control/risk'>"
+        + f"<div class='pr2'><div class='pl'>Max lots / trade{src('max_lots')}</div>"
+        + f"<input class='pi' type='number' name='max_lots' value='{eff_max_lots}' min='1' max='20' step='1'>"
+        + "<div class='pu'>lots</div></div>"
+        + f"<div class='pr2'><div class='pl'>Max daily loss{src('max_daily_loss')}</div>"
+        + f"<input class='pi' type='number' name='max_daily_loss' value='{eff_max_loss:.0f}' min='500' step='500'>"
+        + "<div class='pu'>&#x20B9;</div></div>"
+        + f"<div class='pr2'><div class='pl'>SL % (options){src('sl_pct')}</div>"
+        + f"<input class='pi' type='number' name='sl_pct' value='{eff_sl_pct*100:.1f}' min='1' max='50' step='0.5'>"
+        + "<div class='pu'>%</div></div>"
+        + f"<div class='pr2'><div class='pl'>R:R ratio{src('rr_ratio')}</div>"
+        + f"<input class='pi' type='number' name='rr_ratio' value='{eff_rr:.1f}' min='0.5' max='10' step='0.1'>"
+        + "<div class='pu'>&#xD7;</div></div>"
+        + "<div style='display:flex;gap:8px;margin-top:12px'>"
+        + "<button class='btn bp' type='submit' style='flex:1'>Apply</button>"
+        + "<button class='btn bm' type='submit' name='reset' value='1' style='flex:1'>Reset to defaults</button>"
+        + "</div></form></div>"
+
+        # errors
+        + "<div class='card'><div class='ct'>Recent Errors</div>"
+        + "<table><thead><tr><th>Time</th><th>Type</th><th>Message</th></tr></thead><tbody>"
+        + errors_html + "</tbody></table></div>"
     )
-    estop_btn_lbl = "Resume Trading" if estop else "Emergency Stop"
-    estop_btn_cls = "btn-green" if estop else "btn-red"
-
-    # ── override indicators ───────────────────────────────────────────────────
-    def src(key):
-        return " <small style='color:#e67e22'>(overridden)</small>" if overrides.get(key) is not None else ""
-
-    html = (
-        f"<html><head><meta name='viewport' content='width=device-width,initial-scale=1'>"
-        f"<title>Bot Control</title>{_CTRL_CSS}</head><body>"
-        f"{_CTRL_NAV}"
-        f"{stop_banner}"
-        f"<h2>Bot Control</h2>"
-
-        # ── Risk summary card ─────────────────────────────────────────────────
-        f"<div class='card'>"
-        f"<h3>Today's Risk Summary</h3>"
-        f"<div class='sum-row'><span>Daily loss</span>"
-        f"<span class='{risk_cls(today_loss, eff_max_loss)}'>₹{today_loss:.0f} / ₹{eff_max_loss:.0f}"
-        f" ({loss_pct:.0f}%)</span></div>"
-        f"<div class='sum-row'><span>Trades today</span>"
-        f"<span class='{risk_cls(trades_today, settings.MAX_TRADES_PER_DAY)}'>"
-        f"{trades_today} / {settings.MAX_TRADES_PER_DAY}</span></div>"
-        f"<div class='sum-row'><span>Open positions</span>"
-        f"<span class='{risk_cls(open_pos, settings.MAX_OPEN_POSITIONS)}'>"
-        f"{open_pos} / {settings.MAX_OPEN_POSITIONS}</span></div>"
-        f"<div class='sum-row'><span>Consecutive losses</span>"
-        f"<span class='{consec_cls(consec)}'>{consec} / {settings.CONSECUTIVE_LOSSES_LIMIT}</span></div>"
-        f"</div>"
-
-        # ── Mode switches card ────────────────────────────────────────────────
-        f"<div class='card'>"
-        f"<h3>Mode</h3>"
-        f"<div class='switch-row'><label>Trade Mode: {mode_badge}</label>"
-        f"<form method='post' action='/trade-mode/toggle' style='margin:0'>"
-        f"<button class='btn btn-gray' type='submit' style='width:auto;padding:8px 14px;"
-        f"font-size:.88em'>Toggle</button></form></div>"
-        f"<div class='switch-row'><label>Live/Paper: {paper_badge}</label>"
-        f"<form method='post' action='/control/paper-mode/toggle' style='margin:0'>"
-        f"<button class='btn {paper_btn_cls}' type='submit' style='width:auto;padding:8px 14px;"
-        f"font-size:.88em'>{paper_btn_lbl}</button></form></div>"
-        f"<form method='post' action='/control/emergency-stop/toggle' style='margin-top:8px'>"
-        f"<button class='btn {estop_btn_cls}' type='submit'>{estop_btn_lbl}</button></form>"
-        f"</div>"
-
-        # ── Risk params card ──────────────────────────────────────────────────
-        f"<div class='card'>"
-        f"<h3>Risk Parameters</h3>"
-        f"<form method='post' action='/control/risk'>"
-        f"<div class='risk-row'><label>Max lots / trade{src('max_lots')}</label>"
-        f"<input type='number' name='max_lots' value='{eff_max_lots}' min='1' max='20' step='1'>"
-        f"<span class='unit'>lots</span></div>"
-        f"<div class='risk-row'><label>Max daily loss{src('max_daily_loss')}</label>"
-        f"<input type='number' name='max_daily_loss' value='{eff_max_loss:.0f}' min='500' step='500'>"
-        f"<span class='unit'>₹</span></div>"
-        f"<div class='risk-row'><label>SL % (options){src('sl_pct')}</label>"
-        f"<input type='number' name='sl_pct' value='{eff_sl_pct*100:.1f}' min='1' max='50' step='0.5'>"
-        f"<span class='unit'>%</span></div>"
-        f"<div class='risk-row'><label>R:R ratio{src('rr_ratio')}</label>"
-        f"<input type='number' name='rr_ratio' value='{eff_rr:.1f}' min='0.5' max='10' step='0.1'>"
-        f"<span class='unit'>×</span></div>"
-        f"<button class='apply-btn' type='submit'>Apply</button>"
-        f"<button class='reset-btn' type='submit' name='reset' value='1'>Reset to defaults</button>"
-        f"</form>"
-        f"</div>"
-
-        # ── Recent errors card ────────────────────────────────────────────────
-        f"<div class='card'>"
-        f"<h3>Recent Errors</h3>"
-        f"<table><tr><th>Time</th><th>Type</th><th>Message</th></tr>{errors_html}</table>"
-        f"</div>"
-
-        f"</body></html>"
-    )
-    return Response(content=html, media_type="text/html")
+    return Response(content=_shell("control", body), media_type="text/html")
 
 
 @app.post("/control/paper-mode/toggle")
@@ -1628,20 +1656,20 @@ async def orders_page(
 
     def pnl_cls(pnl):
         if pnl is None:
-            return "color:#888"
-        return "color:#28a745;font-weight:bold" if pnl >= 0 else "color:#dc3545;font-weight:bold"
+            return ""
+        return "ok" if pnl >= 0 else "bd"
 
     def status_badge(order, ct):
         if ct is not None:
             reason = ct.exit_reason or "CLOSED"
-            bg = "#d4edda" if (ct.pnl or 0) >= 0 else "#f8d7da"
-            return f"<span style='background:{bg};padding:2px 7px;border-radius:10px;font-size:.8em'>{reason}</span>"
+            pill_cls = "pg" if (ct.pnl or 0) >= 0 else "pr"
+            return f"<span class='pill {pill_cls}'>{reason}</span>"
         s = order.status
         if s == "DRY_RUN":
-            return "<span style='background:#fff3cd;padding:2px 7px;border-radius:10px;font-size:.8em'>PAPER</span>"
+            return "<span class='pill pa'>PAPER</span>"
         if s in ("PENDING", "COMPLETE"):
-            return "<span style='background:#cce5ff;padding:2px 7px;border-radius:10px;font-size:.8em'>OPEN</span>"
-        return f"<span style='background:#f0f0f0;padding:2px 7px;border-radius:10px;font-size:.8em'>{s}</span>"
+            return "<span class='pill pb'>OPEN</span>"
+        return f"<span class='pill pm'>{s}</span>"
 
     rows_html = ""
     for order, pos, gtt, ct in rows:
@@ -1655,27 +1683,25 @@ async def orders_page(
         rows_html += (
             f"<tr>"
             f"<td>{t}</td>"
-            f"<td style='font-weight:500'>{order.tradingsymbol}</td>"
+            f"<td style='font-weight:600'>{order.tradingsymbol}</td>"
             f"<td>{order.transaction_type}</td>"
-            f"<td style='text-align:right'>{lots}</td>"
-            f"<td style='text-align:right'>{entry_px}</td>"
-            f"<td style='text-align:right;color:#dc3545'>{sl}</td>"
-            f"<td style='text-align:right;color:#28a745'>{tgt}</td>"
-            f"<td style='text-align:right;{pnl_cls(pnl_val)}'>{pnl_str}</td>"
+            f"<td class='tr'>{lots}</td>"
+            f"<td class='tr'>{entry_px}</td>"
+            f"<td class='tr bd'>{sl}</td>"
+            f"<td class='tr ok'>{tgt}</td>"
+            f"<td class='tr {pnl_cls(pnl_val)}'>{pnl_str}</td>"
             f"<td>{status_badge(order, ct)}</td>"
             f"</tr>"
         )
 
     return Response(
-        content=(
-            _PAGE_HEAD + _NAV
-            + "<h2>Orders</h2>"
-            "<table>"
-            "<tr><th>Time</th><th>Symbol</th><th>Side</th><th>Lots</th>"
-            "<th>Entry</th><th>SL</th><th>Target</th><th>P&amp;L</th><th>Status</th></tr>"
-            f"{rows_html}"
-            "</table>"
-            "</body></html>"
+        content=_shell("orders",
+            "<div class='card'><div class='ct'>Orders</div>"
+            "<table><thead><tr><th>Time</th><th>Symbol</th><th>Side</th><th class='tr'>Lots</th>"
+            "<th class='tr'>Entry</th><th class='tr'>SL</th><th class='tr'>Target</th>"
+            "<th class='tr'>P&amp;L</th><th>Status</th></tr></thead>"
+            "<tbody>" + rows_html + "</tbody></table></div>",
+            wide=True,
         ),
         media_type="text/html",
     )
