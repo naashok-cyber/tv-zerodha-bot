@@ -1277,6 +1277,78 @@ async def healthz(settings: Settings = Depends(get_current_settings)) -> dict:
     return {"status": "ok", "token_age_hours": token_age_hours, "dry_run": settings.DRY_RUN}
 
 
+# — PWA assets (no auth required) ——————————————————————————————————————————
+
+def _make_icon_png(size: int) -> bytes:
+    """Generate a solid dark-blue PNG icon using only stdlib (no Pillow)."""
+    import struct, zlib as _zlib
+    r, g, b = 0x2D, 0x35, 0x61
+    row = bytes([0] + [r, g, b] * size)
+    raw = row * size
+    compressed = _zlib.compress(raw, 9)
+    def _chunk(tag: bytes, data: bytes) -> bytes:
+        body = tag + data
+        return struct.pack(">I", len(data)) + body + struct.pack(">I", _zlib.crc32(body) & 0xFFFFFFFF)
+    ihdr = struct.pack(">IIBBBBB", size, size, 8, 2, 0, 0, 0)
+    return b"\x89PNG\r\n\x1a\n" + _chunk(b"IHDR", ihdr) + _chunk(b"IDAT", compressed) + _chunk(b"IEND", b"")
+
+
+@app.get("/manifest.json")
+async def pwa_manifest() -> Response:
+    import json as _json
+    manifest = {
+        "name": "ZeroBot",
+        "short_name": "ZeroBot",
+        "description": "Zerodha Algo Trading Bot",
+        "start_url": "/control",
+        "display": "standalone",
+        "background_color": "#1a1f3c",
+        "theme_color": "#2d3561",
+        "icons": [
+            {"src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable"},
+            {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable"},
+        ],
+    }
+    return Response(content=_json.dumps(manifest), media_type="application/manifest+json")
+
+
+@app.get("/icon-192.png")
+async def icon_192() -> Response:
+    return Response(content=_make_icon_png(192), media_type="image/png",
+                    headers={"Cache-Control": "public, max-age=86400"})
+
+
+@app.get("/icon-512.png")
+async def icon_512() -> Response:
+    return Response(content=_make_icon_png(512), media_type="image/png",
+                    headers={"Cache-Control": "public, max-age=86400"})
+
+
+_SW_JS = (
+    "const CACHE='zerobot-v1';"
+    "const SHELL=['/control','/orders','/gtts','/history','/dashboard'];"
+    "self.addEventListener('install',e=>{"
+    "e.waitUntil(caches.open(CACHE).then(c=>c.addAll(SHELL).catch(()=>{})));"
+    "self.skipWaiting()});"
+    "self.addEventListener('activate',e=>{"
+    "e.waitUntil(caches.keys().then(keys=>Promise.all("
+    "keys.filter(k=>k!==CACHE).map(k=>caches.delete(k)))));"
+    "self.clients.claim()});"
+    "self.addEventListener('fetch',e=>{"
+    "if(e.request.method!=='GET')return;"
+    "e.respondWith(fetch(e.request).catch(()=>caches.match(e.request)))});"
+)
+
+
+@app.get("/sw.js")
+async def service_worker() -> Response:
+    return Response(
+        content=_SW_JS,
+        media_type="application/javascript",
+        headers={"Cache-Control": "no-cache, no-store"},
+    )
+
+
 _CSS = (
     "*{box-sizing:border-box;margin:0;padding:0}"
     "body{font-family:'Inter',sans-serif;background:#f0f2f8;color:#2d3436;min-height:100vh}"
@@ -1376,8 +1448,15 @@ def _shell(active: str, content: str, wide: bool = False, refresh: bool = False)
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
         "<title>ZeroBot</title>"
         + refresh_meta +
+        "<link rel='manifest' href='/manifest.json'>"
+        "<meta name='theme-color' content='#2d3561'>"
+        "<meta name='apple-mobile-web-app-capable' content='yes'>"
+        "<meta name='apple-mobile-web-app-status-bar-style' content='black-translucent'>"
+        "<meta name='apple-mobile-web-app-title' content='ZeroBot'>"
+        "<link rel='apple-touch-icon' href='/icon-192.png'>"
         "<link href='https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;display=swap' rel='stylesheet'>"
         "<style>" + _CSS + "</style>"
+        "<script>if('serviceWorker' in navigator)navigator.serviceWorker.register('/sw.js')</script>"
         "</head><body>"
         "<div class='hdr'>"
         "<div class='hdr-icon'>&#x1F4C8;</div>"
