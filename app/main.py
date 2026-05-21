@@ -18,7 +18,7 @@ from math import floor
 from typing import Any
 
 from cachetools import TTLCache
-from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, Response
+from fastapi import BackgroundTasks, Depends, FastAPI, Form, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
@@ -40,6 +40,12 @@ from app.schemas import AlertPayload
 from app.watcher import EntryFilledEvent, GttFilledEvent, OrderWatcher
 
 log = logging.getLogger(__name__)
+
+
+def _dry_run(settings: Settings) -> bool:
+    """Effective dry-run flag: state override (paper-mode toggle) beats .env."""
+    return state.is_paper_mode(settings.DRY_RUN)
+
 
 # ── Module-level singletons ────────────────────────────────────────────────────
 _SessionFactory: Any = None
@@ -103,9 +109,12 @@ def _consecutive_losses(session: Any) -> int:
 
 
 def _check_risk_guards(session: Any, settings: Settings) -> tuple[bool, str]:
+    if state.is_emergency_stop():
+        return False, "EMERGENCY STOP is active"
     loss = _realised_loss_today(session)
-    if loss >= settings.MAX_DAILY_LOSS_ABS:
-        return False, f"daily loss ₹{loss:.2f} >= limit ₹{settings.MAX_DAILY_LOSS_ABS:.2f}"
+    effective_loss_cap = state.get_max_daily_loss(settings.MAX_DAILY_LOSS_ABS)
+    if loss >= effective_loss_cap:
+        return False, f"daily loss ₹{loss:.2f} >= limit ₹{effective_loss_cap:.2f}"
     trades = _trades_today_count(session)
     if trades >= settings.MAX_TRADES_PER_DAY:
         return False, f"trades today {trades} >= MAX_TRADES_PER_DAY {settings.MAX_TRADES_PER_DAY}"
@@ -160,9 +169,10 @@ def _on_entry_filled(event: EntryFilledEvent) -> None:
             return
 
         fill_price = event.fill_price
+        rr = state.get_rr_ratio(settings.RR_RATIO)
         if instrument_type == "EQ":
             sl_distance = fill_price * settings.EQUITY_SL_PCT
-            target_distance = settings.RR_RATIO * sl_distance
+            target_distance = rr * sl_distance
             sl_price = fill_price - sl_distance
             target_price = fill_price + target_distance
         elif instrument_type == "FUT":
@@ -170,7 +180,7 @@ def _on_entry_filled(event: EntryFilledEvent) -> None:
             # Do NOT pull from meta — the NG branch stored the lot-scaled INR value
             # which, subtracted from fill_price, produces a negative trigger price.
             sl_distance = fill_price * settings.FUTURES_SL_PCT
-            target_distance = settings.RR_RATIO * sl_distance
+            target_distance = rr * sl_distance
             if entry_side == "BUY":
                 sl_price = fill_price - sl_distance
                 target_price = fill_price + target_distance
@@ -178,15 +188,15 @@ def _on_entry_filled(event: EntryFilledEvent) -> None:
                 sl_price = fill_price + sl_distance
                 target_price = fill_price - target_distance
         else:  # CE / PE options
-            sl_risk = fill_price * settings.SL_PREMIUM_PCT
+            sl_risk = fill_price * state.get_sl_pct(settings.SL_PREMIUM_PCT)
             if entry_side == "BUY":
                 # Long: SL when premium falls, target when it rises
                 sl_price = fill_price - sl_risk
-                target_price = fill_price + settings.RR_RATIO * sl_risk
+                target_price = fill_price + rr * sl_risk
             else:
                 # Short (written option): SL when premium rises, target when it falls
                 sl_price = fill_price + sl_risk
-                target_price = fill_price - settings.RR_RATIO * sl_risk
+                target_price = fill_price - rr * sl_risk
 
         position = Position(
             order_id=order.id,
@@ -206,7 +216,7 @@ def _on_entry_filled(event: EntryFilledEvent) -> None:
 
         kite_gtt_id = None
         gtt_error: str | None = None
-        if not settings.DRY_RUN:
+        if not _dry_run(settings):
             from decimal import Decimal
             kite_client = get_session_manager().get_kite()
             try:
@@ -253,10 +263,10 @@ def _on_entry_filled(event: EntryFilledEvent) -> None:
             sl_order_price=sl_price,
             target_order_price=target_price,
             last_price_at_placement=fill_price,
-            status="ACTIVE" if (not settings.DRY_RUN and gtt_error is None) else ("GTT_FAILED" if gtt_error else "DRY_RUN"),
+            status="ACTIVE" if (not _dry_run(settings) and gtt_error is None) else ("GTT_FAILED" if gtt_error else "DRY_RUN"),
             placed_at=now,
             updated_at=now,
-            dry_run=settings.DRY_RUN,
+            dry_run=_dry_run(settings),
         )
         session.add(gtt)
         session.flush()  # get gtt.id
@@ -474,7 +484,13 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
         now = alert_data.timestamp
         product = settings.PRODUCT_TYPE.value
 
-        if not settings.DRY_RUN:
+        if state.is_emergency_stop():
+            log.warning("Alert %d: EMERGENCY STOP active — all trading halted", alert_id)
+            alert.processed = True
+            session.commit()
+            return
+
+        if not _dry_run(settings):
             token_info = get_session_manager().get_token_info()
             if not token_info["is_valid"] or state.SESSION_INVALID:
                 reason = token_info.get("reason") or "session marked invalid by scheduler"
@@ -487,7 +503,7 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
                 session.commit()
                 return
 
-        if not settings.DRY_RUN:
+        if not _dry_run(settings):
             try:
                 risk.check_risk_gates(session, now)
             except risk.RiskHaltError as exc:
@@ -535,7 +551,7 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
             mcx_lot_units = Decimal(str(settings.MCX_LOT_UNITS.get(underlying.name, 1)))
             sl_distance_d = entry_px_d * sl_frac * mcx_lot_units
             sl_distance = float(sl_distance_d)
-            target_distance = settings.RR_RATIO * sl_distance
+            target_distance = state.get_rr_ratio(settings.RR_RATIO) * sl_distance
 
             daily_remaining = risk.daily_loss_remaining(session, now)
             capital_risk = min(
@@ -550,11 +566,11 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
                 session.commit()
                 return
 
-            qty = min(qty, settings.MAX_LOTS_PER_TRADE * fut_instr.lot_size)
+            qty = min(qty, state.get_max_lots(settings.MAX_LOTS_PER_TRADE) * fut_instr.lot_size)
 
             ng_side = "BUY" if alert_data.action == "BUY" else "SELL"
             kite_order_id = None
-            if not settings.DRY_RUN:
+            if not _dry_run(settings):
                 kite_client = get_session_manager().get_kite()
                 kite_order_id = place_entry(kite_client, fut_instr, ng_side, qty, "MARKET", product)
                 if kite_order_id:
@@ -580,10 +596,10 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
                 order_type="MARKET",
                 product=product,
                 quantity=qty,
-                status="PENDING" if not settings.DRY_RUN else "DRY_RUN",
+                status="PENDING" if not _dry_run(settings) else "DRY_RUN",
                 placed_at=now,
                 updated_at=now,
-                dry_run=settings.DRY_RUN,
+                dry_run=_dry_run(settings),
             )
             session.add(order)
             session.flush()
@@ -592,7 +608,7 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
             session.commit()
             # Register AFTER commit so _on_entry_filled can find the Order row.
             # MARKET orders fill in milliseconds; committing first closes the race.
-            if kite_order_id and not settings.DRY_RUN:
+            if kite_order_id and not _dry_run(settings):
                 if _watcher is not None:
                     _watcher.watch_order(kite_order_id, kite_fetcher=get_session_manager().get_kite)
                 else:
@@ -633,7 +649,7 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
                 session.commit()
                 return
 
-            if not settings.DRY_RUN:
+            if not _dry_run(settings):
                 kite_client = get_session_manager().get_kite()
                 q_key = f"NSE:{underlying.name}"
                 q = kite_client.quote(q_key)
@@ -644,7 +660,7 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
             risk_amount = Decimal(str(settings.CAPITAL_PER_TRADE)) * settings.RISK_PCT
             sl_per_share = Decimal(str(ltp)) * Decimal(str(settings.EQUITY_SL_PCT))
             qty = floor(float(risk_amount / sl_per_share)) if sl_per_share > 0 else 0
-            qty = min(qty, settings.MAX_LOTS_PER_TRADE)
+            qty = min(qty, state.get_max_lots(settings.MAX_LOTS_PER_TRADE))
             if qty < 1:
                 log.warning(
                     "Alert %d: EQUITY sizing — 0 shares at ltp=%.2f risk_amount=%.0f",
@@ -655,7 +671,7 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
                 return
 
             kite_order_id = None
-            if not settings.DRY_RUN:
+            if not _dry_run(settings):
                 kite_order_id = place_entry(kite_client, eq_instrument, "BUY", qty, "MARKET", "CNC")
                 if kite_order_id:
                     _pending_order_meta[kite_order_id] = {
@@ -679,10 +695,10 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
                 order_type="MARKET",
                 product="CNC",
                 quantity=qty,
-                status="PENDING" if not settings.DRY_RUN else "DRY_RUN",
+                status="PENDING" if not _dry_run(settings) else "DRY_RUN",
                 placed_at=now,
                 updated_at=now,
-                dry_run=settings.DRY_RUN,
+                dry_run=_dry_run(settings),
             )
             session.add(order)
             session.flush()
@@ -690,7 +706,7 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
             alert.processed = True
             session.commit()
             # Register AFTER commit so _on_entry_filled can find the Order row.
-            if kite_order_id and not settings.DRY_RUN:
+            if kite_order_id and not _dry_run(settings):
                 if _watcher is not None:
                     _watcher.watch_order(kite_order_id, kite_fetcher=get_session_manager().get_kite)
                 else:
@@ -731,7 +747,7 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
             entry_order = session.query(Order).filter(Order.id == position.order_id).first()
             exit_product = entry_order.product if entry_order else product
 
-            if not settings.DRY_RUN:
+            if not _dry_run(settings):
                 kite_client = get_session_manager().get_kite()
                 if gtt and gtt.kite_gtt_id:
                     cancel_gtt(kite_client, gtt.kite_gtt_id)
@@ -785,7 +801,7 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
             )
 
             entry_premium = float(position.entry_premium)
-            sl_risk = entry_premium * settings.SL_PREMIUM_PCT
+            sl_risk = entry_premium * state.get_sl_pct(settings.SL_PREMIUM_PCT)
             current_premium = float(alert_data.premium) if alert_data.premium else entry_premium
 
             new_sl: float | None = None
@@ -806,7 +822,7 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
 
             if new_sl is not None and gtt is not None:
                 target_price = float(gtt.target_order_price)
-                if not settings.DRY_RUN and instrument is not None:
+                if not _dry_run(settings) and instrument is not None:
                     kite_client = get_session_manager().get_kite()
                     modify_gtt(
                         kite_client,
@@ -846,7 +862,7 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
         target_delta = settings.TARGET_DELTA if trade_mode == "BUY_OPTIONS" else settings.SELL_OPTIONS_TARGET_DELTA
         delta_fallbacks = settings.DELTA_FALLBACK_STEPS if trade_mode == "BUY_OPTIONS" else settings.SELL_OPTIONS_DELTA_FALLBACK_STEPS
 
-        if settings.DRY_RUN:
+        if _dry_run(settings):
             log.info(
                 "[%s] Alert %d: DRY_RUN — would %s %s option for %s (segment=%s)",
                 trade_mode, alert_id, entry_side, flag, underlying.name, underlying.segment,
@@ -941,7 +957,7 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
             Decimal(str(settings.CAPITAL_PER_TRADE)) * settings.RISK_PCT,
             daily_remaining_opt,
         )
-        sl_per_unit = Decimal(str(option_ltp * mcx_units)) * Decimal(str(settings.SL_PREMIUM_PCT))
+        sl_per_unit = Decimal(str(option_ltp * mcx_units)) * Decimal(str(state.get_sl_pct(settings.SL_PREMIUM_PCT)))
         qty = risk.compute_futures_qty(capital_risk_opt, sl_per_unit, Decimal(str(lot_size)))
 
         if qty < lot_size:
@@ -976,7 +992,7 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
                     continue
                 fallback_sl_per_unit = (
                     Decimal(str(float(candidate.option_ltp) * mcx_units))
-                    * Decimal(str(settings.SL_PREMIUM_PCT))
+                    * Decimal(str(state.get_sl_pct(settings.SL_PREMIUM_PCT)))
                 )
                 fallback_qty = risk.compute_futures_qty(
                     capital_risk_opt,
@@ -1005,11 +1021,11 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
             lot_size = selection.instrument.lot_size
             option_ltp = float(selection.option_ltp)
             sl_per_unit = (
-                Decimal(str(option_ltp * mcx_units)) * Decimal(str(settings.SL_PREMIUM_PCT))
+                Decimal(str(option_ltp * mcx_units)) * Decimal(str(state.get_sl_pct(settings.SL_PREMIUM_PCT)))
             )
             qty = risk.compute_futures_qty(capital_risk_opt, sl_per_unit, Decimal(str(lot_size)))
 
-        qty = min(qty, settings.MAX_LOTS_PER_TRADE * lot_size)
+        qty = min(qty, state.get_max_lots(settings.MAX_LOTS_PER_TRADE) * lot_size)
 
         lots_count = qty // lot_size
         total_premium = option_ltp * mcx_units * qty
@@ -1186,6 +1202,29 @@ async def healthz(settings: Settings = Depends(get_current_settings)) -> dict:
     return {"status": "ok", "token_age_hours": token_age_hours, "dry_run": settings.DRY_RUN}
 
 
+_NAV = (
+    "<nav style='display:flex;gap:8px;flex-wrap:wrap;margin-bottom:18px'>"
+    "<a href='/control' style='padding:6px 12px;background:#333;color:#fff;border-radius:6px;text-decoration:none;font-size:.9em'>Control</a>"
+    "<a href='/orders' style='padding:6px 12px;background:#fff;border:1px solid #ccc;border-radius:6px;text-decoration:none;color:#333;font-size:.9em'>Orders</a>"
+    "<a href='/gtts' style='padding:6px 12px;background:#fff;border:1px solid #ccc;border-radius:6px;text-decoration:none;color:#333;font-size:.9em'>GTTs</a>"
+    "<a href='/history' style='padding:6px 12px;background:#fff;border:1px solid #ccc;border-radius:6px;text-decoration:none;color:#333;font-size:.9em'>History</a>"
+    "<a href='/dashboard' style='padding:6px 12px;background:#fff;border:1px solid #ccc;border-radius:6px;text-decoration:none;color:#333;font-size:.9em'>Alerts</a>"
+    "</nav>"
+)
+_PAGE_HEAD = (
+    "<html><head>"
+    "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+    "<style>"
+    "body{font-family:sans-serif;padding:16px;max-width:900px;margin:auto;background:#f5f5f5}"
+    "h2{margin:0 0 4px}h3{margin:14px 0 6px;color:#555;font-size:.95em;text-transform:uppercase;letter-spacing:.04em}"
+    "table{width:100%;border-collapse:collapse;background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,.08)}"
+    "th{background:#f0f0f0;padding:8px 10px;text-align:left;font-size:.85em}"
+    "td{padding:7px 10px;border-top:1px solid #f0f0f0;font-size:.85em}"
+    "tr:hover td{background:#fafafa}"
+    "</style></head><body>"
+)
+
+
 @app.get("/dashboard")
 async def dashboard(
     session: Session = Depends(get_db_session),
@@ -1199,8 +1238,9 @@ async def dashboard(
     )
     return Response(
         content=(
-            "<html><body><h2>Recent Alerts</h2>"
-            "<table border='1'><tr><th>ID</th><th>Ticker</th><th>Action</th>"
+            _PAGE_HEAD + _NAV
+            + "<h2>Recent Alerts</h2>"
+            "<table><tr><th>ID</th><th>Ticker</th><th>Action</th>"
             f"<th>Time</th><th>Processed</th></tr>{rows_html}</table></body></html>"
         ),
         media_type="text/html",
@@ -1220,8 +1260,9 @@ async def positions(
     )
     return Response(
         content=(
-            "<html><body><h2>Open Positions</h2>"
-            "<table border='1'><tr><th>ID</th><th>Symbol</th>"
+            _PAGE_HEAD + _NAV
+            + "<h2>Open Positions</h2>"
+            "<table><tr><th>ID</th><th>Symbol</th>"
             f"<th>Qty</th><th>Entry Premium</th></tr>{rows_html}</table></body></html>"
         ),
         media_type="text/html",
@@ -1241,8 +1282,9 @@ async def history(
     )
     return Response(
         content=(
-            "<html><body><h2>Trade History</h2>"
-            "<table border='1'><tr><th>ID</th><th>Symbol</th><th>PnL</th>"
+            _PAGE_HEAD + _NAV
+            + "<h2>Trade History</h2>"
+            "<table><tr><th>ID</th><th>Symbol</th><th>PnL</th>"
             f"<th>Reason</th><th>Closed</th></tr>{rows_html}</table></body></html>"
         ),
         media_type="text/html",
@@ -1259,7 +1301,7 @@ async def gtts_page(
     rows = session.query(Gtt).order_by(Gtt.placed_at.desc()).limit(50).all()
 
     live_map: dict[int, str] = {}
-    if not settings.DRY_RUN:
+    if not _dry_run(settings):
         try:
             kite_client = get_session_manager().get_kite()
             for g in kite_client.get_gtts():
@@ -1283,15 +1325,16 @@ async def gtts_page(
     )
     return Response(
         content=(
-            "<html><body><h2>GTT / Stop-Loss Orders</h2>"
-            "<table border='1'>"
+            _PAGE_HEAD + _NAV
+            + "<h2>GTT / Stop-Loss Orders</h2>"
+            "<table>"
             "<tr><th>ID</th><th>Symbol</th><th>SL Trigger</th><th>Target Trigger</th>"
             "<th>Entry Price</th><th>DB Status</th><th>Kite GTT ID</th>"
             f"<th>Kite Live Status</th><th>Placed At</th></tr>{rows_html}"
             "</table>"
-            "<p><small>Kite Live Status: <b>active</b>=SL live on Kite | "
-            "<b>triggered</b>=fired, position closed | "
-            "<b>N/A</b>=not found on Kite (already triggered+cleaned up, or GTT_FAILED)</small></p>"
+            "<p style='font-size:.8em;color:#888'>Kite Live: <b>active</b>=SL live | "
+            "<b>triggered</b>=fired | "
+            "<b>N/A</b>=not found (triggered+cleaned up, or GTT_FAILED)</p>"
             "</body></html>"
         ),
         media_type="text/html",
@@ -1304,49 +1347,8 @@ async def status_page(
     _: None = Depends(_auth_guard),
     settings: Settings = Depends(get_current_settings),
 ) -> Response:
-    from app.storage import AppError
-    errors = session.query(AppError).order_by(AppError.occurred_at.desc()).limit(10).all()
-    errors_html = "".join(
-        f"<tr><td>{e.id}</td><td>{e.error_type}</td><td>{e.message}</td></tr>"
-        for e in errors
-    )
-    trade_mode = state.get_trade_mode()
-    if trade_mode == "BUY_OPTIONS":
-        mode_color = "#155724"
-        mode_bg = "#d4edda"
-        btn_color = "#dc3545"
-        btn_label = "Switch to SELL_OPTIONS (write options)"
-    else:
-        mode_color = "#721c24"
-        mode_bg = "#f8d7da"
-        btn_color = "#28a745"
-        btn_label = "Switch to BUY_OPTIONS (buy options)"
-    return Response(
-        content=(
-            f"<html><head>"
-            f"<meta name='viewport' content='width=device-width,initial-scale=1'>"
-            f"<style>"
-            f"body{{font-family:sans-serif;padding:16px;max-width:600px;margin:auto}}"
-            f".badge{{font-size:1.3em;font-weight:bold;padding:8px 14px;border-radius:8px;"
-            f"display:inline-block;color:{mode_color};background:{mode_bg}}}"
-            f".toggle{{display:block;width:100%;padding:18px;font-size:1.1em;border:none;"
-            f"border-radius:10px;cursor:pointer;background:{btn_color};color:white;margin:14px 0}}"
-            f"table{{width:100%;border-collapse:collapse}}th,td{{padding:6px;border:1px solid #ddd;text-align:left}}"
-            f"</style></head>"
-            f"<body>"
-            f"<h2>Bot Status</h2>"
-            f"<p>DRY_RUN: {settings.DRY_RUN} | TRADING_ENABLED: {settings.TRADING_ENABLED}</p>"
-            f"<h3>Trade Mode</h3>"
-            f"<div class='badge'>{trade_mode}</div>"
-            f"<form method='post' action='/trade-mode/toggle'>"
-            f"<button class='toggle' type='submit'>{btn_label}</button>"
-            f"</form>"
-            f"<h3>Recent Errors</h3>"
-            f"<table><tr><th>ID</th><th>Type</th><th>Message</th></tr>{errors_html}</table>"
-            f"</body></html>"
-        ),
-        media_type="text/html",
-    )
+    """Legacy status page — redirects to /control."""
+    return Response(status_code=302, headers={"Location": "/control"})
 
 
 @app.post("/trade-mode/toggle")
@@ -1355,7 +1357,328 @@ async def toggle_trade_mode(
 ) -> Response:
     new_mode = state.toggle_trade_mode()
     log.info("Trade mode toggled to %s", new_mode)
-    return Response(status_code=302, headers={"Location": "/status"})
+    return Response(status_code=302, headers={"Location": "/control"})
+
+
+# ── /control — unified dashboard ──────────────────────────────────────────────
+
+_CTRL_CSS = (
+    "<style>"
+    "body{font-family:sans-serif;padding:16px;max-width:520px;margin:auto;background:#f5f5f5}"
+    "h2{margin:0 0 4px}.card{background:#fff;border-radius:10px;padding:16px;margin-bottom:14px;"
+    "box-shadow:0 1px 3px rgba(0,0,0,.1)}.card h3{margin:0 0 10px;font-size:.85em;color:#777;"
+    "text-transform:uppercase;letter-spacing:.05em}"
+    ".btn{display:block;width:100%;padding:14px;font-size:1em;border:none;border-radius:8px;"
+    "cursor:pointer;margin:6px 0;color:#fff;font-weight:bold}"
+    ".btn-green{background:#28a745}.btn-red{background:#dc3545}.btn-orange{background:#e67e22}"
+    ".btn-gray{background:#6c757d}.btn-blue{background:#007bff}"
+    ".badge{display:inline-block;padding:5px 14px;border-radius:20px;font-weight:bold;font-size:.95em}"
+    ".bg{background:#d4edda;color:#155724}.br{background:#f8d7da;color:#721c24}"
+    ".bo{background:#fff3cd;color:#856404}"
+    ".switch-row{display:flex;align-items:center;justify-content:space-between;margin:8px 0}"
+    ".switch-row label{font-size:.9em;color:#444}"
+    ".sw{position:relative;display:inline-block;width:52px;height:28px}"
+    ".sw input{opacity:0;width:0;height:0}"
+    ".slider{position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background:#ccc;"
+    "border-radius:28px;transition:.3s}"
+    ".slider:before{position:absolute;content:'';height:22px;width:22px;left:3px;bottom:3px;"
+    "background:white;border-radius:50%;transition:.3s}"
+    "input:checked+.slider{background:#28a745}"
+    "input:checked+.slider:before{transform:translateX(24px)}"
+    ".risk-row{display:flex;align-items:center;gap:8px;margin:8px 0}"
+    ".risk-row label{flex:1;font-size:.88em;color:#555}"
+    ".risk-row input[type=number]{width:90px;padding:6px 8px;border:1px solid #ccc;"
+    "border-radius:6px;font-size:.92em;text-align:right}"
+    ".risk-row .unit{color:#999;font-size:.82em;min-width:28px}"
+    ".apply-btn{padding:8px 16px;font-size:.9em;border:none;border-radius:6px;cursor:pointer;"
+    "background:#007bff;color:#fff;margin-top:6px}"
+    ".reset-btn{padding:8px 16px;font-size:.9em;border:none;border-radius:6px;cursor:pointer;"
+    "background:#6c757d;color:#fff;margin-top:6px;margin-left:6px}"
+    ".sum-row{display:flex;justify-content:space-between;padding:5px 0;"
+    "border-bottom:1px solid #f0f0f0;font-size:.88em}"
+    ".sum-row:last-child{border-bottom:none}"
+    ".ok{color:#28a745;font-weight:bold}.warn{color:#e67e22;font-weight:bold}"
+    ".bad{color:#dc3545;font-weight:bold}"
+    ".stop-banner{background:#f8d7da;color:#721c24;padding:10px 14px;border-radius:8px;"
+    "font-weight:bold;margin-bottom:12px;text-align:center;font-size:1.05em}"
+    "nav{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:18px}"
+    "nav a{padding:6px 12px;background:#fff;border:1px solid #ccc;border-radius:6px;"
+    "text-decoration:none;color:#333;font-size:.88em}"
+    "nav a.active{background:#333;color:#fff;border-color:#333}"
+    "</style>"
+)
+
+_CTRL_NAV = (
+    "<nav>"
+    "<a href='/control' class='active'>Control</a>"
+    "<a href='/orders'>Orders</a>"
+    "<a href='/gtts'>GTTs</a>"
+    "<a href='/history'>History</a>"
+    "<a href='/dashboard'>Alerts</a>"
+    "</nav>"
+)
+
+
+@app.get("/control")
+async def control_page(
+    session: Session = Depends(get_db_session),
+    _: None = Depends(_auth_guard),
+    settings: Settings = Depends(get_current_settings),
+) -> Response:
+    from app.storage import AppError
+
+    # ── live state ────────────────────────────────────────────────────────────
+    trade_mode = state.get_trade_mode()
+    paper = _dry_run(settings)
+    estop = state.is_emergency_stop()
+    overrides = state.get_all_overrides()
+
+    eff_max_lots = state.get_max_lots(settings.MAX_LOTS_PER_TRADE)
+    eff_max_loss = state.get_max_daily_loss(settings.MAX_DAILY_LOSS_ABS)
+    eff_sl_pct   = state.get_sl_pct(settings.SL_PREMIUM_PCT)
+    eff_rr       = state.get_rr_ratio(settings.RR_RATIO)
+
+    # ── today's risk summary ──────────────────────────────────────────────────
+    today_loss = _realised_loss_today(session)
+    trades_today = _trades_today_count(session)
+    consec = _consecutive_losses(session)
+    open_pos = _open_position_count(session)
+    loss_pct = (today_loss / eff_max_loss * 100) if eff_max_loss > 0 else 0
+
+    def risk_cls(used, cap):
+        r = used / cap if cap else 0
+        return "bad" if r >= 1 else "warn" if r >= 0.6 else "ok"
+
+    def consec_cls(c):
+        return "bad" if c >= settings.CONSECUTIVE_LOSSES_LIMIT else "warn" if c >= 2 else "ok"
+
+    errors = session.query(AppError).order_by(AppError.occurred_at.desc()).limit(5).all()
+    errors_html = "".join(
+        f"<tr><td style='font-size:.8em;color:#888'>{e.occurred_at.strftime('%H:%M')}</td>"
+        f"<td style='font-size:.8em'>{e.error_type}</td>"
+        f"<td style='font-size:.8em;max-width:200px;overflow:hidden;white-space:nowrap;"
+        f"text-overflow:ellipsis'>{e.message[:80]}</td></tr>"
+        for e in errors
+    ) or "<tr><td colspan='3' style='color:#888;font-size:.85em'>No errors</td></tr>"
+
+    # ── trade-mode badge ──────────────────────────────────────────────────────
+    if trade_mode == "BUY_OPTIONS":
+        mode_badge = "<span class='badge bg'>BUY OPTIONS</span>"
+        mode_btn   = "<button class='btn btn-red' type='submit'>Switch to SELL OPTIONS</button>"
+    else:
+        mode_badge = "<span class='badge br'>SELL OPTIONS</span>"
+        mode_btn   = "<button class='btn btn-green' type='submit'>Switch to BUY OPTIONS</button>"
+
+    # ── paper/live badge ──────────────────────────────────────────────────────
+    paper_label  = "PAPER MODE" if paper else "LIVE TRADING"
+    paper_badge  = f"<span class='badge {'bo' if paper else 'bg'}'>{paper_label}</span>"
+    paper_btn_lbl = "Switch to LIVE TRADING" if paper else "Switch to PAPER MODE"
+    paper_btn_cls = "btn-green" if paper else "btn-orange"
+
+    # ── emergency stop ────────────────────────────────────────────────────────
+    stop_banner = (
+        "<div class='stop-banner'>⛔ EMERGENCY STOP ACTIVE — No new trades will execute</div>"
+        if estop else ""
+    )
+    estop_btn_lbl = "Resume Trading" if estop else "Emergency Stop"
+    estop_btn_cls = "btn-green" if estop else "btn-red"
+
+    # ── override indicators ───────────────────────────────────────────────────
+    def src(key):
+        return " <small style='color:#e67e22'>(overridden)</small>" if overrides.get(key) is not None else ""
+
+    html = (
+        f"<html><head><meta name='viewport' content='width=device-width,initial-scale=1'>"
+        f"<title>Bot Control</title>{_CTRL_CSS}</head><body>"
+        f"{_CTRL_NAV}"
+        f"{stop_banner}"
+        f"<h2>Bot Control</h2>"
+
+        # ── Risk summary card ─────────────────────────────────────────────────
+        f"<div class='card'>"
+        f"<h3>Today's Risk Summary</h3>"
+        f"<div class='sum-row'><span>Daily loss</span>"
+        f"<span class='{risk_cls(today_loss, eff_max_loss)}'>₹{today_loss:.0f} / ₹{eff_max_loss:.0f}"
+        f" ({loss_pct:.0f}%)</span></div>"
+        f"<div class='sum-row'><span>Trades today</span>"
+        f"<span class='{risk_cls(trades_today, settings.MAX_TRADES_PER_DAY)}'>"
+        f"{trades_today} / {settings.MAX_TRADES_PER_DAY}</span></div>"
+        f"<div class='sum-row'><span>Open positions</span>"
+        f"<span class='{risk_cls(open_pos, settings.MAX_OPEN_POSITIONS)}'>"
+        f"{open_pos} / {settings.MAX_OPEN_POSITIONS}</span></div>"
+        f"<div class='sum-row'><span>Consecutive losses</span>"
+        f"<span class='{consec_cls(consec)}'>{consec} / {settings.CONSECUTIVE_LOSSES_LIMIT}</span></div>"
+        f"</div>"
+
+        # ── Mode switches card ────────────────────────────────────────────────
+        f"<div class='card'>"
+        f"<h3>Mode</h3>"
+        f"<div class='switch-row'><label>Trade Mode: {mode_badge}</label>"
+        f"<form method='post' action='/trade-mode/toggle' style='margin:0'>"
+        f"<button class='btn btn-gray' type='submit' style='width:auto;padding:8px 14px;"
+        f"font-size:.88em'>Toggle</button></form></div>"
+        f"<div class='switch-row'><label>Live/Paper: {paper_badge}</label>"
+        f"<form method='post' action='/control/paper-mode/toggle' style='margin:0'>"
+        f"<button class='btn {paper_btn_cls}' type='submit' style='width:auto;padding:8px 14px;"
+        f"font-size:.88em'>{paper_btn_lbl}</button></form></div>"
+        f"<form method='post' action='/control/emergency-stop/toggle' style='margin-top:8px'>"
+        f"<button class='btn {estop_btn_cls}' type='submit'>{estop_btn_lbl}</button></form>"
+        f"</div>"
+
+        # ── Risk params card ──────────────────────────────────────────────────
+        f"<div class='card'>"
+        f"<h3>Risk Parameters</h3>"
+        f"<form method='post' action='/control/risk'>"
+        f"<div class='risk-row'><label>Max lots / trade{src('max_lots')}</label>"
+        f"<input type='number' name='max_lots' value='{eff_max_lots}' min='1' max='20' step='1'>"
+        f"<span class='unit'>lots</span></div>"
+        f"<div class='risk-row'><label>Max daily loss{src('max_daily_loss')}</label>"
+        f"<input type='number' name='max_daily_loss' value='{eff_max_loss:.0f}' min='500' step='500'>"
+        f"<span class='unit'>₹</span></div>"
+        f"<div class='risk-row'><label>SL % (options){src('sl_pct')}</label>"
+        f"<input type='number' name='sl_pct' value='{eff_sl_pct*100:.1f}' min='1' max='50' step='0.5'>"
+        f"<span class='unit'>%</span></div>"
+        f"<div class='risk-row'><label>R:R ratio{src('rr_ratio')}</label>"
+        f"<input type='number' name='rr_ratio' value='{eff_rr:.1f}' min='0.5' max='10' step='0.1'>"
+        f"<span class='unit'>×</span></div>"
+        f"<button class='apply-btn' type='submit'>Apply</button>"
+        f"<button class='reset-btn' type='submit' name='reset' value='1'>Reset to defaults</button>"
+        f"</form>"
+        f"</div>"
+
+        # ── Recent errors card ────────────────────────────────────────────────
+        f"<div class='card'>"
+        f"<h3>Recent Errors</h3>"
+        f"<table><tr><th>Time</th><th>Type</th><th>Message</th></tr>{errors_html}</table>"
+        f"</div>"
+
+        f"</body></html>"
+    )
+    return Response(content=html, media_type="text/html")
+
+
+@app.post("/control/paper-mode/toggle")
+async def toggle_paper_mode(
+    _: None = Depends(_auth_guard),
+    settings: Settings = Depends(get_current_settings),
+) -> Response:
+    current = _dry_run(settings)
+    state.set_paper_mode(not current)
+    log.info("Paper mode toggled to %s", not current)
+    return Response(status_code=302, headers={"Location": "/control"})
+
+
+@app.post("/control/emergency-stop/toggle")
+async def toggle_emergency_stop(_: None = Depends(_auth_guard)) -> Response:
+    new_val = not state.is_emergency_stop()
+    state.set_emergency_stop(new_val)
+    log.warning("Emergency stop set to %s", new_val)
+    return Response(status_code=302, headers={"Location": "/control"})
+
+
+@app.post("/control/risk")
+async def update_risk(
+    _: None = Depends(_auth_guard),
+    settings: Settings = Depends(get_current_settings),
+    reset: str = Form(default=""),
+    max_lots: str = Form(default=""),
+    max_daily_loss: str = Form(default=""),
+    sl_pct: str = Form(default=""),
+    rr_ratio: str = Form(default=""),
+) -> Response:
+    if reset == "1":
+        state.set_max_lots(None)
+        state.set_max_daily_loss(None)
+        state.set_sl_pct(None)
+        state.set_rr_ratio(None)
+        log.info("Risk params reset to .env defaults")
+    else:
+        try:
+            if max_lots.strip():
+                state.set_max_lots(int(max_lots))
+            if max_daily_loss.strip():
+                state.set_max_daily_loss(float(max_daily_loss))
+            if sl_pct.strip():
+                state.set_sl_pct(float(sl_pct) / 100.0)
+            if rr_ratio.strip():
+                state.set_rr_ratio(float(rr_ratio))
+            log.info("Risk params updated: max_lots=%s max_loss=%s sl_pct=%s rr=%s",
+                     max_lots, max_daily_loss, sl_pct, rr_ratio)
+        except ValueError:
+            pass
+    return Response(status_code=302, headers={"Location": "/control"})
+
+
+# ── /orders — consolidated trade view ────────────────────────────────────────
+
+@app.get("/orders")
+async def orders_page(
+    session: Session = Depends(get_db_session),
+    _: None = Depends(_auth_guard),
+) -> Response:
+    rows = (
+        session.query(Order, Position, Gtt, ClosedTrade)
+        .outerjoin(Position, Position.order_id == Order.id)
+        .outerjoin(Gtt, Gtt.order_id == Order.id)
+        .outerjoin(ClosedTrade, ClosedTrade.position_id == Position.id)
+        .order_by(Order.placed_at.desc())
+        .limit(60)
+        .all()
+    )
+
+    def pnl_cls(pnl):
+        if pnl is None:
+            return "color:#888"
+        return "color:#28a745;font-weight:bold" if pnl >= 0 else "color:#dc3545;font-weight:bold"
+
+    def status_badge(order, ct):
+        if ct is not None:
+            reason = ct.exit_reason or "CLOSED"
+            bg = "#d4edda" if (ct.pnl or 0) >= 0 else "#f8d7da"
+            return f"<span style='background:{bg};padding:2px 7px;border-radius:10px;font-size:.8em'>{reason}</span>"
+        s = order.status
+        if s == "DRY_RUN":
+            return "<span style='background:#fff3cd;padding:2px 7px;border-radius:10px;font-size:.8em'>PAPER</span>"
+        if s in ("PENDING", "COMPLETE"):
+            return "<span style='background:#cce5ff;padding:2px 7px;border-radius:10px;font-size:.8em'>OPEN</span>"
+        return f"<span style='background:#f0f0f0;padding:2px 7px;border-radius:10px;font-size:.8em'>{s}</span>"
+
+    rows_html = ""
+    for order, pos, gtt, ct in rows:
+        entry_px = f"₹{pos.entry_premium:.2f}" if pos else "—"
+        sl       = f"₹{gtt.sl_trigger:.2f}" if gtt else "—"
+        tgt      = f"₹{gtt.target_trigger:.2f}" if gtt else "—"
+        pnl_val  = ct.pnl if ct else None
+        pnl_str  = f"₹{pnl_val:+.2f}" if pnl_val is not None else "—"
+        lots     = (pos.quantity // pos.lot_size) if (pos and pos.lot_size) else (order.quantity or "—")
+        t        = order.placed_at.strftime("%m/%d %H:%M") if order.placed_at else "—"
+        rows_html += (
+            f"<tr>"
+            f"<td>{t}</td>"
+            f"<td style='font-weight:500'>{order.tradingsymbol}</td>"
+            f"<td>{order.transaction_type}</td>"
+            f"<td style='text-align:right'>{lots}</td>"
+            f"<td style='text-align:right'>{entry_px}</td>"
+            f"<td style='text-align:right;color:#dc3545'>{sl}</td>"
+            f"<td style='text-align:right;color:#28a745'>{tgt}</td>"
+            f"<td style='text-align:right;{pnl_cls(pnl_val)}'>{pnl_str}</td>"
+            f"<td>{status_badge(order, ct)}</td>"
+            f"</tr>"
+        )
+
+    return Response(
+        content=(
+            _PAGE_HEAD + _NAV
+            + "<h2>Orders</h2>"
+            "<table>"
+            "<tr><th>Time</th><th>Symbol</th><th>Side</th><th>Lots</th>"
+            "<th>Entry</th><th>SL</th><th>Target</th><th>P&amp;L</th><th>Status</th></tr>"
+            f"{rows_html}"
+            "</table>"
+            "</body></html>"
+        ),
+        media_type="text/html",
+    )
 
 
 @app.get("/health")
