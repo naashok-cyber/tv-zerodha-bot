@@ -622,99 +622,104 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
         # MCX symbols (CRUDEOILM, GOLD, etc.) sometimes arrive with instrument_type="EQUITY"
         # due to a TradingView alert template misconfiguration. Guard against misrouting them.
         if alert_data.instrument_type == "EQUITY" and underlying.segment != "MCX":
-            if alert_data.action != "BUY":
-                log.warning(
-                    "Alert %d: EQUITY only supports BUY action (got %s) — skipping",
-                    alert_id, alert_data.action,
-                )
-                alert.processed = True
-                session.commit()
-                return
-
-            eq_instrument = (
-                session.query(Instrument)
-                .filter(
-                    Instrument.tradingsymbol == underlying.name,
-                    Instrument.exchange == "NSE",
-                    Instrument.instrument_type == "EQ",
-                )
-                .first()
-            )
-            if eq_instrument is None:
-                log.error(
-                    "Alert %d: EQUITY — %s not found in NSE instruments table",
-                    alert_id, underlying.name,
-                )
-                alert.processed = True
-                session.commit()
-                return
-
-            if not _dry_run(settings):
-                kite_client = get_session_manager().get_kite()
-                q_key = f"NSE:{underlying.name}"
-                q = kite_client.quote(q_key)
-                ltp = float(q[q_key]["last_price"])
+            if alert_data.action == "SELL":
+                # SELL on equity = exit the long position; fall through to EXIT handler below
+                log.info("Alert %d: EQUITY SELL → routing to EXIT for %s", alert_id, underlying.name)
+                alert_data = alert_data.model_copy(update={"action": "EXIT", "symbol": underlying.name})
             else:
-                ltp = float(alert_data.price)
-
-            risk_amount = Decimal(str(settings.CAPITAL_PER_TRADE)) * settings.RISK_PCT
-            sl_per_share = Decimal(str(ltp)) * Decimal(str(settings.EQUITY_SL_PCT))
-            qty = floor(float(risk_amount / sl_per_share)) if sl_per_share > 0 else 0
-            qty = min(qty, state.get_max_lots(settings.MAX_LOTS_PER_TRADE))
-            if qty < 1:
-                log.warning(
-                    "Alert %d: EQUITY sizing — 0 shares at ltp=%.2f risk_amount=%.0f",
-                    alert_id, ltp, float(risk_amount),
-                )
-                alert.processed = True
-                session.commit()
-                return
-
-            kite_order_id = None
-            if not _dry_run(settings):
-                kite_order_id = place_entry(kite_client, eq_instrument, "BUY", qty, "MARKET", "CNC")
-                if kite_order_id:
-                    _pending_order_meta[kite_order_id] = {
-                        "instrument_type": "EQ",
-                        "underlying": underlying.name,
-                        "dry_run": False,
-                    }
-            else:
-                log.info(
-                    "Alert %d: DRY_RUN — would BUY %d shares %s MARKET CNC at ltp=%.2f",
-                    alert_id, qty, eq_instrument.tradingsymbol, ltp,
-                )
-
-            order = Order(
-                alert_id=alert_id,
-                kite_order_id=kite_order_id,
-                variety="regular",
-                exchange=eq_instrument.exchange,
-                tradingsymbol=eq_instrument.tradingsymbol,
-                transaction_type="BUY",
-                order_type="MARKET",
-                product="CNC",
-                quantity=qty,
-                status="PENDING" if not _dry_run(settings) else "DRY_RUN",
-                placed_at=now,
-                updated_at=now,
-                dry_run=_dry_run(settings),
-            )
-            session.add(order)
-            session.flush()
-
-            alert.processed = True
-            session.commit()
-            # Register AFTER commit so _on_entry_filled can find the Order row.
-            if kite_order_id and not _dry_run(settings):
-                if _watcher is not None:
-                    _watcher.watch_order(kite_order_id, kite_fetcher=get_session_manager().get_kite)
-                else:
-                    log.error(
-                        "Alert %d: _watcher is None — GTT will not be placed for %s",
-                        alert_id, eq_instrument.tradingsymbol,
+                if alert_data.action != "BUY":
+                    log.warning(
+                        "Alert %d: EQUITY unsupported action %s — skipping",
+                        alert_id, alert_data.action,
                     )
-            return
+                    alert.processed = True
+                    session.commit()
+                    return
+
+                eq_instrument = (
+                    session.query(Instrument)
+                    .filter(
+                        Instrument.tradingsymbol == underlying.name,
+                        Instrument.exchange == "NSE",
+                        Instrument.instrument_type == "EQ",
+                    )
+                    .first()
+                )
+                if eq_instrument is None:
+                    log.error(
+                        "Alert %d: EQUITY — %s not found in NSE instruments table",
+                        alert_id, underlying.name,
+                    )
+                    alert.processed = True
+                    session.commit()
+                    return
+
+                if not _dry_run(settings):
+                    kite_client = get_session_manager().get_kite()
+                    q_key = f"NSE:{underlying.name}"
+                    q = kite_client.quote(q_key)
+                    ltp = float(q[q_key]["last_price"])
+                else:
+                    ltp = float(alert_data.price)
+
+                risk_amount = Decimal(str(settings.CAPITAL_PER_TRADE)) * settings.RISK_PCT
+                sl_per_share = Decimal(str(ltp)) * Decimal(str(settings.EQUITY_SL_PCT))
+                qty = floor(float(risk_amount / sl_per_share)) if sl_per_share > 0 else 0
+                qty = min(qty, state.get_max_lots(settings.MAX_LOTS_PER_TRADE))
+                if qty < 1:
+                    log.warning(
+                        "Alert %d: EQUITY sizing — 0 shares at ltp=%.2f risk_amount=%.0f",
+                        alert_id, ltp, float(risk_amount),
+                    )
+                    alert.processed = True
+                    session.commit()
+                    return
+
+                kite_order_id = None
+                if not _dry_run(settings):
+                    kite_order_id = place_entry(kite_client, eq_instrument, "BUY", qty, "MARKET", "CNC")
+                    if kite_order_id:
+                        _pending_order_meta[kite_order_id] = {
+                            "instrument_type": "EQ",
+                            "underlying": underlying.name,
+                            "dry_run": False,
+                        }
+                else:
+                    log.info(
+                        "Alert %d: DRY_RUN — would BUY %d shares %s MARKET CNC at ltp=%.2f",
+                        alert_id, qty, eq_instrument.tradingsymbol, ltp,
+                    )
+
+                order = Order(
+                    alert_id=alert_id,
+                    kite_order_id=kite_order_id,
+                    variety="regular",
+                    exchange=eq_instrument.exchange,
+                    tradingsymbol=eq_instrument.tradingsymbol,
+                    transaction_type="BUY",
+                    order_type="MARKET",
+                    product="CNC",
+                    quantity=qty,
+                    status="PENDING" if not _dry_run(settings) else "DRY_RUN",
+                    placed_at=now,
+                    updated_at=now,
+                    dry_run=_dry_run(settings),
+                )
+                session.add(order)
+                session.flush()
+
+                alert.processed = True
+                session.commit()
+                # Register AFTER commit so _on_entry_filled can find the Order row.
+                if kite_order_id and not _dry_run(settings):
+                    if _watcher is not None:
+                        _watcher.watch_order(kite_order_id, kite_fetcher=get_session_manager().get_kite)
+                    else:
+                        log.error(
+                            "Alert %d: _watcher is None — GTT will not be placed for %s",
+                            alert_id, eq_instrument.tradingsymbol,
+                        )
+                return
 
         # ── EXIT ──────────────────────────────────────────────────────────────
         if alert_data.action == "EXIT":
@@ -1550,14 +1555,7 @@ async def control_page(
     today_loss = _realised_loss_today(session)
     trades_today = _trades_today_count(session)
     consec = _consecutive_losses(session)
-    # open positions: only count positions opened in the last 2 days for display
-    two_days_ago = datetime.now(IST) - timedelta(days=2)
-    open_pos = (
-        session.query(Position)
-        .outerjoin(ClosedTrade, Position.id == ClosedTrade.position_id)
-        .filter(ClosedTrade.id == None, Position.opened_at >= two_days_ago)  # noqa: E711
-        .count()
-    )
+    open_pos = _open_position_count(session)
     loss_pct = (today_loss / eff_max_loss * 100) if eff_max_loss > 0 else 0
 
     # ── meter helpers ─────────────────────────────────────────────────────────
