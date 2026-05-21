@@ -78,6 +78,13 @@ def daily_loss_remaining(db: Any, today_ist: Any) -> Decimal:
     return remaining if remaining > Decimal("0") else Decimal("0")
 
 
+def daily_realized_pnl(db: Any, today_ist: Any) -> Decimal:
+    """Return total realized PnL for today (positive = profit, negative = loss)."""
+    today_start = today_ist.replace(hour=0, minute=0, second=0, microsecond=0)
+    rows = db.query(ClosedTrade.pnl).filter(ClosedTrade.closed_at >= today_start).all()
+    return sum((Decimal(str(r[0])) for r in rows), Decimal("0"))
+
+
 def check_risk_gates(db: Any, today_ist: Any) -> None:
     """Raise RiskHaltError if any gate is breached. Caller must skip this when DRY_RUN=True."""
     remaining = daily_loss_remaining(db, today_ist)
@@ -97,6 +104,15 @@ def check_risk_gates(db: Any, today_ist: Any) -> None:
             break
     if consecutive >= 3:
         raise RiskHaltError(f"consecutive losing trades: {consecutive}")
+
+    settings = get_settings()
+    if settings.DAILY_PROFIT_TARGET > 0:
+        pnl = daily_realized_pnl(db, today_ist)
+        if pnl >= Decimal(str(settings.DAILY_PROFIT_TARGET)):
+            raise RiskHaltError(
+                f"daily profit target ₹{settings.DAILY_PROFIT_TARGET:.0f} reached "
+                f"(realized ₹{float(pnl):.0f})"
+            )
 
 
 def record_trade_result(

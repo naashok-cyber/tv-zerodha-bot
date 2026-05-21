@@ -76,6 +76,7 @@ class Settings(BaseSettings):
     TELEGRAM_CHAT_ID: str = ""
 
     # ── Risk ──────────────────────────────────────────────────────────────────
+    DAILY_PROFIT_TARGET: float = 0.0   # ₹ daily profit cap; 0 = disabled; new entries blocked once hit
     CAPITAL_PER_TRADE: float = 100_000.0      # ₹ premium budget per trade
     TOTAL_CAPITAL: float = 100_000.0          # ₹ 1 Lakh; base for % loss cap
     RISK_PER_TRADE_PCT: float = 1.0           # used in UNDERLYING_RISK_BASED mode
@@ -92,6 +93,8 @@ class Settings(BaseSettings):
     PRODUCT_TYPE: ProductType = ProductType.NRML
 
     # ── Options (v2) ──────────────────────────────────────────────────────────
+    NO_ENTRY_ON_EXPIRY_DAY: bool = True      # block SELL_OPTIONS on weekly expiry day
+    SELL_OPTIONS_PROFIT_PCT: float = 0.50    # exit short options when premium drops to this fraction of entry
     TARGET_DELTA: float = 0.65
     DELTA_FALLBACK_STEPS: list[float] = [0.50, 0.35, 0.25]  # tried in order when primary delta strike exceeds capital
     SELL_OPTIONS_TARGET_DELTA: float = 0.50          # ATM for writing options (SELL_OPTIONS mode)
@@ -163,8 +166,11 @@ class Settings(BaseSettings):
     SCHEDULER_MINUTE_IST: int = 0  # minute for daily_session_check cron job
     LOGIN_REMINDER_TIME: str = "07:30"
     INSTRUMENTS_REFRESH_TIME: str = "08:30"
-    NSE_SQUAREOFF_TIME: str = "15:15"   # kept for future MIS support; NRML has no auto-squareoff
-    MCX_SQUAREOFF_TIME: str = "23:20"
+    NSE_SQUAREOFF_TIME: str = "15:25"   # daily EOD squareoff for open NFO positions
+    MCX_SQUAREOFF_TIME: str = "23:25"
+    ENTRY_WINDOW_START: str = "09:45"         # HH:MM IST; block new entries before this
+    ENTRY_WINDOW_END: str = "14:30"           # HH:MM IST; block new entries after this
+    EXPIRY_DAY_SQUAREOFF_TIME: str = "14:00"  # HH:MM IST; close expiry-day NFO positions early
 
     # ── Symbol / Instruments ──────────────────────────────────────────────────
     INSTRUMENTS_CSV_PATH: str = "data/instruments.csv"

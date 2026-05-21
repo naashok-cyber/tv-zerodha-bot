@@ -187,6 +187,17 @@ class TrailingSlManager:
                     self._revert(pos, old_sl)
                     return
 
+                now_dt = datetime.now(_IST)
+                db_gtt = session.query(Gtt).filter(Gtt.id == pos.gtt_db_id).first()
+                if db_gtt is None or db_gtt.status != "ACTIVE":
+                    log.info(
+                        "TrailingSL: %s GTT no longer active (status=%s), unregistering",
+                        pos.tradingsymbol,
+                        db_gtt.status if db_gtt else "NOT_FOUND",
+                    )
+                    self.unregister(pos.instrument_token)
+                    return
+
                 if kite_gtt_id is not None:
                     modify_gtt(
                         kite,
@@ -202,8 +213,6 @@ class TrailingSlManager:
                         entry_side=pos.entry_side,
                     )
 
-                now_dt = datetime.now(_IST)
-                db_gtt = session.query(Gtt).filter(Gtt.id == pos.gtt_db_id).first()
                 if db_gtt:
                     db_gtt.sl_trigger = new_sl
                     db_gtt.sl_order_price = new_sl

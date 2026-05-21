@@ -12,7 +12,7 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 from decimal import Decimal
 from math import floor
 from typing import Any
@@ -45,6 +45,11 @@ log = logging.getLogger(__name__)
 def _dry_run(settings: Settings) -> bool:
     """Effective dry-run flag: state override (paper-mode toggle) beats .env."""
     return state.is_paper_mode(settings.DRY_RUN)
+
+
+def _parse_hhmm(hhmm: str) -> time:
+    h, m = hhmm.split(":")
+    return time(int(h), int(m))
 
 
 # ── Module-level singletons ────────────────────────────────────────────────────
@@ -209,7 +214,7 @@ def _on_entry_filled(event: EntryFilledEvent) -> None:
             else:
                 # Short (written option): SL when premium rises, target when it falls
                 sl_price = fill_price + sl_distance
-                target_price = max(fill_price - target_distance, 0.05)
+                target_price = max(fill_price * (1.0 - settings.SELL_OPTIONS_PROFIT_PCT), 0.05)
 
         position = Position(
             order_id=order.id,
@@ -636,6 +641,21 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
                 session.commit()
                 return
 
+        # ── Time-of-day entry filter ──────────────────────────────────────────
+        if alert_data.action in ("BUY", "SELL"):
+            _entry_start = _parse_hhmm(settings.ENTRY_WINDOW_START)
+            _entry_end = _parse_hhmm(settings.ENTRY_WINDOW_END)
+            _now_time = now.time().replace(second=0, microsecond=0)
+            if not (_entry_start <= _now_time <= _entry_end):
+                log.info(
+                    "Alert %d: blocked — outside entry window [%s–%s] at %s",
+                    alert_id, settings.ENTRY_WINDOW_START, settings.ENTRY_WINDOW_END,
+                    now.strftime("%H:%M"),
+                )
+                alert.processed = True
+                session.commit()
+                return
+
         # ── NATURALGAS / NATGASMINI: near-month future entry ─────────────────
         # NG options are illiquid; always trade the near-month FUT directly.
         # Other MCX commodities (CRUDEOIL, GOLD, SILVER, etc.) have liquid
@@ -987,6 +1007,26 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
         else:  # SELL_OPTIONS: write the opposite type
             flag = "PE" if alert_data.action == "BUY" else "CE"
             entry_side = "SELL"
+        # Block new SELL_OPTIONS entries on weekly expiry day
+        if entry_side == "SELL" and settings.NO_ENTRY_ON_EXPIRY_DAY:
+            _is_expiry = (
+                session.query(Instrument)
+                .filter(
+                    Instrument.name == underlying.name,
+                    Instrument.exchange.in_(["NSE", "NFO"]),
+                    Instrument.expiry == now.date(),
+                    Instrument.instrument_type.in_(["CE", "PE"]),
+                )
+                .first()
+            ) is not None
+            if _is_expiry:
+                log.info(
+                    "Alert %d: blocked — expiry day for %s, no new SELL_OPTIONS",
+                    alert_id, underlying.name,
+                )
+                alert.processed = True
+                session.commit()
+                return
         log.info("[%s] Alert %d: %s signal → %s %s", trade_mode, alert_id, alert_data.action, entry_side, flag)
         target_delta = settings.TARGET_DELTA if trade_mode == "BUY_OPTIONS" else settings.SELL_OPTIONS_TARGET_DELTA
         delta_fallbacks = settings.DELTA_FALLBACK_STEPS if trade_mode == "BUY_OPTIONS" else settings.SELL_OPTIONS_DELTA_FALLBACK_STEPS
