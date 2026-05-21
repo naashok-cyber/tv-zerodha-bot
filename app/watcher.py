@@ -38,10 +38,12 @@ class OrderWatcher:
         self,
         on_entry_filled: Callable[[EntryFilledEvent], None] | None = None,
         on_gtt_filled: Callable[[GttFilledEvent], None] | None = None,
+        on_tick_callback: Callable[[list[dict]], None] | None = None,
         ticker_factory: Callable[..., Any] | None = None,
     ) -> None:
         self._on_entry_filled = on_entry_filled
         self._on_gtt_filled = on_gtt_filled
+        self._on_tick_callback = on_tick_callback
         self._ticker_factory = ticker_factory or _default_ticker_factory
         self._ticker: Any = None
         self._subscribed_tokens: set[int] = set()
@@ -219,7 +221,12 @@ class OrderWatcher:
                 self._on_gtt_filled(event)
 
     def on_ticks(self, ws: Any, ticks: list[dict]) -> None:
-        log.debug("Received %d ticks (MTM stub)", len(ticks))
+        if self._on_tick_callback is not None:
+            try:
+                self._on_tick_callback(ticks)
+            except Exception:
+                log.exception("on_tick_callback raised")
+        log.debug("Received %d ticks", len(ticks))
 
 
 def _default_ticker_factory(api_key: str, access_token: str) -> Any:

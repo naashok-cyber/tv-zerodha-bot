@@ -50,6 +50,7 @@ def _dry_run(settings: Settings) -> bool:
 # ── Module-level singletons ────────────────────────────────────────────────────
 _SessionFactory: Any = None
 _watcher: OrderWatcher | None = None
+_trailing_manager: Any = None  # TrailingSlManager; typed as Any to avoid circular-import annotation
 _idempotency_cache: TTLCache = TTLCache(maxsize=10_000, ttl=86_400)
 
 # Keyed by kite_order_id; carries sl/target distances for the EntryFilledEvent callback.
@@ -344,6 +345,31 @@ def _on_entry_filled(event: EntryFilledEvent) -> None:
         position.gtt_id = gtt.id
         session.commit()
 
+        # Start trailing the SL via live ticks (only for real GTTs, not dry-run)
+        if _trailing_manager is not None and kite_gtt_id is not None:
+            if instrument_type == "EQ":
+                trail_sl_pct = settings.EQUITY_SL_PCT
+            elif instrument_type == "FUT":
+                trail_sl_pct = settings.FUTURES_SL_PCT
+            else:
+                trail_sl_pct = state.get_sl_pct(settings.SL_PREMIUM_PCT)
+            _trailing_manager.register(
+                tradingsymbol=order.tradingsymbol,
+                instrument_token=instrument.instrument_token,
+                exchange=order.exchange,
+                entry_side=entry_side,
+                sl_pct=trail_sl_pct,
+                qty=event.fill_qty,
+                product=order.product,
+                target_price=target_price,
+                initial_sl=sl_price,
+                fill_price=fill_price,
+                gtt_db_id=gtt.id,
+                kite_gtt_id=kite_gtt_id,
+            )
+            if _watcher is not None:
+                _watcher.subscribe([instrument.instrument_token])
+
 
 # ── GttFilledEvent callback ───────────────────────────────────────────────────
 
@@ -386,6 +412,19 @@ def _on_gtt_filled(event: GttFilledEvent) -> None:
         else:
             pnl = -(fill_price - entry_price) * qty * mcx_units
 
+        # Look up instrument token before committing so we can unregister trailing
+        _instr_token: int | None = None
+        if _trailing_manager is not None:
+            instr = (
+                session.query(Instrument)
+                .filter(
+                    Instrument.tradingsymbol == event.tradingsymbol,
+                    Instrument.exchange == position.exchange,
+                )
+                .first()
+            )
+            _instr_token = instr.instrument_token if instr else None
+
         now = datetime.now(IST)
         risk.record_trade_result(session, entry_order.kite_order_id, pnl, now)
         session.commit()
@@ -394,17 +433,32 @@ def _on_gtt_filled(event: GttFilledEvent) -> None:
             event.tradingsymbol, float(pnl), entry_order.kite_order_id,
         )
 
+    # Stop trailing now that the position is closed
+    if _trailing_manager is not None and _instr_token is not None:
+        _trailing_manager.unregister(_instr_token)
+        if _watcher is not None:
+            _watcher.unsubscribe([_instr_token])
+
 
 # ── Lifespan ──────────────────────────────────────────────────────────────────
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _SessionFactory, _watcher, _scheduler
+    global _SessionFactory, _watcher, _trailing_manager, _scheduler
     if _SessionFactory is None:
         from sqlalchemy.orm import sessionmaker
         engine = init_db(get_settings().DATABASE_URL)
         _SessionFactory = sessionmaker(bind=engine, expire_on_commit=False)
-    _watcher = OrderWatcher(on_entry_filled=_on_entry_filled, on_gtt_filled=_on_gtt_filled)
+    from app.trailing import TrailingSlManager
+    _trailing_manager = TrailingSlManager(
+        session_factory=_SessionFactory,
+        kite_fetcher=get_session_manager().get_kite,
+    )
+    _watcher = OrderWatcher(
+        on_entry_filled=_on_entry_filled,
+        on_gtt_filled=_on_gtt_filled,
+        on_tick_callback=_trailing_manager.on_ticks,
+    )
     state.set_trade_mode(get_settings().TRADE_MODE.value)
     _scheduler = make_scheduler(session_factory=_SessionFactory)
     _scheduler.start()

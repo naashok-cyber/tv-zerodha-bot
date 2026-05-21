@@ -186,42 +186,46 @@ def modify_gtt(
     instrument: Instrument,
     qty: int,
     product: str,
-    exit_side: str = "SELL",
+    entry_side: str = "BUY",
 ) -> int | None:
     """Modify an existing GTT OCO order in place.
 
-    Uses the same OCO condition structure as place_gtt_oco.
+    Uses the same OCO condition structure as place_gtt_oco:
+    trigger_values must be [low, high] for Kite, regardless of which is SL vs target.
     Returns gtt_id on success.
     """
-    order_dict = [
-        {
+    exit_side = "SELL" if entry_side.upper() == "BUY" else "BUY"
+
+    def _leg(price: float) -> dict:
+        return {
             "exchange": instrument.exchange,
             "tradingsymbol": instrument.tradingsymbol,
             "transaction_type": exit_side,
             "quantity": qty,
             "order_type": "LIMIT",
             "product": product,
-            "price": sl_limit,
-        },
-        {
-            "exchange": instrument.exchange,
-            "tradingsymbol": instrument.tradingsymbol,
-            "transaction_type": exit_side,
-            "quantity": qty,
-            "order_type": "LIMIT",
-            "product": product,
-            "price": target_limit,
-        },
-    ]
+            "price": price,
+        }
+
+    sl_leg = _leg(sl_limit)
+    tgt_leg = _leg(target_limit)
+
+    if entry_side.upper() == "BUY":
+        trigger_values = [sl_trigger, target_trigger]   # [low, high]
+        orders = [sl_leg, tgt_leg]
+    else:
+        trigger_values = [target_trigger, sl_trigger]   # [low, high] for SELL
+        orders = [tgt_leg, sl_leg]
+
     result: int = backoff_call(
         kite_client.modify_gtt,
         trigger_id=gtt_id,
         trigger_type=kite_client.GTT_TYPE_OCO,
         tradingsymbol=instrument.tradingsymbol,
         exchange=instrument.exchange,
-        trigger_values=[sl_trigger, target_trigger],
+        trigger_values=trigger_values,
         last_price=last_price,
-        orders=order_dict,
+        orders=orders,
     )
     log.info("Modified GTT %d for %s: sl=%.4f target=%.4f", gtt_id, instrument.tradingsymbol, sl_trigger, target_trigger)
     return result
