@@ -1319,8 +1319,20 @@ def _shell(active: str, content: str, wide: bool = False, refresh: bool = False)
 async def dashboard(
     session: Session = Depends(get_db_session),
     _: None = Depends(_auth_guard),
+    days: int = Query(default=2, ge=0),
 ) -> Response:
-    rows = session.query(Alert).order_by(Alert.received_at.desc()).limit(50).all()
+    q = session.query(Alert)
+    if days > 0:
+        q = q.filter(Alert.received_at >= datetime.now(IST) - timedelta(days=days))
+    rows = q.order_by(Alert.received_at.desc()).limit(200).all()
+
+    day_opts = [(1, "Today"), (2, "2 Days"), (7, "7 Days"), (0, "All")]
+    filters = "<div style='display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px'>" + "".join(
+        f"<a href='/dashboard?days={d}' class='btn {'bp' if d == days else 'bm'}' "
+        f"style='text-decoration:none'>{lbl}</a>"
+        for d, lbl in day_opts
+    ) + "</div>"
+
     rows_html = "".join(
         f"<tr><td>{r.id}</td><td style='font-weight:600'>{r.tv_ticker}</td><td>{r.action}</td>"
         f"<td>{r.received_at.strftime('%m/%d %H:%M') if r.received_at else '—'}</td>"
@@ -1330,7 +1342,8 @@ async def dashboard(
     )
     return Response(
         content=_shell("dashboard",
-            "<div class='card'><div class='ct'>Recent Alerts</div>"
+            filters
+            + "<div class='card'><div class='ct'>Recent Alerts</div>"
             "<table><thead><tr><th>ID</th><th>Ticker</th><th>Action</th>"
             "<th>Time</th><th>Processed</th></tr></thead>"
             "<tbody>" + rows_html + "</tbody></table></div>",
@@ -1418,11 +1431,14 @@ async def gtts_page(
     _: None = Depends(_auth_guard),
     settings: Settings = Depends(get_current_settings),
     show_all: int = Query(default=0, ge=0, le=1),
+    days: int = Query(default=2, ge=0),
 ) -> Response:
-    """Show GTT rows alongside live Kite status. Default: ACTIVE only."""
+    """Show GTT rows alongside live Kite status. Default: ACTIVE + last 2 days."""
     q = session.query(Gtt).order_by(Gtt.placed_at.desc())
     if not show_all:
         q = q.filter(Gtt.status == "ACTIVE")
+    if days > 0:
+        q = q.filter(Gtt.placed_at >= datetime.now(IST) - timedelta(days=days))
     rows = q.limit(100).all()
 
     live_map: dict[int, str] = {}
@@ -1455,13 +1471,20 @@ async def gtts_page(
         "</tr>"
         for r in rows
     )
-    toggle_lbl = "Show All" if not show_all else "Active Only"
+    toggle_lbl = "Show All Statuses" if not show_all else "Active Only"
     toggle_cls = "bm" if not show_all else "bp"
+    day_opts = [(1, "Today"), (2, "2 Days"), (7, "7 Days"), (0, "All time")]
+    day_btns = "".join(
+        f"<a href='/gtts?show_all={show_all}&days={d}' class='btn {'bp' if d == days else 'bm'}' "
+        f"style='text-decoration:none'>{lbl}</a>"
+        for d, lbl in day_opts
+    )
     toggle_bar = (
-        f"<div style='display:flex;align-items:center;gap:10px;margin-bottom:14px'>"
-        f"<span style='font-size:.82em;color:#636e72'>{len(rows)} row(s) shown</span>"
-        f"<a href='/gtts?show_all={1 - show_all}' class='btn {toggle_cls}' "
-        f"style='text-decoration:none;margin-left:auto'>{toggle_lbl}</a></div>"
+        f"<div style='display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:14px'>"
+        + day_btns
+        + f"<a href='/gtts?show_all={1 - show_all}&days={days}' class='btn {toggle_cls}' "
+        f"style='text-decoration:none;margin-left:auto'>{toggle_lbl}</a>"
+        + f"<span style='font-size:.78em;color:#aaa'>{len(rows)} row(s)</span></div>"
     )
     return Response(
         content=_shell("gtts",
@@ -1527,7 +1550,14 @@ async def control_page(
     today_loss = _realised_loss_today(session)
     trades_today = _trades_today_count(session)
     consec = _consecutive_losses(session)
-    open_pos = _open_position_count(session)
+    # open positions: only count positions opened in the last 2 days for display
+    two_days_ago = datetime.now(IST) - timedelta(days=2)
+    open_pos = (
+        session.query(Position)
+        .outerjoin(ClosedTrade, Position.id == ClosedTrade.position_id)
+        .filter(ClosedTrade.id == None, Position.opened_at >= two_days_ago)  # noqa: E711
+        .count()
+    )
     loss_pct = (today_loss / eff_max_loss * 100) if eff_max_loss > 0 else 0
 
     # ── meter helpers ─────────────────────────────────────────────────────────
