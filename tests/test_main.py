@@ -36,6 +36,8 @@ def _test_settings(**overrides) -> Settings:
         KITE_API_KEY="fake_key",
         SECRET_KEY="",               # no encryption needed in these tests
         PBKDF2_ITERATIONS=1,
+        ENTRY_WINDOW_START="00:00",  # open all day so tests aren't time-of-day sensitive
+        ENTRY_WINDOW_END="23:59",
     )
     defaults.update(overrides)
     return Settings(**defaults)
@@ -275,6 +277,8 @@ def test_on_entry_filled_creates_position_and_gtt(monkeypatch) -> None:
 
     mock_kite = MagicMock()
     mock_kite.place_gtt.return_value = {"trigger_id": 42}
+    # LTP must be inside the GTT band (sl=210, target=480) to avoid immediate square-off.
+    mock_kite.ltp.return_value = {"NFO:NIFTY2651923400CE": {"last_price": 300.0}}
     mock_mgr = MagicMock()
     mock_mgr.get_kite.return_value = mock_kite
     monkeypatch.setattr(main_module, "get_session_manager", lambda: mock_mgr)
@@ -314,6 +318,9 @@ def test_on_entry_filled_gtt_failure_saves_position_and_logs_error(monkeypatch) 
 
     mock_kite = MagicMock()
     mock_kite.place_gtt.side_effect = Exception("Kite rejected GTT")
+    # LTP must be inside the GTT band (sl=210, target=480) so the failure comes from
+    # place_gtt, not the LTP pre-check triggering an immediate square-off.
+    mock_kite.ltp.return_value = {"NFO:NIFTY2651923400CE": {"last_price": 300.0}}
     mock_mgr = MagicMock()
     mock_mgr.get_kite.return_value = mock_kite
     monkeypatch.setattr(main_module, "get_session_manager", lambda: mock_mgr)
@@ -350,7 +357,7 @@ def test_watch_order_registered_after_session_commit(monkeypatch) -> None:
     in a fresh DB session.
     """
     factory = _make_session_factory()
-    settings = _test_settings(DRY_RUN=False)
+    settings = _test_settings(DRY_RUN=False, ENTRY_WINDOW_START="00:00", ENTRY_WINDOW_END="23:59")
     monkeypatch.setattr(main_module, "_SessionFactory", factory)
 
     # Seed Alert + Instrument so resolve_expiry / select_strike can be mocked
@@ -368,7 +375,7 @@ def test_watch_order_registered_after_session_commit(monkeypatch) -> None:
     committed_when_watched: list[bool] = []
 
     mock_watcher = MagicMock()
-    def _check_committed(order_id: str) -> None:
+    def _check_committed(order_id: str, kite_fetcher=None) -> None:
         # Open a fresh session — exactly what _on_entry_filled does
         with factory() as s:
             row = s.query(Order).filter_by(kite_order_id=order_id).first()

@@ -65,6 +65,9 @@ def _s(**kwargs) -> Settings:
         DASHBOARD_PASSWORD="",
         SECRET_KEY="",
         PBKDF2_ITERATIONS=1,
+        # Alert timestamp is 10:00 UTC = 15:30 IST; window must cover it.
+        ENTRY_WINDOW_START="09:00",
+        ENTRY_WINDOW_END="16:00",
     )
     defaults.update(kwargs)
     return Settings(**defaults)
