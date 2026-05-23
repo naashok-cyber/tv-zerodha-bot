@@ -13,6 +13,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 import app.main as main_module
+import app.state as state
 from app.config import IST, UTC, Settings
 from app.expiry_resolver import ResolvedExpiry
 from app.main import (
@@ -881,12 +882,18 @@ def test_options_delta_fallback_succeeds_on_lower_delta():
     assert mock_pe.call_args.args[3] == 50
 
 
-def test_options_all_fallback_deltas_exhausted_skips():
-    """When every strike's SL exceeds the risk budget, the alert is skipped with no order placed.
+def test_options_all_fallback_deltas_exhausted_forces_one_lot():
+    """When every strike's SL exceeds the risk budget, bot forces 1 lot at the primary strike.
 
     capital_risk=5,000; all strikes ltp=400, lot_size=50:
-      sl_per_lot = 400*0.30*50 = 6,000 > 5,000 → 0 lots at every delta → skip.
+      sl_per_lot = 400*0.30*50 = 6,000 > 5,000 → 0 lots at every delta
+      → falls back to forcing 1 lot (qty=50) at primary strike rather than skipping.
     """
+    state.set_session_invalid(False)  # reset state pollution from other tests
+    state.set_paper_mode(None)  # clear override so settings.DRY_RUN=False is respected
+    state.set_emergency_stop(False)
+    state.set_entry_window_start(None)
+    state.set_entry_window_end(None)
     factory = _make_factory()
     s = _s(
         DRY_RUN=False,
@@ -895,6 +902,8 @@ def test_options_all_fallback_deltas_exhausted_skips():
         SL_PREMIUM_PCT=0.30,
         TARGET_DELTA=0.65,
         DELTA_FALLBACK_STEPS=[0.50, 0.35],
+        ENTRY_WINDOW_START="09:00",
+        ENTRY_WINDOW_END="16:00",  # alert timestamp is 10:00 UTC = 15:30 IST; must be inside window
     )
 
     with factory() as session:
@@ -912,7 +921,7 @@ def test_options_all_fallback_deltas_exhausted_skips():
     with (
         patch("app.main.resolve_expiry", return_value=resolved),
         patch("app.main.select_strike", side_effect=_ss_always_expensive),
-        patch("app.main.place_entry") as mock_pe,
+        patch("app.main.place_entry", return_value="ORD_FORCED") as mock_pe,
         patch("app.main.get_session_manager") as mock_sm,
         patch("app.risk.check_risk_gates"),
         patch("app.risk.daily_loss_remaining", return_value=Decimal("100000")),
@@ -921,7 +930,5 @@ def test_options_all_fallback_deltas_exhausted_skips():
         main_module._SessionFactory = factory
         _process_alert(alert_id, _make_alert("BUY"), s)
 
-    mock_pe.assert_not_called()
-    with factory() as session:
-        order = session.query(Order).filter_by(alert_id=alert_id).first()
-    assert order is None
+    mock_pe.assert_called_once()
+    assert mock_pe.call_args.args[3] == 50  # 1 lot forced (lot_size=50)

@@ -1119,21 +1119,22 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
                     break
 
             if fallback_selection is None:
-                log.warning(
-                    "Alert %d: no affordable strike at any delta %s within risk_budget=%.0f — skipping",
-                    alert_id, delta_fallbacks, float(capital_risk_opt),
+                # Risk budget too small for any delta — force 1 lot at primary strike
+                # rather than rejecting the trade entirely.
+                log.info(
+                    "Alert %d: risk budget ₹%.0f too small for any delta %s — forcing 1 lot at %s",
+                    alert_id, float(capital_risk_opt), delta_fallbacks,
+                    selection.instrument.tradingsymbol,
                 )
-                alert.processed = True
-                session.commit()
-                return
-
-            selection = fallback_selection
-            lot_size = selection.instrument.lot_size
-            option_ltp = float(selection.option_ltp)
-            sl_per_unit = (
-                Decimal(str(option_ltp * mcx_units)) * Decimal(str(state.get_sl_pct(settings.SL_PREMIUM_PCT)))
-            )
-            qty = risk.compute_futures_qty(capital_risk_opt, sl_per_unit, Decimal(str(lot_size)))
+                qty = lot_size  # selection already points to primary strike
+            else:
+                selection = fallback_selection
+                lot_size = selection.instrument.lot_size
+                option_ltp = float(selection.option_ltp)
+                sl_per_unit = (
+                    Decimal(str(option_ltp * mcx_units)) * Decimal(str(state.get_sl_pct(settings.SL_PREMIUM_PCT)))
+                )
+                qty = risk.compute_futures_qty(capital_risk_opt, sl_per_unit, Decimal(str(lot_size)))
 
         qty = min(qty, state.get_max_lots(settings.MAX_LOTS_PER_TRADE) * lot_size)
 

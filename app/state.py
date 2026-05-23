@@ -69,7 +69,8 @@ def is_paper_mode(env_default: bool) -> bool:
         return _PAPER_MODE if _PAPER_MODE is not None else env_default
 
 
-def set_paper_mode(paper: bool) -> None:
+def set_paper_mode(paper: Optional[bool]) -> None:
+    """Pass None to clear the override and fall back to the .env DRY_RUN value."""
     global _PAPER_MODE
     with _lock:
         _PAPER_MODE = paper
