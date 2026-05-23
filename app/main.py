@@ -616,6 +616,15 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
         now = alert_data.timestamp
         product = settings.PRODUCT_TYPE.value
 
+        if alert_data.action == "TRAIL":
+            log.info(
+                "Alert %d: TRAIL action ignored — tick-based trailing SL is active automatically",
+                alert_id,
+            )
+            alert.processed = True
+            session.commit()
+            return
+
         if state.is_emergency_stop():
             log.warning("Alert %d: EMERGENCY STOP active — all trading halted", alert_id)
             alert.processed = True
