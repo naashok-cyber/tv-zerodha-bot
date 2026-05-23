@@ -21,6 +21,11 @@ _SELL_OPTIONS_PROFIT_PCT_OVERRIDE: Optional[float] = None
 _ENTRY_WINDOW_START_OVERRIDE: Optional[str] = None  # "HH:MM"
 _ENTRY_WINDOW_END_OVERRIDE: Optional[str] = None    # "HH:MM"
 _NO_ENTRY_ON_EXPIRY_DAY_OVERRIDE: Optional[bool] = None
+_TRAILING_SL_ENABLED: bool = True
+_MAX_TRADES_PER_DAY_OVERRIDE: Optional[int] = None
+_MAX_OPEN_POSITIONS_OVERRIDE: Optional[int] = None
+_CAPITAL_PER_TRADE_OVERRIDE: Optional[float] = None
+_CONSECUTIVE_LOSSES_LIMIT_OVERRIDE: Optional[int] = None
 
 
 # ── Session ───────────────────────────────────────────────────────────────────
@@ -190,6 +195,72 @@ def set_no_entry_on_expiry_day(value: Optional[bool]) -> None:
         _NO_ENTRY_ON_EXPIRY_DAY_OVERRIDE = value
 
 
+# ── Trailing SL enabled ───────────────────────────────────────────────────────
+
+def is_trailing_enabled() -> bool:
+    with _lock:
+        return _TRAILING_SL_ENABLED
+
+
+def set_trailing_enabled(value: bool) -> None:
+    global _TRAILING_SL_ENABLED
+    with _lock:
+        _TRAILING_SL_ENABLED = value
+
+
+def toggle_trailing_enabled() -> bool:
+    global _TRAILING_SL_ENABLED
+    with _lock:
+        _TRAILING_SL_ENABLED = not _TRAILING_SL_ENABLED
+        return _TRAILING_SL_ENABLED
+
+
+# ── Additional risk overrides ─────────────────────────────────────────────────
+
+def get_max_trades_per_day(env_default: int) -> int:
+    with _lock:
+        return _MAX_TRADES_PER_DAY_OVERRIDE if _MAX_TRADES_PER_DAY_OVERRIDE is not None else env_default
+
+
+def set_max_trades_per_day(value: Optional[int]) -> None:
+    global _MAX_TRADES_PER_DAY_OVERRIDE
+    with _lock:
+        _MAX_TRADES_PER_DAY_OVERRIDE = value if (value is not None and value > 0) else None
+
+
+def get_max_open_positions(env_default: int) -> int:
+    with _lock:
+        return _MAX_OPEN_POSITIONS_OVERRIDE if _MAX_OPEN_POSITIONS_OVERRIDE is not None else env_default
+
+
+def set_max_open_positions(value: Optional[int]) -> None:
+    global _MAX_OPEN_POSITIONS_OVERRIDE
+    with _lock:
+        _MAX_OPEN_POSITIONS_OVERRIDE = value if (value is not None and value > 0) else None
+
+
+def get_capital_per_trade(env_default: float) -> float:
+    with _lock:
+        return _CAPITAL_PER_TRADE_OVERRIDE if _CAPITAL_PER_TRADE_OVERRIDE is not None else env_default
+
+
+def set_capital_per_trade(value: Optional[float]) -> None:
+    global _CAPITAL_PER_TRADE_OVERRIDE
+    with _lock:
+        _CAPITAL_PER_TRADE_OVERRIDE = value if (value is not None and value > 0) else None
+
+
+def get_consecutive_losses_limit(env_default: int) -> int:
+    with _lock:
+        return _CONSECUTIVE_LOSSES_LIMIT_OVERRIDE if _CONSECUTIVE_LOSSES_LIMIT_OVERRIDE is not None else env_default
+
+
+def set_consecutive_losses_limit(value: Optional[int]) -> None:
+    global _CONSECUTIVE_LOSSES_LIMIT_OVERRIDE
+    with _lock:
+        _CONSECUTIVE_LOSSES_LIMIT_OVERRIDE = value if (value is not None and value > 0) else None
+
+
 def get_all_overrides() -> dict:
     """Return current effective override state for display."""
     with _lock:
@@ -205,4 +276,9 @@ def get_all_overrides() -> dict:
             "entry_window_start": _ENTRY_WINDOW_START_OVERRIDE,
             "entry_window_end": _ENTRY_WINDOW_END_OVERRIDE,
             "no_entry_on_expiry_day": _NO_ENTRY_ON_EXPIRY_DAY_OVERRIDE,
+            "trailing_sl_enabled": _TRAILING_SL_ENABLED,
+            "max_trades_per_day": _MAX_TRADES_PER_DAY_OVERRIDE,
+            "max_open_positions": _MAX_OPEN_POSITIONS_OVERRIDE,
+            "capital_per_trade": _CAPITAL_PER_TRADE_OVERRIDE,
+            "consecutive_losses_limit": _CONSECUTIVE_LOSSES_LIMIT_OVERRIDE,
         }

@@ -122,14 +122,17 @@ def _check_risk_guards(session: Any, settings: Settings) -> tuple[bool, str]:
     if loss >= effective_loss_cap:
         return False, f"daily loss ₹{loss:.2f} >= limit ₹{effective_loss_cap:.2f}"
     trades = _trades_today_count(session)
-    if trades >= settings.MAX_TRADES_PER_DAY:
-        return False, f"trades today {trades} >= MAX_TRADES_PER_DAY {settings.MAX_TRADES_PER_DAY}"
+    eff_max_trades = state.get_max_trades_per_day(settings.MAX_TRADES_PER_DAY)
+    if trades >= eff_max_trades:
+        return False, f"trades today {trades} >= MAX_TRADES_PER_DAY {eff_max_trades}"
     positions = _open_position_count(session)
-    if positions >= settings.MAX_OPEN_POSITIONS:
-        return False, f"open positions {positions} >= MAX_OPEN_POSITIONS {settings.MAX_OPEN_POSITIONS}"
+    eff_max_positions = state.get_max_open_positions(settings.MAX_OPEN_POSITIONS)
+    if positions >= eff_max_positions:
+        return False, f"open positions {positions} >= MAX_OPEN_POSITIONS {eff_max_positions}"
     losses = _consecutive_losses(session)
-    if losses >= settings.CONSECUTIVE_LOSSES_LIMIT:
-        return False, f"consecutive losses {losses} >= CONSECUTIVE_LOSSES_LIMIT {settings.CONSECUTIVE_LOSSES_LIMIT}"
+    eff_consec_limit = state.get_consecutive_losses_limit(settings.CONSECUTIVE_LOSSES_LIMIT)
+    if losses >= eff_consec_limit:
+        return False, f"consecutive losses {losses} >= CONSECUTIVE_LOSSES_LIMIT {eff_consec_limit}"
     return True, ""
 
 
@@ -350,8 +353,8 @@ def _on_entry_filled(event: EntryFilledEvent) -> None:
         position.gtt_id = gtt.id
         session.commit()
 
-        # Start trailing the SL via live ticks (only for real GTTs, not dry-run)
-        if _trailing_manager is not None and kite_gtt_id is not None:
+        # Start trailing the SL via live ticks (only for real GTTs, not dry-run, and when enabled)
+        if _trailing_manager is not None and kite_gtt_id is not None and state.is_trailing_enabled():
             if instrument_type == "EQ":
                 trail_sl_pct = settings.EQUITY_SL_PCT
             elif instrument_type == "FUT":
@@ -713,7 +716,7 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
 
             daily_remaining = risk.daily_loss_remaining(session, now)
             capital_risk = min(
-                Decimal(str(settings.CAPITAL_PER_TRADE)) * settings.RISK_PCT,
+                Decimal(str(state.get_capital_per_trade(settings.CAPITAL_PER_TRADE))) * settings.RISK_PCT,
                 daily_remaining,
             )
             qty = risk.compute_futures_qty(capital_risk, sl_distance_d, Decimal(str(fut_instr.lot_size)))
@@ -820,7 +823,7 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
                 else:
                     ltp = float(alert_data.price)
 
-                risk_amount = Decimal(str(settings.CAPITAL_PER_TRADE)) * settings.RISK_PCT
+                risk_amount = Decimal(str(state.get_capital_per_trade(settings.CAPITAL_PER_TRADE))) * settings.RISK_PCT
                 sl_per_share = Decimal(str(ltp)) * Decimal(str(settings.EQUITY_SL_PCT))
                 qty = floor(float(risk_amount / sl_per_share)) if sl_per_share > 0 else 0
                 qty = min(qty, state.get_max_lots(settings.MAX_LOTS_PER_TRADE))
@@ -933,82 +936,6 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
                 closed_at=now,
             )
             session.add(ct)
-            alert.processed = True
-            session.commit()
-            return
-
-        # ── TRAIL ─────────────────────────────────────────────────────────────
-        if alert_data.action == "TRAIL":
-            ts = underlying.name
-            position = (
-                session.query(Position)
-                .outerjoin(ClosedTrade, Position.id == ClosedTrade.position_id)
-                .filter(Position.tradingsymbol == ts, ClosedTrade.id == None)  # noqa: E711
-                .first()
-            )
-            if position is None:
-                log.warning("Alert %d: TRAIL — no open position for %s", alert_id, ts)
-                alert.processed = True
-                session.commit()
-                return
-
-            gtt = (
-                session.query(Gtt)
-                .filter(Gtt.order_id == position.order_id, Gtt.status == "ACTIVE")
-                .first()
-            )
-            instrument = (
-                session.query(Instrument)
-                .filter(Instrument.tradingsymbol == ts, Instrument.exchange == position.exchange)
-                .first()
-            )
-
-            entry_premium = float(position.entry_premium)
-            sl_risk = entry_premium * state.get_sl_pct(settings.SL_PREMIUM_PCT)
-            current_premium = float(alert_data.premium) if alert_data.premium else entry_premium
-
-            new_sl: float | None = None
-            if current_premium >= entry_premium + settings.TRAIL_RR * sl_risk:
-                candidate_sl = current_premium - settings.TRAIL_DISTANCE_RR * sl_risk
-                if candidate_sl > float(position.current_sl):
-                    new_sl = candidate_sl
-                    position.trail_active = True
-                    position.breakeven_moved = True
-                    position.current_sl = new_sl
-            elif (
-                current_premium >= entry_premium + settings.BREAKEVEN_RR * sl_risk
-                and not position.breakeven_moved
-            ):
-                new_sl = entry_premium
-                position.breakeven_moved = True
-                position.current_sl = new_sl
-
-            if new_sl is not None and gtt is not None:
-                target_price = float(gtt.target_order_price)
-                if not _dry_run(settings) and instrument is not None:
-                    kite_client = get_session_manager().get_kite()
-                    modify_gtt(
-                        kite_client,
-                        gtt.kite_gtt_id,
-                        sl_trigger=new_sl,
-                        sl_limit=new_sl,
-                        target_trigger=target_price,
-                        target_limit=target_price,
-                        last_price=current_premium,
-                        instrument=instrument,
-                        qty=position.quantity,
-                        product=product,
-                    )
-                else:
-                    log.info(
-                        "Alert %d: DRY_RUN TRAIL — would set SL=%.4f target=%.4f for %s",
-                        alert_id, new_sl, target_price, ts,
-                    )
-                gtt.sl_trigger = new_sl
-                gtt.sl_order_price = new_sl
-                gtt.modification_count += 1
-                gtt.updated_at = now
-
             alert.processed = True
             session.commit()
             return
@@ -1137,7 +1064,7 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
         # For MCX (lot_size=1):  sl_per_unit = ltp×mcx_units×SL_PCT (= risk per Kite lot directly).
         daily_remaining_opt = risk.daily_loss_remaining(session, now)
         capital_risk_opt = min(
-            Decimal(str(settings.CAPITAL_PER_TRADE)) * settings.RISK_PCT,
+            Decimal(str(state.get_capital_per_trade(settings.CAPITAL_PER_TRADE))) * settings.RISK_PCT,
             daily_remaining_opt,
         )
         sl_per_unit = Decimal(str(option_ltp * mcx_units)) * Decimal(str(state.get_sl_pct(settings.SL_PREMIUM_PCT)))
@@ -1319,10 +1246,11 @@ async def webhook(
         return {"status": "duplicate"}
 
     trades_today = _trades_today_count(session)
-    if trades_today >= settings.MAX_TRADES_PER_DAY:
+    eff_max_trades_wh = state.get_max_trades_per_day(settings.MAX_TRADES_PER_DAY)
+    if trades_today >= eff_max_trades_wh:
         log.warning(
             "Alert %d: Max daily trades reached (%d/%d) — rejecting",
-            alert_row.id, trades_today, settings.MAX_TRADES_PER_DAY,
+            alert_row.id, trades_today, eff_max_trades_wh,
         )
         return {"status": "rejected", "reason": "max_daily_trades"}
 
@@ -1803,15 +1731,20 @@ async def control_page(
     estop = state.is_emergency_stop()
     overrides = state.get_all_overrides()
 
-    eff_max_lots       = state.get_max_lots(settings.MAX_LOTS_PER_TRADE)
-    eff_max_loss       = state.get_max_daily_loss(settings.MAX_DAILY_LOSS_ABS)
-    eff_sl_pct         = state.get_sl_pct(settings.SL_PREMIUM_PCT)
-    eff_rr             = state.get_rr_ratio(settings.RR_RATIO)
-    eff_profit_target  = state.get_daily_profit_target(settings.DAILY_PROFIT_TARGET)
-    eff_sell_ppt       = state.get_sell_options_profit_pct(settings.SELL_OPTIONS_PROFIT_PCT)
-    eff_entry_start    = state.get_entry_window_start(settings.ENTRY_WINDOW_START)
-    eff_entry_end      = state.get_entry_window_end(settings.ENTRY_WINDOW_END)
-    eff_no_expiry      = state.get_no_entry_on_expiry_day(settings.NO_ENTRY_ON_EXPIRY_DAY)
+    eff_max_lots        = state.get_max_lots(settings.MAX_LOTS_PER_TRADE)
+    eff_max_loss        = state.get_max_daily_loss(settings.MAX_DAILY_LOSS_ABS)
+    eff_sl_pct          = state.get_sl_pct(settings.SL_PREMIUM_PCT)
+    eff_rr              = state.get_rr_ratio(settings.RR_RATIO)
+    eff_profit_target   = state.get_daily_profit_target(settings.DAILY_PROFIT_TARGET)
+    eff_sell_ppt        = state.get_sell_options_profit_pct(settings.SELL_OPTIONS_PROFIT_PCT)
+    eff_entry_start     = state.get_entry_window_start(settings.ENTRY_WINDOW_START)
+    eff_entry_end       = state.get_entry_window_end(settings.ENTRY_WINDOW_END)
+    eff_no_expiry       = state.get_no_entry_on_expiry_day(settings.NO_ENTRY_ON_EXPIRY_DAY)
+    eff_trailing        = state.is_trailing_enabled()
+    eff_max_trades      = state.get_max_trades_per_day(settings.MAX_TRADES_PER_DAY)
+    eff_max_positions   = state.get_max_open_positions(settings.MAX_OPEN_POSITIONS)
+    eff_capital         = state.get_capital_per_trade(settings.CAPITAL_PER_TRADE)
+    eff_consec_limit    = state.get_consecutive_losses_limit(settings.CONSECUTIVE_LOSSES_LIMIT)
 
     # ── today's risk summary ──────────────────────────────────────────────────
     today_loss = _realised_loss_today(session)
@@ -1831,13 +1764,13 @@ async def control_page(
     loss_pct_c = min(loss_pct, 100)
     loss_bar, loss_vc = _bar(loss_pct)
 
-    trades_pct = (trades_today / settings.MAX_TRADES_PER_DAY * 100) if settings.MAX_TRADES_PER_DAY else 0
+    trades_pct = (trades_today / eff_max_trades * 100) if eff_max_trades else 0
     trades_bar, trades_vc = _bar(trades_pct)
 
-    pos_pct = (open_pos / settings.MAX_OPEN_POSITIONS * 100) if settings.MAX_OPEN_POSITIONS else 0
+    pos_pct = (open_pos / eff_max_positions * 100) if eff_max_positions else 0
     pos_bar, pos_vc = _bar(pos_pct)
 
-    consec_pct = (consec / settings.CONSECUTIVE_LOSSES_LIMIT * 100) if settings.CONSECUTIVE_LOSSES_LIMIT else 0
+    consec_pct = (consec / eff_consec_limit * 100) if eff_consec_limit else 0
     consec_bar, consec_vc = _bar(consec_pct)
 
     # ── badges / buttons ──────────────────────────────────────────────────────
@@ -1853,11 +1786,21 @@ async def control_page(
         "<div class='sbanner'>&#x26D4; EMERGENCY STOP ACTIVE &mdash; No new trades will execute</div>"
         if estop else ""
     )
+    trail_pill  = "pg" if eff_trailing else "pr"
+    trail_label = "TRAIL ON" if eff_trailing else "TRAIL OFF"
+    trail_lbl   = "Disable Trailing" if eff_trailing else "Enable Trailing"
+    trail_cls   = "ba" if eff_trailing else "bg2"
 
     def src(key: str) -> str:
         return (
             " <span style='color:#f0a500;font-size:.72em'>(overridden)</span>"
             if overrides.get(key) is not None else ""
+        )
+
+    def src_val(key: str, val: object, default: object) -> str:
+        return (
+            " <span style='color:#f0a500;font-size:.72em'>(overridden)</span>"
+            if val != default else ""
         )
 
     # ── Kite session status ───────────────────────────────────────────────────
@@ -1910,13 +1853,13 @@ async def control_page(
         + f"<div class='mv {loss_vc}'>&#x20B9;{today_loss:.0f}&thinsp;/&thinsp;&#x20B9;{eff_max_loss:.0f}</div></div>"
         + f"<div class='mr'><div class='ml'>Trades today</div>"
         + f"<div class='mw'><div class='mb {trades_bar}' style='width:{min(trades_pct,100):.0f}%'></div></div>"
-        + f"<div class='mv {trades_vc}'>{trades_today}&thinsp;/&thinsp;{settings.MAX_TRADES_PER_DAY}</div></div>"
+        + f"<div class='mv {trades_vc}'>{trades_today}&thinsp;/&thinsp;{eff_max_trades}</div></div>"
         + f"<div class='mr'><div class='ml'>Open positions</div>"
         + f"<div class='mw'><div class='mb {pos_bar}' style='width:{min(pos_pct,100):.0f}%'></div></div>"
-        + f"<div class='mv {pos_vc}'>{open_pos}&thinsp;/&thinsp;{settings.MAX_OPEN_POSITIONS}</div></div>"
+        + f"<div class='mv {pos_vc}'>{open_pos}&thinsp;/&thinsp;{eff_max_positions}</div></div>"
         + f"<div class='mr'><div class='ml'>Consec. losses</div>"
         + f"<div class='mw'><div class='mb {consec_bar}' style='width:{min(consec_pct,100):.0f}%'></div></div>"
-        + f"<div class='mv {consec_vc}'>{consec}&thinsp;/&thinsp;{settings.CONSECUTIVE_LOSSES_LIMIT}</div></div>"
+        + f"<div class='mv {consec_vc}'>{consec}&thinsp;/&thinsp;{eff_consec_limit}</div></div>"
         + "</div>"
 
         # kite session
@@ -1934,6 +1877,9 @@ async def control_page(
         + f"<div class='mdr'><div class='mdl'>Paper / Live&ensp;<span class='pill {paper_pill}'>{paper_label}</span></div>"
         + "<form method='post' action='/control/paper-mode/toggle' style='margin:0'>"
         + f"<button class='btn {paper_cls}' type='submit'>{paper_lbl}</button></form></div>"
+        + f"<div class='mdr'><div class='mdl'>Trailing SL&ensp;<span class='pill {trail_pill}'>{trail_label}</span></div>"
+        + "<form method='post' action='/control/trailing/toggle' style='margin:0'>"
+        + f"<button class='btn {trail_cls}' type='submit'>{trail_lbl}</button></form></div>"
         + "<div style='margin-top:10px'><form method='post' action='/control/emergency-stop/toggle'>"
         + f"<button class='btn bfull {estop_cls}' type='submit'>{estop_lbl}</button>"
         + "</form></div></div>"
@@ -1970,6 +1916,18 @@ async def control_page(
         + f"<option value='1'{' selected' if eff_no_expiry else ''}>Yes</option>"
         + f"<option value='0'{' selected' if not eff_no_expiry else ''}>No</option>"
         + "</select><div class='pu'></div></div>"
+        + f"<div class='pr2'><div class='pl'>Max trades / day{src_val('max_trades_per_day', eff_max_trades, settings.MAX_TRADES_PER_DAY)}</div>"
+        + f"<input class='pi' type='number' name='max_trades_per_day' value='{eff_max_trades}' min='1' max='50' step='1'>"
+        + "<div class='pu'>trades</div></div>"
+        + f"<div class='pr2'><div class='pl'>Max open positions{src_val('max_open_positions', eff_max_positions, settings.MAX_OPEN_POSITIONS)}</div>"
+        + f"<input class='pi' type='number' name='max_open_positions' value='{eff_max_positions}' min='1' max='20' step='1'>"
+        + "<div class='pu'>pos</div></div>"
+        + f"<div class='pr2'><div class='pl'>Capital / trade{src_val('capital_per_trade', eff_capital, settings.CAPITAL_PER_TRADE)}</div>"
+        + f"<input class='pi' type='number' name='capital_per_trade' value='{eff_capital:.0f}' min='1000' step='1000'>"
+        + "<div class='pu'>&#x20B9;</div></div>"
+        + f"<div class='pr2'><div class='pl'>Consec. losses limit{src_val('consecutive_losses_limit', eff_consec_limit, settings.CONSECUTIVE_LOSSES_LIMIT)}</div>"
+        + f"<input class='pi' type='number' name='consecutive_losses_limit' value='{eff_consec_limit}' min='1' max='20' step='1'>"
+        + "<div class='pu'>losses</div></div>"
         + "<div style='display:flex;gap:8px;margin-top:12px'>"
         + "<button class='btn bp' type='submit' style='flex:1'>Apply</button>"
         + "<button class='btn bm' type='submit' name='reset' value='1' style='flex:1'>Reset to defaults</button>"
@@ -2002,6 +1960,13 @@ async def toggle_emergency_stop(_: None = Depends(_auth_guard)) -> Response:
     return Response(status_code=302, headers={"Location": "/control"})
 
 
+@app.post("/control/trailing/toggle")
+async def toggle_trailing(_: None = Depends(_auth_guard)) -> Response:
+    new_val = state.toggle_trailing_enabled()
+    log.info("Trailing SL toggled to %s", new_val)
+    return Response(status_code=302, headers={"Location": "/control"})
+
+
 @app.post("/control/risk")
 async def update_risk(
     _: None = Depends(_auth_guard),
@@ -2016,6 +1981,10 @@ async def update_risk(
     entry_window_start: str = Form(default=""),
     entry_window_end: str = Form(default=""),
     no_entry_on_expiry_day: str = Form(default=""),
+    max_trades_per_day: str = Form(default=""),
+    max_open_positions: str = Form(default=""),
+    capital_per_trade: str = Form(default=""),
+    consecutive_losses_limit: str = Form(default=""),
 ) -> Response:
     if reset == "1":
         state.set_max_lots(None)
@@ -2027,6 +1996,10 @@ async def update_risk(
         state.set_entry_window_start(None)
         state.set_entry_window_end(None)
         state.set_no_entry_on_expiry_day(None)
+        state.set_max_trades_per_day(None)
+        state.set_max_open_positions(None)
+        state.set_capital_per_trade(None)
+        state.set_consecutive_losses_limit(None)
         log.info("Risk params reset to .env defaults")
     else:
         try:
@@ -2048,12 +2021,22 @@ async def update_risk(
                 state.set_entry_window_end(entry_window_end.strip())
             if no_entry_on_expiry_day.strip():
                 state.set_no_entry_on_expiry_day(no_entry_on_expiry_day == "1")
+            if max_trades_per_day.strip():
+                state.set_max_trades_per_day(int(max_trades_per_day))
+            if max_open_positions.strip():
+                state.set_max_open_positions(int(max_open_positions))
+            if capital_per_trade.strip():
+                state.set_capital_per_trade(float(capital_per_trade))
+            if consecutive_losses_limit.strip():
+                state.set_consecutive_losses_limit(int(consecutive_losses_limit))
             log.info(
                 "Risk params updated: max_lots=%s max_loss=%s sl_pct=%s rr=%s "
-                "profit_target=%s sell_ppt=%s entry_start=%s entry_end=%s no_expiry=%s",
+                "profit_target=%s sell_ppt=%s entry_start=%s entry_end=%s no_expiry=%s "
+                "max_trades=%s max_pos=%s capital=%s consec=%s",
                 max_lots, max_daily_loss, sl_pct, rr_ratio,
                 daily_profit_target, sell_options_profit_pct,
                 entry_window_start, entry_window_end, no_entry_on_expiry_day,
+                max_trades_per_day, max_open_positions, capital_per_trade, consecutive_losses_limit,
             )
         except ValueError:
             pass
