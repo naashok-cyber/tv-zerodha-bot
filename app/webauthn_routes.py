@@ -26,6 +26,14 @@ from app.storage import WebAuthnCredential, WebSession, get_db_session
 
 router = APIRouter()
 
+
+def _parse_model(model_cls, body: bytes):
+    """Parse a py_webauthn Pydantic model from JSON bytes — handles v1 and v2 API."""
+    if hasattr(model_cls, "model_validate_json"):
+        return model_cls.model_validate_json(body)
+    return model_cls.parse_raw(body)
+
+
 _RP_ID = "naashshla.duckdns.org"
 _RP_ORIGIN = "https://naashshla.duckdns.org"
 _RP_NAME = "ZeroBot"
@@ -241,6 +249,115 @@ async function doAuth(){{
 </html>"""
 
 
+def _setup_html(next_url: str) -> str:
+    safe_next = next_url.replace('"', '%22')
+    return f"""<!DOCTYPE html>
+<html lang='en'>
+<head>
+<meta charset='UTF-8'>
+<meta name='viewport' content='width=device-width,initial-scale=1,viewport-fit=cover'>
+<title>ZeroBot — Enable Face ID</title>
+<meta name='apple-mobile-web-app-capable' content='yes'>
+<meta name='apple-mobile-web-app-status-bar-style' content='default'>
+<meta name='theme-color' content='#007AFF'>
+<style>
+*{{box-sizing:border-box;margin:0;padding:0}}
+body{{font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','Helvetica Neue',Arial,sans-serif;
+  background:#F2F2F7;min-height:100vh;display:flex;align-items:center;justify-content:center;
+  padding:24px 16px;-webkit-font-smoothing:antialiased}}
+.container{{width:100%;max-width:360px}}
+.app-hdr{{text-align:center;margin-bottom:28px}}
+.app-icon{{width:72px;height:72px;background:linear-gradient(145deg,#007AFF,#5856D6);
+  border-radius:18px;display:inline-flex;align-items:center;justify-content:center;
+  font-size:2em;margin-bottom:14px;box-shadow:0 8px 24px rgba(0,122,255,.28)}}
+.app-title{{font-size:1.5em;font-weight:700;color:#1C1C1E;letter-spacing:-.03em}}
+.card{{background:#fff;border-radius:14px;padding:28px 22px;text-align:center;
+  box-shadow:0 1px 3px rgba(0,0,0,.07),0 1px 2px rgba(0,0,0,.04)}}
+.fi-icon{{margin-bottom:18px}}
+.card h2{{font-size:1.2em;font-weight:700;color:#1C1C1E;margin-bottom:10px}}
+.card p{{font-size:.88em;color:#636366;line-height:1.55;margin-bottom:24px}}
+.btn-enable{{display:block;width:100%;padding:14px;background:#007AFF;color:#fff;
+  border:none;border-radius:10px;font-size:.95em;font-weight:600;cursor:pointer;
+  font-family:inherit;transition:opacity .15s,transform .1s;margin-bottom:12px;letter-spacing:-.01em}}
+.btn-enable:active{{transform:scale(.97)}}.btn-enable:hover{{opacity:.88}}
+.btn-enable:disabled{{opacity:.45;cursor:default}}
+.btn-skip{{display:block;width:100%;padding:12px;background:transparent;color:#8E8E93;
+  border:none;font-size:.84em;font-weight:500;cursor:pointer;font-family:inherit;text-decoration:none}}
+.fi-err{{color:#D70015;font-size:.82em;margin-top:12px;min-height:16px}}
+@keyframes pulse{{0%,100%{{opacity:1}}50%{{opacity:.45}}}}
+.scanning{{animation:pulse 1s ease-in-out infinite}}
+</style>
+</head>
+<body>
+<div class='container'>
+  <div class='app-hdr'>
+    <div class='app-icon'>📈</div>
+    <div class='app-title'>ZeroBot</div>
+  </div>
+  <div class='card'>
+    <div class='fi-icon' id='fiIcon'>
+      <svg width='64' height='64' viewBox='0 0 52 52' fill='none'>
+        <path d='M8 20 L8 8 L20 8' stroke='#007AFF' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'/>
+        <path d='M32 8 L44 8 L44 20' stroke='#007AFF' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'/>
+        <path d='M44 32 L44 44 L32 44' stroke='#007AFF' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'/>
+        <path d='M20 44 L8 44 L8 32' stroke='#007AFF' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'/>
+        <circle cx='19' cy='22' r='2.2' fill='#007AFF'/>
+        <circle cx='33' cy='22' r='2.2' fill='#007AFF'/>
+        <path d='M19 32 Q26 37.5 33 32' stroke='#007AFF' stroke-width='2.2' fill='none' stroke-linecap='round'/>
+        <line x1='26' y1='18' x2='26' y2='28' stroke='#007AFF' stroke-width='2' stroke-linecap='round'/>
+      </svg>
+    </div>
+    <h2>Enable Face ID</h2>
+    <p>Sign in faster next time — no password needed. ZeroBot will recognise you with biometrics.</p>
+    <button class='btn-enable' id='enBt' onclick='doSetup()'>Enable Face ID</button>
+    <a href='{safe_next}' class='btn-skip'>Skip for now</a>
+    <p class='fi-err' id='fiErr'></p>
+  </div>
+</div>
+<script>
+function b64(s){{s=s.replace(/-/g,'+').replace(/_/g,'/');while(s.length%4)s+='=';
+  const b=atob(s),u=new Uint8Array(b.length);
+  for(let i=0;i<b.length;i++)u[i]=b.charCodeAt(i);return u.buffer}}
+function toB64(buf){{const b=new Uint8Array(buf);let s='';
+  for(const x of b)s+=String.fromCharCode(x);
+  return btoa(s).replace(/\\+/g,'-').replace(/\\//g,'_').replace(/=/g,'')}}
+function credJSON(c){{const r=c.response,j={{id:c.id,rawId:toB64(c.rawId),type:c.type,response:{{}}}};
+  if(r.clientDataJSON)j.response.clientDataJSON=toB64(r.clientDataJSON);
+  if(r.attestationObject)j.response.attestationObject=toB64(r.attestationObject);
+  return j}}
+async function doSetup(){{
+  const bt=document.getElementById('enBt'),
+        er=document.getElementById('fiErr'),
+        ic=document.getElementById('fiIcon');
+  if(bt)bt.disabled=true;
+  if(ic)ic.classList.add('scanning');
+  if(er)er.textContent='';
+  try{{
+    const or=await fetch('/auth/register-options');
+    const opts=await or.json();
+    if(opts.error)throw new Error(opts.error);
+    opts.challenge=b64(opts.challenge);
+    if(opts.user&&opts.user.id)opts.user.id=b64(opts.user.id);
+    if(opts.excludeCredentials)opts.excludeCredentials=opts.excludeCredentials.map(c=>
+      ({{...c,id:b64(c.id)}}));
+    const cred=await navigator.credentials.create({{publicKey:opts}});
+    const rr=await fetch('/auth/register',{{
+      method:'POST',headers:{{'Content-Type':'application/json'}},
+      body:JSON.stringify(credJSON(cred))}});
+    const res=await rr.json();
+    if(res.ok){{window.location.href='{safe_next}'}}
+    else throw new Error(res.error||'Registration failed');
+  }}catch(e){{
+    if(er)er.textContent=e.name==='NotAllowedError'?'Face ID cancelled — tap Enable to try again':e.message;
+    if(bt)bt.disabled=false;
+    if(ic)ic.classList.remove('scanning');
+  }}
+}}
+</script>
+</body>
+</html>"""
+
+
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @router.get("/login", response_class=HTMLResponse, include_in_schema=False)
@@ -269,9 +386,23 @@ async def password_login(
         and hmac.compare_digest(password.encode(), settings.DASHBOARD_PASSWORD.encode())
     ):
         return RedirectResponse(f"/login?next={next}&error=1", status_code=303)
-    resp = RedirectResponse(next or "/control", status_code=303)
+    dest = next or "/control"
+    has_cred = db.query(WebAuthnCredential).first() is not None
+    target = f"/auth/setup-faceid?next={dest}" if not has_cred else dest
+    resp = RedirectResponse(target, status_code=303)
     _issue_session(db, resp)
     return resp
+
+
+@router.get("/auth/setup-faceid", response_class=HTMLResponse, include_in_schema=False)
+async def setup_faceid_page(
+    request: Request,
+    next: str = "/control",
+    db: Session = Depends(get_db_session),
+) -> Response:
+    if not _valid_session(request.cookies.get("zb_session"), db):
+        return RedirectResponse(f"/login?next={next}", status_code=303)
+    return HTMLResponse(_setup_html(next))
 
 
 @router.get("/auth/register-options", include_in_schema=False)
@@ -314,7 +445,7 @@ async def register(
                         status_code=400, media_type="application/json")
     body = await request.body()
     try:
-        cred = RegistrationCredential.model_validate_json(body)
+        cred = _parse_model(RegistrationCredential, body)
         verification = webauthn.verify_registration_response(
             credential=cred,
             expected_challenge=challenge,
@@ -365,7 +496,7 @@ async def authenticate(
                         media_type="application/json")
     body = await request.body()
     try:
-        cred = AuthenticationCredential.model_validate_json(body)
+        cred = _parse_model(AuthenticationCredential, body)
         verification = webauthn.verify_authentication_response(
             credential=cred,
             expected_challenge=challenge,

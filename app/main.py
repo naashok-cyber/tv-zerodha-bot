@@ -35,7 +35,7 @@ from app.orders import cancel_gtt, modify_gtt, place_entry, place_gtt_oco, squar
 from app.scheduler import daily_session_check, get_last_checked_at, make_scheduler, refresh_instruments_job
 from app.storage import (
     Alert, AppError, ClosedTrade, Gtt, Instrument, Order, Position,
-    WebAuthnCredential, WebSession, _register_factory, init_db,
+    WebSession, _register_factory, init_db,
 )
 from app.strike_selector import NoValidStrikeError, select_strike
 from app.symbol_mapper import resolve_underlying
@@ -1991,66 +1991,8 @@ async def control_page(
         for e in errors
     ) or "<tr><td colspan='3' style='text-align:center;color:#aaa'>No errors in last 48h</td></tr>"
 
-    # ── Face ID / biometrics card ─────────────────────────────────────────────
-    has_faceid = session.query(WebAuthnCredential).first() is not None
-    fi_pill    = "pg" if has_faceid else "pm"
-    fi_label   = "Active" if has_faceid else "Not set up"
-    fi_btn     = (
-        "<button class='btn bm' onclick='_setupFaceID()' id='_fiBt'>Re-register</button>"
-        if has_faceid else
-        "<button class='btn bp' onclick='_setupFaceID()' id='_fiBt'>Enable Face ID</button>"
-    )
-    faceid_card = (
-        "<div class='card'><div class='ct'>Face ID / Biometrics</div>"
-        f"<div class='mdr'><div class='mdl'>Status&ensp;"
-        f"<span class='pill {fi_pill}'>{fi_label}</span></div>{fi_btn}</div>"
-        "<div id='_fiMsg' style='font-size:.78em;color:#8E8E93;padding:2px 16px 10px;"
-        "display:none'></div></div>"
-    )
-    faceid_js = (
-        "<script>"
-        "function b64(s){s=s.replace(/-/g,'+').replace(/_/g,'/');while(s.length%4)s+='=';"
-        "const b=atob(s),u=new Uint8Array(b.length);"
-        "for(let i=0;i<b.length;i++)u[i]=b.charCodeAt(i);return u.buffer}"
-        "function toB64(buf){const b=new Uint8Array(buf);let s='';"
-        "for(const x of b)s+=String.fromCharCode(x);"
-        "return btoa(s).replace(/\\+/g,'-').replace(/\\//g,'_').replace(/=/g,'')}"
-        "function credJSON(c){const r=c.response,"
-        "j={id:c.id,rawId:toB64(c.rawId),type:c.type,response:{}};"
-        "if(r.clientDataJSON)j.response.clientDataJSON=toB64(r.clientDataJSON);"
-        "if(r.attestationObject)j.response.attestationObject=toB64(r.attestationObject);"
-        "return j}"
-        "async function _setupFaceID(){"
-        "const bt=document.getElementById('_fiBt'),"
-        "msg=document.getElementById('_fiMsg');"
-        "if(bt)bt.disabled=true;"
-        "if(msg){msg.style.display='block';msg.textContent='Starting Face ID setup…'}"
-        "try{"
-        "const or=await fetch('/auth/register-options');"
-        "const opts=await or.json();"
-        "if(opts.error){throw new Error(opts.error)}"
-        "opts.challenge=b64(opts.challenge);"
-        "opts.user.id=b64(opts.user.id);"
-        "if(opts.excludeCredentials)opts.excludeCredentials="
-        "opts.excludeCredentials.map(c=>({...c,id:b64(c.id)}));"
-        "const cred=await navigator.credentials.create({publicKey:opts});"
-        "const rr=await fetch('/auth/register',"
-        "{method:'POST',headers:{'Content-Type':'application/json'},"
-        "body:JSON.stringify(credJSON(cred))});"
-        "const res=await rr.json();"
-        "if(res.ok){"
-        "if(msg){msg.style.color='#248A3D';msg.textContent='✓ Face ID registered successfully!'}"
-        "setTimeout(()=>location.reload(),1200)"
-        "}else{throw new Error(res.error||'Registration failed')}"
-        "}catch(e){"
-        "if(msg){msg.style.color='#D70015';msg.textContent=e.message||'Setup failed'}"
-        "if(bt)bt.disabled=false}}"
-        "</script>"
-    )
-
     body = (
         stop_banner
-        + faceid_card
 
         # risk summary
         + "<div class='card'><div class='ct'>Today's Risk Summary</div>"
@@ -2144,7 +2086,7 @@ async def control_page(
         + "<table><thead><tr><th>Time</th><th>Type</th><th>Message</th></tr></thead><tbody>"
         + errors_html + "</tbody></table></div>"
     )
-    return Response(content=_shell("control", body + faceid_js, refresh=True), media_type="text/html")
+    return Response(content=_shell("control", body, refresh=True), media_type="text/html")
 
 
 @app.post("/control/paper-mode/toggle")
