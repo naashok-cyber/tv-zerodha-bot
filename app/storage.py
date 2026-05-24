@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 from datetime import date, datetime
 
+from typing import Any
+
 from sqlalchemy import (
     Boolean,
     Date,
@@ -10,6 +12,7 @@ from sqlalchemy import (
     Float,
     ForeignKey,
     Integer,
+    LargeBinary,
     String,
     Text,
     UniqueConstraint,
@@ -233,6 +236,46 @@ class AppError(Base):
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     alert: Mapped[Alert | None] = relationship("Alert", back_populates="errors")
+
+
+class WebAuthnCredential(Base):
+    """Single-row table — the admin's registered biometric credential."""
+
+    __tablename__ = "webauthn_credentials"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    credential_id: Mapped[bytes] = mapped_column(LargeBinary, nullable=False, unique=True, index=True)
+    public_key: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    sign_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class WebSession(Base):
+    """Browser session issued after successful WebAuthn or password login."""
+
+    __tablename__ = "web_sessions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    token: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+# ── Shared session factory (set by main.py lifespan; used by webauthn_routes) ─
+
+_factory: Any = None
+
+
+def _register_factory(factory: Any) -> None:
+    global _factory
+    _factory = factory
+
+
+def get_db_session() -> Any:
+    if _factory is None:
+        raise RuntimeError("DB session factory not registered")
+    with _factory() as sess:
+        yield sess
 
 
 def init_db(database_url: str | None = None) -> Engine:

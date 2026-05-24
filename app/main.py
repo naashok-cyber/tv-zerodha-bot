@@ -12,7 +12,7 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 from contextlib import asynccontextmanager
-from datetime import datetime, time, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone  # timezone used in _auth_guard
 from decimal import Decimal
 from math import floor
 from typing import Any
@@ -33,7 +33,10 @@ from app.expiry_resolver import NoEligibleExpiryError, resolve_expiry
 from app.kite_session import get_session_manager
 from app.orders import cancel_gtt, modify_gtt, place_entry, place_gtt_oco, square_off
 from app.scheduler import daily_session_check, get_last_checked_at, make_scheduler, refresh_instruments_job
-from app.storage import Alert, AppError, ClosedTrade, Gtt, Instrument, Order, Position, init_db
+from app.storage import (
+    Alert, AppError, ClosedTrade, Gtt, Instrument, Order, Position,
+    WebAuthnCredential, WebSession, _register_factory, init_db,
+)
 from app.strike_selector import NoValidStrikeError, select_strike
 from app.symbol_mapper import resolve_underlying
 from app.schemas import AlertPayload
@@ -457,6 +460,7 @@ async def lifespan(app: FastAPI):
         from sqlalchemy.orm import sessionmaker
         engine = init_db(get_settings().DATABASE_URL)
         _SessionFactory = sessionmaker(bind=engine, expire_on_commit=False)
+        _register_factory(_SessionFactory)
     from app.trailing import TrailingSlManager
     _trailing_manager = TrailingSlManager(
         session_factory=_SessionFactory,
@@ -498,6 +502,9 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="tv-zerodha-bot", version="0.1.0", lifespan=lifespan)
 _security = HTTPBasic(auto_error=False)
 
+from app.webauthn_routes import router as _webauthn_router  # noqa: E402
+app.include_router(_webauthn_router)
+
 
 @app.exception_handler(RequestValidationError)
 async def _validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
@@ -530,26 +537,43 @@ def get_db_session() -> Any:
 
 
 def _auth_guard(
+    request: Request,
     credentials: HTTPBasicCredentials | None = Depends(_security),
     settings: Settings = Depends(get_current_settings),
+    db: Session = Depends(get_db_session),
 ) -> None:
+    # 1. Valid session cookie (WebAuthn or password login)
+    token = request.cookies.get("zb_session")
+    if token:
+        ws = (
+            db.query(WebSession)
+            .filter(
+                WebSession.token == token,
+                WebSession.expires_at > datetime.now(timezone.utc),
+            )
+            .first()
+        )
+        if ws:
+            return
+
+    # 2. Dev mode — no password configured
     if not settings.DASHBOARD_PASSWORD:
         return
-    if credentials is None:
-        raise HTTPException(
-            status_code=401,
-            detail="Authentication required",
-            headers={"WWW-Authenticate": "Basic"},
-        )
-    ok = secrets.compare_digest(
-        credentials.username, settings.DASHBOARD_USERNAME
-    ) and secrets.compare_digest(credentials.password, settings.DASHBOARD_PASSWORD)
-    if not ok:
-        raise HTTPException(
-            status_code=401,
-            detail="Invalid credentials",
-            headers={"WWW-Authenticate": "Basic"},
-        )
+
+    # 3. HTTP Basic Auth (automation / API clients)
+    if credentials is not None:
+        ok = secrets.compare_digest(
+            credentials.username, settings.DASHBOARD_USERNAME
+        ) and secrets.compare_digest(credentials.password, settings.DASHBOARD_PASSWORD)
+        if ok:
+            return
+
+    # 4. Redirect to login page
+    raise HTTPException(
+        status_code=303,
+        headers={"Location": "/login"},
+        detail="Authentication required",
+    )
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -1599,7 +1623,10 @@ def _shell(active: str, content: str, wide: bool = False, refresh: bool = False)
         "<div class='hdr-icon'>&#x1F4C8;</div>"
         "<div><div class='hdr-t'>ZeroBot</div><div class='hdr-s'>Zerodha Algo Trading</div></div>"
         "</div>"
-        "<div class='nav'>" + nav + lut_html + "</div>"
+        "<div class='nav'>" + nav + lut_html
+        + "<a href='/auth/logout' style='margin-left:auto;color:#FF3B30;"
+        "font-size:.78em;padding:10px 14px;text-decoration:none;"
+        "white-space:nowrap;font-weight:500'>Sign Out</a></div>"
         "<div class='" + wrap_cls + "'>" + content + "</div>"
         + lut_js +
         "</body></html>"
@@ -1944,8 +1971,66 @@ async def control_page(
         for e in errors
     ) or "<tr><td colspan='3' style='text-align:center;color:#aaa'>No errors in last 48h</td></tr>"
 
+    # ── Face ID / biometrics card ─────────────────────────────────────────────
+    has_faceid = session.query(WebAuthnCredential).first() is not None
+    fi_pill    = "pg" if has_faceid else "pm"
+    fi_label   = "Active" if has_faceid else "Not set up"
+    fi_btn     = (
+        "<button class='btn bm' onclick='_setupFaceID()' id='_fiBt'>Re-register</button>"
+        if has_faceid else
+        "<button class='btn bp' onclick='_setupFaceID()' id='_fiBt'>Enable Face ID</button>"
+    )
+    faceid_card = (
+        "<div class='card'><div class='ct'>Face ID / Biometrics</div>"
+        f"<div class='mdr'><div class='mdl'>Status&ensp;"
+        f"<span class='pill {fi_pill}'>{fi_label}</span></div>{fi_btn}</div>"
+        "<div id='_fiMsg' style='font-size:.78em;color:#8E8E93;padding:2px 16px 10px;"
+        "display:none'></div></div>"
+    )
+    faceid_js = (
+        "<script>"
+        "function b64(s){s=s.replace(/-/g,'+').replace(/_/g,'/');while(s.length%4)s+='=';"
+        "const b=atob(s),u=new Uint8Array(b.length);"
+        "for(let i=0;i<b.length;i++)u[i]=b.charCodeAt(i);return u.buffer}"
+        "function toB64(buf){const b=new Uint8Array(buf);let s='';"
+        "for(const x of b)s+=String.fromCharCode(x);"
+        "return btoa(s).replace(/\\+/g,'-').replace(/\\//g,'_').replace(/=/g,'')}"
+        "function credJSON(c){const r=c.response,"
+        "j={id:c.id,rawId:toB64(c.rawId),type:c.type,response:{}};"
+        "if(r.clientDataJSON)j.response.clientDataJSON=toB64(r.clientDataJSON);"
+        "if(r.attestationObject)j.response.attestationObject=toB64(r.attestationObject);"
+        "return j}"
+        "async function _setupFaceID(){"
+        "const bt=document.getElementById('_fiBt'),"
+        "msg=document.getElementById('_fiMsg');"
+        "if(bt)bt.disabled=true;"
+        "if(msg){msg.style.display='block';msg.textContent='Starting Face ID setup…'}"
+        "try{"
+        "const or=await fetch('/auth/register-options');"
+        "const opts=await or.json();"
+        "if(opts.error){throw new Error(opts.error)}"
+        "opts.challenge=b64(opts.challenge);"
+        "opts.user.id=b64(opts.user.id);"
+        "if(opts.excludeCredentials)opts.excludeCredentials="
+        "opts.excludeCredentials.map(c=>({...c,id:b64(c.id)}));"
+        "const cred=await navigator.credentials.create({publicKey:opts});"
+        "const rr=await fetch('/auth/register',"
+        "{method:'POST',headers:{'Content-Type':'application/json'},"
+        "body:JSON.stringify(credJSON(cred))});"
+        "const res=await rr.json();"
+        "if(res.ok){"
+        "if(msg){msg.style.color='#248A3D';msg.textContent='✓ Face ID registered successfully!'}"
+        "setTimeout(()=>location.reload(),1200)"
+        "}else{throw new Error(res.error||'Registration failed')}"
+        "}catch(e){"
+        "if(msg){msg.style.color='#D70015';msg.textContent=e.message||'Setup failed'}"
+        "if(bt)bt.disabled=false}}"
+        "</script>"
+    )
+
     body = (
         stop_banner
+        + faceid_card
 
         # risk summary
         + "<div class='card'><div class='ct'>Today's Risk Summary</div>"
@@ -2039,7 +2124,7 @@ async def control_page(
         + "<table><thead><tr><th>Time</th><th>Type</th><th>Message</th></tr></thead><tbody>"
         + errors_html + "</tbody></table></div>"
     )
-    return Response(content=_shell("control", body, refresh=True), media_type="text/html")
+    return Response(content=_shell("control", body + faceid_js, refresh=True), media_type="text/html")
 
 
 @app.post("/control/paper-mode/toggle")
