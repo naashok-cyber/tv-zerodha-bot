@@ -538,6 +538,7 @@ def get_db_session() -> Any:
 
 def _auth_guard(
     request: Request,
+    response: Response,
     credentials: HTTPBasicCredentials | None = Depends(_security),
     settings: Settings = Depends(get_current_settings),
     db: Session = Depends(get_db_session),
@@ -558,14 +559,16 @@ def _auth_guard(
 
     # 2. Dev mode — no password configured
     if not settings.DASHBOARD_PASSWORD:
+        _stamp_session(db, response)
         return
 
-    # 3. HTTP Basic Auth (automation / API clients)
+    # 3. HTTP Basic Auth — issue a session cookie so Face ID setup works immediately
     if credentials is not None:
         ok = secrets.compare_digest(
             credentials.username, settings.DASHBOARD_USERNAME
         ) and secrets.compare_digest(credentials.password, settings.DASHBOARD_PASSWORD)
         if ok:
+            _stamp_session(db, response)
             return
 
     # 4. Redirect to login page
@@ -573,6 +576,23 @@ def _auth_guard(
         status_code=303,
         headers={"Location": "/login"},
         detail="Authentication required",
+    )
+
+
+def _stamp_session(db: Session, response: Response) -> None:
+    """Issue a 12-hour session cookie if the request doesn't already have one."""
+    token = secrets.token_hex(32)
+    expires = datetime.now(timezone.utc) + timedelta(hours=12)
+    db.add(WebSession(token=token, created_at=datetime.now(timezone.utc), expires_at=expires))
+    db.commit()
+    response.set_cookie(
+        key="zb_session",
+        value=token,
+        httponly=True,
+        secure=True,
+        samesite="strict",
+        max_age=12 * 3600,
+        path="/",
     )
 
 
