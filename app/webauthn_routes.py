@@ -1,6 +1,7 @@
 """WebAuthn + password login — Face ID / fingerprint authentication for the PWA."""
 from __future__ import annotations
 
+import base64
 import hmac
 import json
 import secrets
@@ -10,6 +11,8 @@ from threading import Lock
 
 import webauthn
 from webauthn.helpers.structs import (
+    AuthenticatorAssertionResponse,
+    AuthenticatorAttestationResponse,
     AuthenticatorSelectionCriteria,
     AuthenticationCredential,
     PublicKeyCredentialDescriptor,
@@ -27,11 +30,37 @@ from app.storage import WebAuthnCredential, WebSession, get_db_session
 router = APIRouter()
 
 
-def _parse_model(model_cls, body: bytes):
-    """Parse a py_webauthn Pydantic model from JSON bytes — handles v1 and v2 API."""
-    if hasattr(model_cls, "model_validate_json"):
-        return model_cls.model_validate_json(body)
-    return model_cls.parse_raw(body)
+def _b64url(s: str) -> bytes:
+    s = s.replace("-", "+").replace("_", "/")
+    return base64.b64decode(s + "=" * (4 - len(s) % 4) % 4)
+
+
+def _parse_registration_credential(body: bytes) -> RegistrationCredential:
+    d = json.loads(body)
+    r = d["response"]
+    return RegistrationCredential(
+        id=d["id"],
+        raw_id=_b64url(d["rawId"]),
+        response=AuthenticatorAttestationResponse(
+            client_data_json=_b64url(r["clientDataJSON"]),
+            attestation_object=_b64url(r["attestationObject"]),
+        ),
+    )
+
+
+def _parse_authentication_credential(body: bytes) -> AuthenticationCredential:
+    d = json.loads(body)
+    r = d["response"]
+    return AuthenticationCredential(
+        id=d["id"],
+        raw_id=_b64url(d["rawId"]),
+        response=AuthenticatorAssertionResponse(
+            client_data_json=_b64url(r["clientDataJSON"]),
+            authenticator_data=_b64url(r["authenticatorData"]),
+            signature=_b64url(r["signature"]),
+            user_handle=_b64url(r["userHandle"]) if r.get("userHandle") else None,
+        ),
+    )
 
 
 _RP_ID = "naashshla.duckdns.org"
@@ -445,7 +474,7 @@ async def register(
                         status_code=400, media_type="application/json")
     body = await request.body()
     try:
-        cred = _parse_model(RegistrationCredential, body)
+        cred = _parse_registration_credential(body)
         verification = webauthn.verify_registration_response(
             credential=cred,
             expected_challenge=challenge,
@@ -496,7 +525,7 @@ async def authenticate(
                         media_type="application/json")
     body = await request.body()
     try:
-        cred = _parse_model(AuthenticationCredential, body)
+        cred = _parse_authentication_credential(body)
         verification = webauthn.verify_authentication_response(
             credential=cred,
             expected_challenge=challenge,
