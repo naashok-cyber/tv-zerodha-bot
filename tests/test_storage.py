@@ -34,6 +34,8 @@ EXPECTED_TABLES = {
     "strike_decisions",
     "errors",
     "instruments",
+    "webauthn_credentials",
+    "web_sessions",
 }
 
 
