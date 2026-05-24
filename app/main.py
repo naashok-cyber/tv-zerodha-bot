@@ -1326,9 +1326,9 @@ async def healthz(settings: Settings = Depends(get_current_settings)) -> dict:
 # — PWA assets (no auth required) ——————————————————————————————————————————
 
 def _make_icon_png(size: int) -> bytes:
-    """Generate a solid dark-blue PNG icon using only stdlib (no Pillow)."""
+    """Generate a solid Apple-blue PNG icon using only stdlib (no Pillow)."""
     import struct, zlib as _zlib
-    r, g, b = 0x2D, 0x35, 0x61
+    r, g, b = 0x00, 0x7A, 0xFF
     row = bytes([0] + [r, g, b] * size)
     raw = row * size
     compressed = _zlib.compress(raw, 9)
@@ -1348,8 +1348,8 @@ async def pwa_manifest() -> Response:
         "description": "Zerodha Algo Trading Bot",
         "start_url": "/control",
         "display": "standalone",
-        "background_color": "#1a1f3c",
-        "theme_color": "#2d3561",
+        "background_color": "#F2F2F7",
+        "theme_color": "#007AFF",
         "icons": [
             {"src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable"},
             {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable"},
@@ -1396,72 +1396,164 @@ async def service_worker() -> Response:
 
 
 _CSS = (
+    # ── Reset ────────────────────────────────────────────────────────────────
     "*{box-sizing:border-box;margin:0;padding:0}"
-    "body{font-family:'Inter',sans-serif;background:#f0f2f8;color:#2d3436;min-height:100vh}"
-    ".hdr{background:linear-gradient(135deg,#1a1f3c 0%,#2d3561 100%);padding:14px 20px;"
-    "display:flex;align-items:center;gap:10px}"
-    ".hdr-icon{font-size:1.4em}"
-    ".hdr-t{color:#fff;font-size:1.05em;font-weight:700;letter-spacing:.02em}"
-    ".hdr-s{color:rgba(255,255,255,.5);font-size:.72em;margin-top:1px}"
-    ".nav{background:#252b4a;display:flex;padding:0 12px;overflow-x:auto;"
-    "scrollbar-width:none;-ms-overflow-style:none}"
+
+    # ── Base ─────────────────────────────────────────────────────────────────
+    "body{"
+    "font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','Helvetica Neue',Arial,sans-serif;"
+    "background:#F2F2F7;color:#1C1C1E;min-height:100vh;"
+    "-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale"
+    "}"
+
+    # ── Header — frosted glass, sticky ───────────────────────────────────────
+    ".hdr{"
+    "background:rgba(255,255,255,.88);"
+    "backdrop-filter:saturate(180%) blur(20px);"
+    "-webkit-backdrop-filter:saturate(180%) blur(20px);"
+    "border-bottom:.5px solid rgba(0,0,0,.1);"
+    "padding:12px 20px;display:flex;align-items:center;gap:12px;"
+    "position:sticky;top:0;z-index:100"
+    "}"
+    ".hdr-icon{"
+    "width:34px;height:34px;"
+    "background:linear-gradient(145deg,#007AFF,#5856D6);"
+    "border-radius:9px;display:flex;align-items:center;justify-content:center;"
+    "font-size:1.05em;box-shadow:0 2px 8px rgba(0,122,255,.28);flex-shrink:0"
+    "}"
+    ".hdr-t{color:#1C1C1E;font-size:1.02em;font-weight:700;letter-spacing:-.02em}"
+    ".hdr-s{color:#8E8E93;font-size:.72em;margin-top:1px;font-weight:400}"
+
+    # ── Nav — frosted, blue active indicator ─────────────────────────────────
+    ".nav{"
+    "background:rgba(255,255,255,.92);"
+    "backdrop-filter:saturate(180%) blur(20px);"
+    "-webkit-backdrop-filter:saturate(180%) blur(20px);"
+    "display:flex;padding:0 6px;"
+    "border-bottom:.5px solid rgba(0,0,0,.08);"
+    "overflow-x:auto;scrollbar-width:none;-ms-overflow-style:none"
+    "}"
     ".nav::-webkit-scrollbar{display:none}"
-    ".nav a{color:rgba(255,255,255,.5);text-decoration:none;padding:10px 15px;font-size:.8em;"
-    "font-weight:500;border-bottom:3px solid transparent;transition:all .2s;white-space:nowrap}"
-    ".nav a:hover{color:#fff}"
-    ".nav a.on{color:#a78bfa;border-bottom-color:#a78bfa}"
+    ".nav a{"
+    "color:#636366;text-decoration:none;padding:10px 14px;"
+    "font-size:.8em;font-weight:500;"
+    "border-bottom:2px solid transparent;"
+    "transition:color .2s,border-color .2s;"
+    "white-space:nowrap;letter-spacing:-.01em"
+    "}"
+    ".nav a:hover{color:#007AFF}"
+    ".nav a.on{color:#007AFF;border-bottom-color:#007AFF;font-weight:600}"
+
+    # ── Layout ────────────────────────────────────────────────────────────────
     ".wrap{padding:16px;margin:0 auto}"
     ".wrap-sm{max-width:560px}.wrap-lg{max-width:960px}"
-    ".card{background:#fff;border-radius:12px;padding:16px 18px;margin-bottom:14px;"
-    "box-shadow:0 2px 10px rgba(0,0,0,.06)}"
-    ".ct{font-size:.68em;font-weight:700;text-transform:uppercase;letter-spacing:.09em;"
-    "color:#8492a6;margin-bottom:12px;display:flex;align-items:center;gap:6px}"
-    ".ct::before{content:'';display:block;width:3px;height:13px;border-radius:2px;background:#6c5ce7}"
-    ".pill{display:inline-block;padding:3px 10px;border-radius:20px;font-size:.73em;font-weight:700;letter-spacing:.02em}"
-    ".pg{background:#e8faf5;color:#00875a}.pr{background:#fff0ed;color:#c0392b}"
-    ".pa{background:#fff8e1;color:#b7791f}.pb{background:#eef2ff;color:#4c51bf}"
-    ".pm{background:#f0f2f8;color:#636e72}.pp{background:#f3f0ff;color:#6c5ce7}"
-    ".mr{display:flex;align-items:center;gap:10px;margin:8px 0}"
-    ".ml{font-size:.78em;color:#8492a6;width:130px;flex-shrink:0}"
-    ".mw{flex:1;height:5px;background:#e8ecf0;border-radius:3px;overflow:hidden}"
-    ".mb{height:100%;border-radius:3px;transition:width .4s}"
-    ".mv{font-size:.78em;font-weight:700;min-width:90px;text-align:right}"
-    ".ok{color:#00b894}.wn{color:#f0a500}.bd{color:#e17055}"
-    ".bok{background:#00b894}.bwn{background:#f0a500}.bbd{background:#e17055}"
-    ".mdr{display:flex;align-items:center;justify-content:space-between;"
-    "padding:9px 0;border-bottom:1px solid #f5f6fa}"
+
+    # ── Cards — iOS grouped list style ───────────────────────────────────────
+    ".card{"
+    "background:#fff;border-radius:12px;margin-bottom:16px;"
+    "overflow:hidden;"
+    "box-shadow:0 1px 3px rgba(0,0,0,.07),0 1px 2px rgba(0,0,0,.04)"
+    "}"
+
+    # ── Card section header ───────────────────────────────────────────────────
+    ".ct{"
+    "font-size:.68em;font-weight:600;text-transform:uppercase;letter-spacing:.08em;"
+    "color:#8E8E93;padding:12px 16px 10px;"
+    "border-bottom:.5px solid rgba(0,0,0,.06);"
+    "display:flex;align-items:center;gap:6px"
+    "}"
+    ".ct::before{content:'';display:block;width:3px;height:12px;border-radius:2px;background:#007AFF}"
+
+    # ── Status pills ──────────────────────────────────────────────────────────
+    ".pill{"
+    "display:inline-flex;align-items:center;"
+    "padding:3px 9px;border-radius:20px;"
+    "font-size:.72em;font-weight:600;letter-spacing:.01em"
+    "}"
+    ".pg{background:rgba(52,199,89,.12);color:#248A3D}"
+    ".pr{background:rgba(255,59,48,.12);color:#D70015}"
+    ".pa{background:rgba(255,149,0,.12);color:#C93400}"
+    ".pb{background:rgba(0,122,255,.1);color:#0040DD}"
+    ".pm{background:rgba(142,142,147,.12);color:#636366}"
+    ".pp{background:rgba(88,86,214,.1);color:#3634A3}"
+
+    # ── Progress bar rows ─────────────────────────────────────────────────────
+    ".mr{display:flex;align-items:center;gap:10px;padding:11px 16px;border-bottom:.5px solid rgba(0,0,0,.05)}"
+    ".mr:last-of-type{border-bottom:none}"
+    ".ml{font-size:.78em;color:#636366;width:130px;flex-shrink:0;font-weight:500}"
+    ".mw{flex:1;height:6px;background:#E5E5EA;border-radius:3px;overflow:hidden}"
+    ".mb{height:100%;border-radius:3px;transition:width .5s cubic-bezier(.25,.46,.45,.94)}"
+    ".mv{font-size:.78em;font-weight:700;min-width:95px;text-align:right;font-variant-numeric:tabular-nums}"
+
+    # ── Value colours ─────────────────────────────────────────────────────────
+    ".ok{color:#248A3D}.wn{color:#C93400}.bd{color:#D70015}"
+    ".bok{background:#34C759}.bwn{background:#FF9500}.bbd{background:#FF3B30}"
+
+    # ── Settings rows (iOS-style) ─────────────────────────────────────────────
+    ".mdr{"
+    "display:flex;align-items:center;justify-content:space-between;"
+    "padding:12px 16px;border-bottom:.5px solid rgba(0,0,0,.06)"
+    "}"
     ".mdr:last-of-type{border-bottom:none}"
-    ".mdl{font-size:.82em;color:#444;font-weight:500;display:flex;align-items:center;gap:8px}"
-    ".btn{padding:8px 16px;border:none;border-radius:8px;font-size:.8em;font-weight:700;"
-    "cursor:pointer;transition:opacity .15s,transform .1s;color:#fff;"
-    "font-family:'Inter',sans-serif;letter-spacing:.02em}"
-    ".btn:active{transform:scale(.97)}.btn:hover{opacity:.88}"
-    ".bn{background:linear-gradient(135deg,#2d3561,#1a1f3c)}"
-    ".bg2{background:linear-gradient(135deg,#00cba1,#00b894)}"
-    ".br2{background:linear-gradient(135deg,#ff6b6b,#e17055)}"
-    ".ba{background:linear-gradient(135deg,#ffd93d,#f0a500);color:#333}"
-    ".bp{background:linear-gradient(135deg,#a78bfa,#6c5ce7)}"
-    ".bm{background:#b2bec3}"
-    ".bfull{display:block;width:100%;padding:13px;font-size:.9em;margin:5px 0;text-align:center}"
-    ".sbanner{background:linear-gradient(135deg,#e17055,#c0392b);color:#fff;"
-    "padding:12px 16px;border-radius:10px;font-weight:700;text-align:center;"
-    "margin-bottom:14px;font-size:.88em;letter-spacing:.02em;"
-    "box-shadow:0 4px 14px rgba(225,112,85,.4)}"
-    ".pr2{display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid #f5f6fa}"
+    ".mdl{font-size:.84em;color:#1C1C1E;font-weight:500;display:flex;align-items:center;gap:8px}"
+
+    # ── Buttons ───────────────────────────────────────────────────────────────
+    ".btn{"
+    "padding:8px 16px;border:none;border-radius:8px;"
+    "font-size:.79em;font-weight:600;cursor:pointer;"
+    "transition:opacity .15s,transform .1s;color:#fff;"
+    "font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','Helvetica Neue',Arial,sans-serif;"
+    "letter-spacing:-.01em;display:inline-flex;align-items:center;justify-content:center"
+    "}"
+    ".btn:active{transform:scale(.96)}"
+    ".btn:hover{opacity:.88}"
+    ".bn{background:#1C1C1E}"
+    ".bg2{background:#34C759}"
+    ".br2{background:#FF3B30}"
+    ".ba{background:#FF9500}"
+    ".bp{background:#007AFF}"
+    ".bm{background:#E5E5EA;color:#3A3A3C}"
+    ".bfull{"
+    "display:block;width:calc(100% - 32px);margin:12px 16px 16px;"
+    "padding:14px;font-size:.9em;text-align:center;border-radius:10px"
+    "}"
+
+    # ── Emergency stop banner ─────────────────────────────────────────────────
+    ".sbanner{"
+    "background:linear-gradient(135deg,#FF3B30,#D70015);"
+    "color:#fff;padding:14px 16px;border-radius:12px;"
+    "font-weight:700;text-align:center;"
+    "margin-bottom:16px;font-size:.88em;letter-spacing:.01em;"
+    "box-shadow:0 4px 16px rgba(255,59,48,.35)"
+    "}"
+
+    # ── Risk param rows ───────────────────────────────────────────────────────
+    ".pr2{display:flex;align-items:center;gap:8px;padding:10px 16px;border-bottom:.5px solid rgba(0,0,0,.05)}"
     ".pr2:last-of-type{border-bottom:none}"
-    ".pl{flex:1;font-size:.8em;color:#555}"
-    ".pi{width:86px;padding:7px 8px;border:1.5px solid #e0e7ef;border-radius:7px;"
-    "font-size:.84em;text-align:right;font-family:'Inter',sans-serif;transition:border-color .2s}"
-    ".pi:focus{outline:none;border-color:#6c5ce7;box-shadow:0 0 0 3px rgba(108,92,231,.12)}"
-    ".pu{font-size:.74em;color:#aaa;width:22px}"
-    ".od{display:inline-block;width:6px;height:6px;border-radius:50%;"
-    "background:#f0a500;margin-left:4px;vertical-align:middle}"
+    ".pl{flex:1;font-size:.82em;color:#3A3A3C;font-weight:500}"
+    ".pi{"
+    "width:90px;padding:7px 10px;"
+    "border:1px solid #E5E5EA;border-radius:8px;"
+    "font-size:.84em;text-align:right;background:#F9F9F9;color:#1C1C1E;"
+    "font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','Helvetica Neue',Arial,sans-serif;"
+    "transition:border-color .2s,box-shadow .2s"
+    "}"
+    ".pi:focus{outline:none;border-color:#007AFF;background:#fff;box-shadow:0 0 0 3px rgba(0,122,255,.15)}"
+    ".pu{font-size:.74em;color:#8E8E93;width:26px;text-align:left}"
+
+    # ── Override dot ──────────────────────────────────────────────────────────
+    ".od{display:inline-block;width:6px;height:6px;border-radius:50%;background:#FF9500;margin-left:4px;vertical-align:middle}"
+
+    # ── Tables ────────────────────────────────────────────────────────────────
     "table{width:100%;border-collapse:collapse}"
-    "th{font-size:.68em;font-weight:700;text-transform:uppercase;letter-spacing:.07em;"
-    "color:#8492a6;padding:9px 10px;border-bottom:2px solid #f0f2f8;background:#fafbff;text-align:left}"
-    "td{padding:9px 10px;font-size:.81em;border-bottom:1px solid #f5f6fa}"
+    "th{"
+    "font-size:.68em;font-weight:600;text-transform:uppercase;letter-spacing:.07em;"
+    "color:#8E8E93;padding:10px 14px;"
+    "border-bottom:.5px solid rgba(0,0,0,.08);background:#FAFAFA;text-align:left"
+    "}"
+    "td{padding:10px 14px;font-size:.82em;border-bottom:.5px solid rgba(0,0,0,.05);color:#1C1C1E}"
     "tr:last-child td{border-bottom:none}"
-    "tbody tr:hover td{background:#fafbff}"
+    "tbody tr:hover td{background:#F9F9FB}"
     ".tc{text-align:center}.tr{text-align:right}"
 )
 
@@ -1495,12 +1587,11 @@ def _shell(active: str, content: str, wide: bool = False, refresh: bool = False)
         "<title>ZeroBot</title>"
         + refresh_meta +
         "<link rel='manifest' href='/manifest.json'>"
-        "<meta name='theme-color' content='#2d3561'>"
+        "<meta name='theme-color' content='#007AFF'>"
         "<meta name='apple-mobile-web-app-capable' content='yes'>"
-        "<meta name='apple-mobile-web-app-status-bar-style' content='black-translucent'>"
+        "<meta name='apple-mobile-web-app-status-bar-style' content='default'>"
         "<meta name='apple-mobile-web-app-title' content='ZeroBot'>"
         "<link rel='apple-touch-icon' href='/icon-192.png'>"
-        "<link href='https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;display=swap' rel='stylesheet'>"
         "<style>" + _CSS + "</style>"
         "<script>if('serviceWorker' in navigator)navigator.serviceWorker.register('/sw.js')</script>"
         "</head><body>"
@@ -1938,7 +2029,7 @@ async def control_page(
         + f"<div class='pr2'><div class='pl'>Consec. losses limit{src_val('consecutive_losses_limit', eff_consec_limit, settings.CONSECUTIVE_LOSSES_LIMIT)}</div>"
         + f"<input class='pi' type='number' name='consecutive_losses_limit' value='{eff_consec_limit}' min='1' max='20' step='1'>"
         + "<div class='pu'>losses</div></div>"
-        + "<div style='display:flex;gap:8px;margin-top:12px'>"
+        + "<div style='display:flex;gap:8px;padding:12px 16px 16px'>"
         + "<button class='btn bp' type='submit' style='flex:1'>Apply</button>"
         + "<button class='btn bm' type='submit' name='reset' value='1' style='flex:1'>Reset to defaults</button>"
         + "</div></form></div>"
