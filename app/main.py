@@ -1420,7 +1420,7 @@ async def icon_512() -> Response:
 
 
 _SW_JS = (
-    "const CACHE='zerobot-v1';"
+    "const CACHE='zerobot-v3';"
     "const SHELL=['/control','/orders','/gtts','/history','/dashboard'];"
     "self.addEventListener('install',e=>{"
     "e.waitUntil(caches.open(CACHE).then(c=>c.addAll(SHELL).catch(()=>{})));"
