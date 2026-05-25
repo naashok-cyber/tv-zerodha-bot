@@ -87,12 +87,14 @@ def _build_summary(entry: dict) -> str:
     action_type = entry.get("action_type", "entry")
     uncertain   = entry.get("_uncertain_fields", [])
 
+    lp         = entry.get("_limit_price")
     if action_type in ("exit_all", "square_off"):
         summary = f"EXIT ALL {underlying} positions — are you sure?"
     else:
         strike_str = f"strike {int(strike)}" if strike else "ATM (delta 0.65 — assumed)"
         opt_str    = f"{opt_type} " if opt_type else ""
-        summary    = f"You want to {action} {qty} lot(s) of {underlying} {opt_str}[{strike_str}] — confirm?"
+        lp_str     = f" @ ₹{float(lp):.2f} limit" if lp else ""
+        summary    = f"You want to {action} {qty} lot(s) of {underlying} {opt_str}[{strike_str}]{lp_str} — confirm?"
 
     notes = []
     if strike is None and action_type == "entry":
@@ -115,6 +117,7 @@ async def transcribe(
     request: Request,
     token: str = Depends(verify_voice_token),
     settings=Depends(_voice_settings),
+    db: Session = Depends(get_db_session),
 ) -> JSONResponse:
     _gate_channel()
 
@@ -233,6 +236,47 @@ async def transcribe(
             detail=f"Duplicate voice command (identical within {VOICE_DEDUP_SECONDS}s). Wait and retry.",
         )
 
+    # ── Straddle pre-confirmation validation ──────────────────────────────────
+    straddle_sv = None
+    straddle_report = None
+    straddle_spread_warn = False
+    if action_type == "straddle_short":
+        from app.voice.straddle import validate_straddle, build_validation_report
+        import app.state as _st
+        try:
+            from app.kite_session import get_session_manager as _ksm
+            _kite = _ksm().get_kite() if not _st.SESSION_INVALID else None
+        except Exception:
+            _kite = None
+
+        if _kite is not None:
+            try:
+                straddle_sv = validate_straddle(
+                    underlying, quantity, _kite, db, settings,
+                    now=datetime.now(_IST),
+                )
+                straddle_report = build_validation_report(straddle_sv)
+                straddle_spread_warn = not straddle_sv.spread_ok
+
+                # Hard-block on margin insufficiency — cannot force-override this
+                if not straddle_sv.margin_ok:
+                    audit.warning(
+                        f"STRADDLE_MARGIN_BLOCK ip:{source_ip} "
+                        f"underlying:{underlying} reason:{straddle_sv.block_reason}"
+                    )
+                    raise HTTPException(status_code=400, detail=straddle_sv.block_reason)
+
+            except HTTPException:
+                raise
+            except RuntimeError as exc:
+                audit.error(f"STRADDLE_VALIDATE_FAIL ip:{source_ip} error:{exc}")
+                raise HTTPException(status_code=400, detail=f"Straddle validation failed: {exc}")
+            except Exception as exc:
+                audit.error(f"STRADDLE_VALIDATE_ERROR ip:{source_ip} error:{exc}")
+                straddle_report = f"⚠ Validation unavailable ({exc}) — review manually"
+        else:
+            straddle_report = "⚠ Not logged in to broker — live spread/margin check skipped"
+
     conf_token     = str(uuid.uuid4())
     low_confidence = confidence < 0.85
     is_exit        = action_type in ("exit_all", "square_off")
@@ -248,7 +292,19 @@ async def transcribe(
         "_confirm_step"     : 1,
         "_option_type"      : nlu.get("option_type"),
         "_strike"           : nlu.get("strike"),
+        "_limit_price"      : nlu.get("limit_price"),
         "_uncertain_fields" : nlu.get("uncertain_fields", []),
+        # Straddle-specific (populated below when action_type == "straddle_short")
+        "_straddle_ce_symbol"   : straddle_sv.ce.tradingsymbol if straddle_sv else None,
+        "_straddle_pe_symbol"   : straddle_sv.pe.tradingsymbol if straddle_sv else None,
+        "_straddle_atm_strike"  : straddle_sv.atm_strike if straddle_sv else None,
+        "_straddle_expiry"      : str(straddle_sv.expiry) if straddle_sv else None,
+        "_straddle_lot_size"    : straddle_sv.lot_size if straddle_sv else None,
+        "_straddle_lot_units"   : straddle_sv.lot_units if straddle_sv else None,
+        "_straddle_net_credit"  : straddle_sv.net_credit_per_lot if straddle_sv else None,
+        "_straddle_est_sl"      : straddle_sv.estimated_sl_per_lot if straddle_sv else None,
+        "_straddle_all_ok"      : straddle_sv.all_ok if straddle_sv else None,
+        "_straddle_force_spread": False,
         "action_type"       : action_type,
         "action"            : action,
         "underlying"        : underlying,
@@ -263,6 +319,28 @@ async def transcribe(
     }
     store.store(conf_token, pending_entry)
     summary = _build_summary(pending_entry)
+
+    # Estimated SL / target for the confirmation card (display only — not enforced here)
+    nlu_lp = nlu.get("limit_price")
+    estimated_sl = estimated_target = None
+    if nlu_lp is not None and action_type == "entry":
+        lp_f = float(nlu_lp)
+        rr   = settings.RR_RATIO
+        is_ng = underlying.upper() in [n.upper() for n in settings.NATURAL_GAS_NAMES]
+        if is_ng:
+            sl_frac = settings.FUTURES_SL_PCT
+            sl_dist = lp_f * sl_frac
+            if action == "BUY":
+                estimated_sl     = round(lp_f - sl_dist, 2)
+                estimated_target = round(lp_f + rr * sl_dist, 2)
+            else:
+                estimated_sl     = round(lp_f + sl_dist, 2)
+                estimated_target = round(lp_f - rr * sl_dist, 2)
+        else:
+            sl_frac          = settings.SL_PREMIUM_PCT
+            sl_dist          = lp_f * sl_frac
+            estimated_sl     = round(lp_f - sl_dist, 2)
+            estimated_target = round(lp_f + rr * sl_dist, 2)
 
     audit.info(
         f"PENDING token:{conf_token} ip:{source_ip} action:{action} "
@@ -298,6 +376,11 @@ async def transcribe(
         "low_confidence"          : low_confidence,
         "double_confirm_required" : is_exit,
         "expires_in_seconds"      : CONFIRM_TTL_SECONDS,
+        "limit_price"             : nlu_lp,
+        "estimated_sl"            : estimated_sl,
+        "estimated_target"        : estimated_target,
+        "straddle_report"         : straddle_report,
+        "straddle_spread_warn"    : straddle_spread_warn,
     })
 
 
@@ -319,9 +402,10 @@ async def confirm(
     audit    = get_audit_logger()
     source_ip = request.headers.get("X-Forwarded-For", request.client.host if request.client else "unknown")
 
-    body     = await request.json()
-    conf_tok = body.get("confirmation_token", "")
-    approved = bool(body.get("approved", False))
+    body         = await request.json()
+    conf_tok     = body.get("confirmation_token", "")
+    approved     = bool(body.get("approved", False))
+    force_spread = bool(body.get("force_spread", False))
 
     if not conf_tok:
         raise HTTPException(status_code=400, detail="confirmation_token required")
@@ -387,11 +471,17 @@ async def confirm(
     # All gates passed — execute
     store.pop(conf_tok)
 
-    from app.voice.executor import execute_voice_entry, execute_voice_exit
+    from app.voice.executor import execute_voice_entry, execute_voice_exit, execute_voice_straddle
 
     try:
         if action_type in ("exit_all", "square_off"):
             result, status_code = execute_voice_exit(underlying, db, settings)
+        elif action_type == "straddle_short":
+            if force_spread:
+                entry["_straddle_force_spread"] = True
+            result, status_code = execute_voice_straddle(
+                entry, conf_tok, background_tasks, db, settings
+            )
         else:
             result, status_code = execute_voice_entry(
                 entry, conf_tok, background_tasks, db, settings

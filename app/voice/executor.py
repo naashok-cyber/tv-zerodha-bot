@@ -61,11 +61,13 @@ def execute_voice_entry(
     db.commit()
     db.refresh(alert)
 
+    limit_price_val = order.get("limit_price")
     payload = AlertPayload(
         symbol=order["underlying"],
         action=order["action"],
         instrument_type="OPTIONS",
         price=Decimal("0.01"),  # placeholder; not used in options strike selection
+        limit_price=Decimal(str(limit_price_val)) if limit_price_val else None,
         timeframe="voice",
         alert_id=ikey,
         timestamp=now,
@@ -77,6 +79,54 @@ def execute_voice_entry(
         conf_token[:8], alert.id, order["underlying"], order["action"],
     )
     return {"status": "queued", "alert_id": alert.id, "source": "voice_manual"}, 202
+
+
+def execute_voice_straddle(
+    order: dict,
+    conf_token: str,
+    background_tasks: Any,
+    db: Any,
+    settings: Any,
+) -> tuple[dict, int]:
+    """Queue a short straddle through _process_straddle (background)."""
+    from app.main import _process_straddle  # late import — avoids circular dep
+    from app.storage import Alert
+    from app.config import IST
+
+    now = datetime.now(IST)
+    ikey = str(uuid.uuid4())
+
+    underlying = order.get("underlying", "NATURALGAS")
+    alert = Alert(
+        received_at=now,
+        strategy_id=f"straddle_{conf_token[:8]}",
+        tv_ticker=underlying,
+        tv_exchange=order.get("exchange", "MCX"),
+        action="STRADDLE_SHORT",
+        order_type=None,
+        entry_price=0.0,
+        stop_loss=None,
+        sl_percent=None,
+        atr=None,
+        quantity_hint=int(order.get("quantity", 1)),
+        product="NRML",
+        tv_time=now.isoformat(),
+        bar_time=None,
+        interval="voice",
+        idempotency_key=ikey,
+        raw_payload=json.dumps({k: v for k, v in order.items() if not k.startswith("_")}),
+        processed=False,
+    )
+    db.add(alert)
+    db.commit()
+    db.refresh(alert)
+
+    background_tasks.add_task(_process_straddle, alert.id, dict(order), settings)
+    log.info(
+        "straddle queued: token=%s alert_id=%d underlying=%s qty=%d",
+        conf_token[:8], alert.id, underlying, int(order.get("quantity", 1)),
+    )
+    return {"status": "queued", "alert_id": alert.id, "source": "straddle_short"}, 202
 
 
 def execute_voice_exit(

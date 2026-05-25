@@ -190,6 +190,14 @@ class Settings(BaseSettings):
     BACKOFF_MAX_TRIES: int = 5
     BACKOFF_INITIAL_WAIT_SECS: float = 1.0
 
+    # ── Straddle ──────────────────────────────────────────────────────────────
+    STRADDLE_STRIKE_INTERVAL: float = 2.5       # MCX NG option strike spacing (points)
+    STRADDLE_MAX_SPREAD_PCT: float = 1.0        # max bid-ask spread % per leg (1% default)
+    STRADDLE_SL_MULTIPLIER: float = 1.5         # combined SL = net_credit × this
+    STRADDLE_PER_LEG_SL_MULTIPLIER: float = 3.0 # per-leg hard SL = entry_premium × this
+    STRADDLE_FILL_TIMEOUT_SECS: int = 5         # seconds to wait for concurrent leg fills
+    STRADDLE_DELTA_TOLERANCE: float = 0.15      # ATM sanity: expect |delta| in 0.35–0.65
+
     # ── Voice channel ──────────────────────────────────────────────────────────
     VOICE_AUTH_TOKEN: str = ""          # Required; 401 if empty or wrong
     ADMIN_AUTH_TOKEN: str = ""          # Required; 401 if empty or wrong
@@ -199,9 +207,10 @@ class Settings(BaseSettings):
     VOICE_ALLOWED_INSTRUMENTS: list[str] = [
         "NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX",
         "CRUDEOIL", "CRUDEOILM", "GOLD", "SILVER",
+        "NATURALGAS", "NATGASMINI",
     ]
     VOICE_NFO_INSTRUMENTS: list[str] = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"]
-    VOICE_MCX_INSTRUMENTS: list[str] = ["CRUDEOIL", "CRUDEOILM", "GOLD", "SILVER"]
+    VOICE_MCX_INSTRUMENTS: list[str] = ["CRUDEOIL", "CRUDEOILM", "GOLD", "SILVER", "NATURALGAS", "NATGASMINI"]
     VOICE_MAX_LOTS: int = 5
     VOICE_CONFIRM_TTL_SECONDS: int = 60
     VOICE_DEDUP_SECONDS: int = 10

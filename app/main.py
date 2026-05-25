@@ -200,7 +200,13 @@ def _on_entry_filled(event: EntryFilledEvent) -> None:
                 sl_price = fill_price + sl_distance
                 target_price = fill_price - target_distance
         else:  # CE / PE options
-            sl_pct = state.get_sl_pct(settings.SL_PREMIUM_PCT)
+            # Straddle legs use a wider per-leg SL (default 3× entry premium)
+            # to avoid premature exits from normal vol spikes.  Non-straddle
+            # legs use the standard SL_PREMIUM_PCT.
+            if meta.get("straddle_id") and entry_side == "SELL":
+                sl_pct = settings.STRADDLE_PER_LEG_SL_MULTIPLIER - 1.0
+            else:
+                sl_pct = state.get_sl_pct(settings.SL_PREMIUM_PCT)
             sl_risk_pct = fill_price * sl_pct          # percentage-based SL distance
             qty = event.fill_qty
 
@@ -449,6 +455,222 @@ def _on_gtt_filled(event: GttFilledEvent) -> None:
         _trailing_manager.unregister(_instr_token)
         if _watcher is not None:
             _watcher.unsubscribe([_instr_token])
+
+
+# ── Short straddle executor ───────────────────────────────────────────────────
+
+def _process_straddle(alert_id: int, entry_data: dict, settings: Settings) -> None:
+    """Place a short straddle: SELL CE + SELL PE simultaneously on MCX Natural Gas.
+
+    Called as a BackgroundTask from execute_voice_straddle().  Uses
+    ThreadPoolExecutor so both legs hit the exchange at the same instant.
+    _on_entry_filled handles GTT OCO placement per leg once fills arrive.
+    """
+    import uuid as _uuid
+    from concurrent.futures import ThreadPoolExecutor
+
+    if _SessionFactory is None:
+        log.error("_process_straddle: _SessionFactory is None")
+        return
+
+    with _SessionFactory() as session:
+        alert = session.get(Alert, alert_id)
+        if alert is None:
+            log.error("_process_straddle: Alert %d not found", alert_id)
+            return
+
+        now = datetime.now(IST)
+        dry = _dry_run(settings)
+        product = settings.PRODUCT_TYPE.value
+
+        # Risk gates (straddle needs 2 new positions)
+        ok, reason = _check_risk_guards(session, settings)
+        if not ok:
+            log.warning("_process_straddle %d blocked: %s", alert_id, reason)
+            alert.processed = True
+            session.commit()
+            return
+
+        current_pos = _open_position_count(session)
+        eff_max_pos = state.get_max_open_positions(settings.MAX_OPEN_POSITIONS)
+        if current_pos + 2 > eff_max_pos:
+            log.warning(
+                "_process_straddle %d blocked: would open 2 positions "
+                "(current=%d max=%d)", alert_id, current_pos, eff_max_pos,
+            )
+            alert.processed = True
+            session.commit()
+            return
+
+        # Resolve instrument rows from symbols stored in pending_entry
+        ce_sym = entry_data.get("_straddle_ce_symbol", "")
+        pe_sym = entry_data.get("_straddle_pe_symbol", "")
+        if not ce_sym or not pe_sym:
+            log.error("_process_straddle %d: missing CE/PE symbols in entry_data", alert_id)
+            alert.processed = True
+            session.commit()
+            return
+
+        ce_instr = (
+            session.query(Instrument)
+            .filter(Instrument.tradingsymbol == ce_sym, Instrument.exchange == "MCX")
+            .first()
+        )
+        pe_instr = (
+            session.query(Instrument)
+            .filter(Instrument.tradingsymbol == pe_sym, Instrument.exchange == "MCX")
+            .first()
+        )
+        if ce_instr is None or pe_instr is None:
+            log.error(
+                "_process_straddle %d: instrument(s) not found CE=%s PE=%s",
+                alert_id, ce_sym, pe_sym,
+            )
+            alert.processed = True
+            session.commit()
+            return
+
+        quantity  = int(entry_data.get("quantity", 1))
+        total_qty = ce_instr.lot_size * quantity
+        underlying = entry_data.get("underlying", ce_instr.name)
+        force_spread = bool(entry_data.get("_straddle_force_spread", False))
+
+        # Execution-time re-validation (spread only; margin already checked at transcribe)
+        if not dry and not force_spread:
+            try:
+                from app.voice.straddle import validate_straddle
+                _kite_check = get_session_manager().get_kite()
+                _sv = validate_straddle(underlying, quantity, _kite_check, session, settings, now)
+                if not _sv.margin_ok:
+                    log.error(
+                        "_process_straddle %d: margin now insufficient at execution (%s) — aborting",
+                        alert_id, _sv.block_reason,
+                    )
+                    alert.processed = True
+                    session.commit()
+                    return
+                if not _sv.spread_ok:
+                    log.warning(
+                        "_process_straddle %d: spread deteriorated at execution (%s) — proceeding (force)",
+                        alert_id, _sv.block_reason,
+                    )
+            except Exception as exc:
+                log.warning("_process_straddle %d: re-validation skipped (%s)", alert_id, exc)
+
+        # Place both legs concurrently
+        ce_kite_id = pe_kite_id = None
+        ce_err = pe_err = None
+
+        if not dry:
+            kite_client = get_session_manager().get_kite()
+            timeout = settings.STRADDLE_FILL_TIMEOUT_SECS
+
+            def _place(instr):
+                return place_entry(kite_client, instr, "SELL", total_qty, "MARKET", product)
+
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                fut_ce = pool.submit(_place, ce_instr)
+                fut_pe = pool.submit(_place, pe_instr)
+                try:
+                    ce_kite_id = fut_ce.result(timeout=timeout)
+                except Exception as exc:
+                    ce_err = str(exc)
+                    log.error("_process_straddle %d: CE placement failed: %s", alert_id, exc)
+                try:
+                    pe_kite_id = fut_pe.result(timeout=timeout)
+                except Exception as exc:
+                    pe_err = str(exc)
+                    log.error("_process_straddle %d: PE placement failed: %s", alert_id, exc)
+
+            # Partial fill compensation: cancel the filled leg if the other failed
+            if ce_kite_id and not pe_kite_id:
+                log.error(
+                    "_process_straddle %d: CE filled but PE failed (%s) — cancelling CE %s",
+                    alert_id, pe_err, ce_kite_id,
+                )
+                try:
+                    kite_client.cancel_order(variety="regular", order_id=ce_kite_id)
+                except Exception as exc:
+                    log.error(
+                        "_process_straddle %d: CRITICAL — cannot cancel CE %s: %s "
+                        "— MANUAL INTERVENTION REQUIRED", alert_id, ce_kite_id, exc,
+                    )
+                alert.processed = True
+                session.commit()
+                return
+
+            if pe_kite_id and not ce_kite_id:
+                log.error(
+                    "_process_straddle %d: PE filled but CE failed (%s) — cancelling PE %s",
+                    alert_id, ce_err, pe_kite_id,
+                )
+                try:
+                    kite_client.cancel_order(variety="regular", order_id=pe_kite_id)
+                except Exception as exc:
+                    log.error(
+                        "_process_straddle %d: CRITICAL — cannot cancel PE %s: %s "
+                        "— MANUAL INTERVENTION REQUIRED", alert_id, pe_kite_id, exc,
+                    )
+                alert.processed = True
+                session.commit()
+                return
+        else:
+            log.info(
+                "_process_straddle %d DRY_RUN — would SELL %s + SELL %s qty=%d product=%s",
+                alert_id, ce_sym, pe_sym, total_qty, product,
+            )
+
+        # Shared straddle_id links the two Order rows for combined P&L queries
+        straddle_id = str(_uuid.uuid4())
+
+        for kite_oid, instr_type in [(ce_kite_id, "CE"), (pe_kite_id, "PE")]:
+            if kite_oid:
+                _pending_order_meta[kite_oid] = {
+                    "instrument_type": instr_type,
+                    "entry_side": "SELL",
+                    "underlying": underlying,
+                    "straddle_id": straddle_id,
+                    "dry_run": False,
+                }
+
+        now2 = datetime.now(IST)
+        status = "PENDING" if not dry else "DRY_RUN"
+        for kite_oid, sym, instr in [
+            (ce_kite_id, ce_sym, ce_instr),
+            (pe_kite_id, pe_sym, pe_instr),
+        ]:
+            o = Order(
+                alert_id=alert_id,
+                kite_order_id=kite_oid,
+                variety="regular",
+                exchange="MCX",
+                tradingsymbol=sym,
+                transaction_type="SELL",
+                order_type="MARKET",
+                product=product,
+                quantity=total_qty,
+                status=status,
+                placed_at=now2,
+                updated_at=now2,
+                dry_run=dry,
+                straddle_id=straddle_id,
+            )
+            session.add(o)
+
+        alert.processed = True
+        session.commit()
+
+        if not dry and _watcher is not None:
+            for kite_oid in [ce_kite_id, pe_kite_id]:
+                if kite_oid:
+                    _watcher.watch_order(kite_oid, kite_fetcher=get_session_manager().get_kite)
+        elif not dry and _watcher is None:
+            log.error("_process_straddle %d: _watcher is None — GTTs will NOT be placed", alert_id)
+
+        log.info(
+            "_process_straddle %d complete: straddle_id=%s CE=%s PE=%s dry=%s",
+            alert_id, straddle_id[:8], ce_kite_id, pe_kite_id, dry,
+        )
 
 
 # ── Lifespan ──────────────────────────────────────────────────────────────────
@@ -795,10 +1017,12 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
             qty = min(qty, state.get_max_lots(settings.MAX_LOTS_PER_TRADE) * fut_instr.lot_size)
 
             ng_side = "BUY" if alert_data.action == "BUY" else "SELL"
+            _ng_lp  = alert_data.limit_price
+            _ng_ot  = "LIMIT" if _ng_lp else "MARKET"
             kite_order_id = None
             if not _dry_run(settings):
                 kite_client = get_session_manager().get_kite()
-                kite_order_id = place_entry(kite_client, fut_instr, ng_side, qty, "MARKET", product)
+                kite_order_id = place_entry(kite_client, fut_instr, ng_side, qty, _ng_ot, product, price=_ng_lp)
                 if kite_order_id:
                     _pending_order_meta[kite_order_id] = {
                         "instrument_type": "FUT",
@@ -808,8 +1032,8 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
                     }
             else:
                 log.info(
-                    "Alert %d: DRY_RUN — would place MARKET %s %d lots %s (sl_dist=%.4f)",
-                    alert_id, ng_side, qty // fut_instr.lot_size, fut_instr.tradingsymbol, sl_distance,
+                    "Alert %d: DRY_RUN — would place %s %s %d lots %s (sl_dist=%.4f)",
+                    alert_id, _ng_ot, ng_side, qty // fut_instr.lot_size, fut_instr.tradingsymbol, sl_distance,
                 )
 
             order = Order(
@@ -819,7 +1043,8 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
                 exchange=fut_instr.exchange,
                 tradingsymbol=fut_instr.tradingsymbol,
                 transaction_type=ng_side,
-                order_type="MARKET",
+                order_type=_ng_ot,
+                price=float(_ng_lp) if _ng_lp else None,
                 product=product,
                 quantity=qty,
                 status="PENDING" if not _dry_run(settings) else "DRY_RUN",
@@ -901,9 +1126,11 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
                     session.commit()
                     return
 
+                _eq_lp = alert_data.limit_price
+                _eq_ot = "LIMIT" if _eq_lp else "MARKET"
                 kite_order_id = None
                 if not _dry_run(settings):
-                    kite_order_id = place_entry(kite_client, eq_instrument, "BUY", qty, "MARKET", "CNC")
+                    kite_order_id = place_entry(kite_client, eq_instrument, "BUY", qty, _eq_ot, "CNC", price=_eq_lp)
                     if kite_order_id:
                         _pending_order_meta[kite_order_id] = {
                             "instrument_type": "EQ",
@@ -912,8 +1139,8 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
                         }
                 else:
                     log.info(
-                        "Alert %d: DRY_RUN — would BUY %d shares %s MARKET CNC at ltp=%.2f",
-                        alert_id, qty, eq_instrument.tradingsymbol, ltp,
+                        "Alert %d: DRY_RUN — would BUY %d shares %s %s CNC at ltp=%.2f",
+                        alert_id, qty, eq_instrument.tradingsymbol, _eq_ot, ltp,
                     )
 
                 order = Order(
@@ -923,7 +1150,8 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
                     exchange=eq_instrument.exchange,
                     tradingsymbol=eq_instrument.tradingsymbol,
                     transaction_type="BUY",
-                    order_type="MARKET",
+                    order_type=_eq_ot,
+                    price=float(_eq_lp) if _eq_lp else None,
                     product="CNC",
                     quantity=qty,
                     status="PENDING" if not _dry_run(settings) else "DRY_RUN",
@@ -1211,8 +1439,10 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
             option_ltp, total_premium, float(capital_risk_opt),
         )
 
+        _opt_lp = alert_data.limit_price
+        _opt_ot = "LIMIT" if _opt_lp else "MARKET"
         kite_order_id = place_entry(
-            kite_client, selection.instrument, entry_side, qty, "MARKET", product
+            kite_client, selection.instrument, entry_side, qty, _opt_ot, product, price=_opt_lp
         )
         if kite_order_id:
             _pending_order_meta[kite_order_id] = {
@@ -1229,7 +1459,8 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
             exchange=selection.instrument.exchange,
             tradingsymbol=selection.instrument.tradingsymbol,
             transaction_type=entry_side,
-            order_type="MARKET",
+            order_type=_opt_ot,
+            price=float(_opt_lp) if _opt_lp else None,
             product=product,
             quantity=qty,
             status="PENDING",
@@ -1627,6 +1858,9 @@ _QUICK_TRADE_PANEL = """
 <div id="qt-confidence" style="font-size:.82em;color:#636366;margin-bottom:10px"></div>
 <div id="qt-low-conf-warn" style="display:none;background:rgba(255,149,0,.1);color:#C93400;border-radius:8px;padding:9px 12px;font-size:.82em;font-weight:500;margin-bottom:8px">&#x26A0;&#xFE0F; Low confidence parse &#x2014; review carefully before executing</div>
 <div id="qt-double-warn" style="display:none;background:rgba(255,59,48,.08);color:#D70015;border-radius:8px;padding:9px 12px;font-size:.82em;font-weight:500;margin-bottom:8px">&#x26A0;&#xFE0F; EXIT / SQUARE-OFF detected &#x2014; this will close positions. Double-check.</div>
+<div id="qt-limit-info" style="display:none;background:rgba(0,122,255,.08);color:#0062CC;border-radius:8px;padding:9px 12px;font-size:.82em;font-weight:500;margin-bottom:8px"></div>
+<div id="qt-straddle-report" style="display:none;background:#F2F2F7;border-radius:8px;padding:10px 12px;font-size:.78em;font-family:'SF Mono',Menlo,Consolas,monospace;white-space:pre-wrap;color:#1C1C1E;margin-bottom:8px;line-height:1.55"></div>
+<div id="qt-straddle-warn" style="display:none;background:rgba(255,149,0,.1);color:#C93400;border-radius:8px;padding:9px 12px;font-size:.82em;font-weight:500;margin-bottom:8px">&#x26A0;&#xFE0F; Spread threshold exceeded &#x2014; tap Force Execute to proceed anyway, or Cancel.</div>
 <div id="qt-confirm-err" style="display:none;background:rgba(255,59,48,.08);color:#D70015;border-radius:8px;padding:9px 12px;font-size:.82em;font-weight:500;margin-bottom:8px"></div>
 <div style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap">
 <button id="qt-exec-btn" class="btn bg2" style="flex:1;min-width:130px;padding:14px;font-size:.9em">Execute Trade</button>
@@ -1650,10 +1884,17 @@ _QUICK_TRADE_PANEL = """
 <tbody id="qt-log-tbody"><tr><td colspan="6" style="text-align:center;color:#aaa;font-style:italic">No activity this session</td></tr></tbody></table>
 </div>
 </div>
+<div class="card" id="qt-pending-card">
+<div class="ct">Open Limit Orders</div>
+<div style="overflow-x:auto">
+<table><thead><tr><th>Time</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Limit &#x20B9;</th><th>Action</th></tr></thead>
+<tbody id="qt-pending-tbody"><tr><td colspan="6" style="text-align:center;color:#aaa;font-style:italic">No open limit orders</td></tr></tbody></table>
+</div>
+</div>
 <script>
 (function(){
 'use strict';
-var st={token:null,transcript:null,expiresAt:null,timer:null,log:[]};
+var st={token:null,transcript:null,expiresAt:null,timer:null,log:[],straddleForce:false};
 function el(i){return document.getElementById(i);}
 
 function showErr(msg){var e=el('qt-err');e.textContent=msg;e.style.display='block';}
@@ -1711,8 +1952,21 @@ function showConfirm(d){
   el('qt-confidence').textContent='Confidence: '+Math.round(d.confidence*100)+'%';
   el('qt-low-conf-warn').style.display=d.low_confidence?'block':'none';
   el('qt-double-warn').style.display=d.double_confirm_required?'block':'none';
+  var _li=el('qt-limit-info');
+  if(_li){var _lp=d.limit_price;if(_lp){var _ls='₹'+_lp+' limit';if(d.estimated_sl)_ls+=' · Est.SL: ₹'+d.estimated_sl;if(d.estimated_target)_ls+=' · Est.Target: ₹'+d.estimated_target;_li.textContent=_ls;_li.style.display='block';}else{_li.style.display='none';}}
   el('qt-confirm-err').style.display='none';
-  el('qt-exec-btn').disabled=false;el('qt-exec-btn').textContent='Execute Trade';
+  var _sr=el('qt-straddle-report'),_sw=el('qt-straddle-warn');
+  if(_sr){if(d.straddle_report){_sr.textContent=d.straddle_report;_sr.style.display='block';}else{_sr.style.display='none';}}
+  if(_sw){_sw.style.display=(d.straddle_spread_warn?'block':'none');}
+  st.straddleForce=false;
+  var _execBtn=el('qt-exec-btn');
+  if(d.straddle_spread_warn){
+    _execBtn.textContent='Force Execute';_execBtn.style.background='#FF9500';
+    st.straddleForce=true;
+  }else{
+    _execBtn.textContent='Execute Trade';_execBtn.style.background='';
+  }
+  _execBtn.disabled=false;
   el('qt-cancel-btn').disabled=false;
   el('qt-reparse-btn').style.display='none';
   el('qt-confirm').style.display='block';
@@ -1740,7 +1994,7 @@ el('qt-exec-btn').addEventListener('click',function(){
   fetch('/control/voice/proxy/confirm',{
     method:'POST',
     headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({confirmation_token:st.token,approved:true})
+    body:JSON.stringify({confirmation_token:st.token,approved:true,force_spread:!!st.straddleForce})
   }).then(function(r){
     return r.json().then(function(d){return{ok:r.ok,status:r.status,data:d};});
   }).then(function(res){
@@ -1752,6 +2006,7 @@ el('qt-exec-btn').addEventListener('click',function(){
     }
     clearInterval(st.timer);
     showResult('ok',res.data);addLog('Executed',res.data);
+    loadPendingOrders();
     setTimeout(resetUI,3000);
   }).catch(function(){
     var e=el('qt-confirm-err');
@@ -1812,13 +2067,15 @@ function showResult(type,data){
 }
 
 function resetUI(){
-  clearInterval(st.timer);st.token=null;st.expiresAt=null;
+  clearInterval(st.timer);st.token=null;st.expiresAt=null;st.straddleForce=false;
   el('qt-input-area').style.display='block';el('qt-input-area').style.opacity='1';
   el('qt-confirm').style.display='none';el('qt-result').style.display='none';
-  el('qt-exec-btn').disabled=false;el('qt-exec-btn').textContent='Execute Trade';
+  var _eb=el('qt-exec-btn');_eb.disabled=false;_eb.textContent='Execute Trade';_eb.style.background='';
   el('qt-cancel-btn').disabled=false;
   el('qt-reparse-btn').style.display='none';
   el('qt-confirm-err').style.display='none';
+  var _sr=el('qt-straddle-report');if(_sr)_sr.style.display='none';
+  var _sw=el('qt-straddle-warn');if(_sw)_sw.style.display='none';
   hideErr();resumePageRefresh();
 }
 
@@ -1872,7 +2129,45 @@ function checkChannel(){
     }).catch(function(){e.textContent='Channel status: unavailable';e.style.color='#8E8E93';});
 }
 
-checkChannel();renderLog();
+function loadPendingOrders(){
+  fetch('/control/voice/proxy/pending-orders')
+    .then(function(r){return r.ok?r.json():null;})
+    .then(function(d){if(d)renderPendingOrders(d.pending_limit_orders||[]);})
+    .catch(function(){});
+}
+function renderPendingOrders(orders){
+  var tb=el('qt-pending-tbody');if(!tb)return;
+  var esc=function(s){return String(s===null||s===undefined?'--':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');};
+  if(!orders.length){
+    tb.innerHTML='<tr><td colspan="6" style="text-align:center;color:#aaa;font-style:italic">No open limit orders</td></tr>';return;
+  }
+  tb.innerHTML=orders.map(function(o){
+    var side_cls=o.transaction_type==='BUY'?'pg':'pr';
+    var btn_lbl=o.dry_run?'Cancel (paper)':'Cancel';
+    return '<tr>'
+      +'<td style="white-space:nowrap">'+esc(o.placed_at)+'</td>'
+      +'<td style="font-weight:600">'+esc(o.tradingsymbol)+'</td>'
+      +'<td><span class="pill '+side_cls+'">'+esc(o.transaction_type)+'</span></td>'
+      +'<td class="tr">'+esc(o.quantity)+'</td>'
+      +'<td class="tr">'+esc(o.price)+'</td>'
+      +'<td><button class="btn bm" style="font-size:.72em;padding:4px 10px" onclick="window._qtCancelLimitOrder('+o.id+',this)">'+btn_lbl+'</button></td>'
+      +'</tr>';
+  }).join('');
+}
+window._qtCancelLimitOrder=function(orderId,btn){
+  btn.disabled=true;btn.textContent='Cancelling…';
+  fetch('/control/voice/proxy/cancel-order',{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({order_id:orderId})
+  }).then(function(r){return r.json().then(function(d){return{ok:r.ok,data:d};});})
+  .then(function(res){
+    if(res.ok){loadPendingOrders();}
+    else{btn.disabled=false;btn.textContent='Error';setTimeout(function(){btn.textContent='Cancel';btn.disabled=false;},2000);}
+  }).catch(function(){btn.disabled=false;btn.textContent='Cancel';});
+};
+
+checkChannel();renderLog();loadPendingOrders();
 })();
 </script>
 """
@@ -2558,6 +2853,70 @@ async def vp_toggle(
             timeout=10.0,
         )
     return Response(content=r.content, status_code=r.status_code, media_type="application/json")
+
+
+@app.get("/control/voice/proxy/pending-orders")
+async def vp_pending_orders(
+    _: None = Depends(_auth_guard),
+    session: Session = Depends(get_db_session),
+) -> Response:
+    today_start = datetime.now(IST).replace(hour=0, minute=0, second=0, microsecond=0)
+    rows = (
+        session.query(Order)
+        .filter(
+            Order.order_type == "LIMIT",
+            Order.status == "PENDING",
+            Order.placed_at >= today_start,
+        )
+        .order_by(Order.placed_at.desc())
+        .all()
+    )
+    data = [
+        {
+            "id": r.id,
+            "kite_order_id": r.kite_order_id,
+            "tradingsymbol": r.tradingsymbol,
+            "transaction_type": r.transaction_type,
+            "quantity": r.quantity,
+            "price": r.price,
+            "placed_at": r.placed_at.strftime("%H:%M:%S") if r.placed_at else "--",
+            "dry_run": r.dry_run,
+        }
+        for r in rows
+    ]
+    return Response(content=json.dumps({"pending_limit_orders": data}), media_type="application/json")
+
+
+@app.post("/control/voice/proxy/cancel-order")
+async def vp_cancel_order(
+    request: Request,
+    _: None = Depends(_auth_guard),
+    session: Session = Depends(get_db_session),
+    settings: Settings = Depends(get_current_settings),
+) -> Response:
+    body = await request.json()
+    order_id = body.get("order_id")
+    if not order_id:
+        return Response(content='{"detail":"order_id required"}', status_code=400, media_type="application/json")
+    order = session.get(Order, int(order_id))
+    if order is None or order.status != "PENDING":
+        return Response(
+            content='{"detail":"Order not found or not in PENDING status"}',
+            status_code=404, media_type="application/json",
+        )
+    if not _dry_run(settings) and order.kite_order_id:
+        try:
+            kite_client = get_session_manager().get_kite()
+            kite_client.cancel_order(variety=order.variety, order_id=order.kite_order_id)
+        except Exception as exc:
+            log.warning("vp_cancel_order: kite cancel failed order_id=%s: %s", order_id, exc)
+    order.status = "CANCELLED"
+    order.updated_at = datetime.now(IST)
+    session.commit()
+    return Response(
+        content=json.dumps({"status": "cancelled", "order_id": order_id}),
+        media_type="application/json",
+    )
 
 
 # ── /orders — consolidated trade view ────────────────────────────────────────

@@ -17,6 +17,7 @@ class AlertPayload(BaseModel):
     instrument_type: Literal["OPTIONS", "EQUITY"] = "OPTIONS"  # defaults to OPTIONS so existing alerts keep working
     price: Decimal                                 # current price from TradingView
     premium: Decimal | None = None                 # required for TRAIL action only
+    limit_price: Decimal | None = None             # manual trades only: LIMIT entry price; None = MARKET
     timeframe: str                                 # e.g. "5", "15", "60"
     alert_id: str                                  # unique ID from Pine Script
     timestamp: datetime                            # ISO8601, TradingView sends UTC
@@ -36,6 +37,13 @@ class AlertPayload(BaseModel):
     def price_positive(cls, v: Decimal) -> Decimal:
         if v <= 0:
             raise ValueError("price must be > 0")
+        return v
+
+    @field_validator("limit_price")
+    @classmethod
+    def limit_price_positive(cls, v: Decimal | None) -> Decimal | None:
+        if v is not None and v <= 0:
+            raise ValueError("limit_price must be > 0")
         return v
 
     @field_validator("alert_id")
