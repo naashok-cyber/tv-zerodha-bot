@@ -62,12 +62,15 @@ def execute_voice_entry(
     db.refresh(alert)
 
     limit_price_val = order.get("limit_price")
+    _strike_val = order.get("_strike")
     payload = AlertPayload(
         symbol=order["underlying"],
         action=order["action"],
         instrument_type="OPTIONS",
         price=Decimal("0.01"),  # placeholder; not used in options strike selection
         limit_price=Decimal(str(limit_price_val)) if limit_price_val else None,
+        option_type=order.get("_option_type") or None,
+        strike=float(_strike_val) if _strike_val is not None else None,
         timeframe="voice",
         alert_id=ikey,
         timestamp=now,

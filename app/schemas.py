@@ -18,6 +18,8 @@ class AlertPayload(BaseModel):
     price: Decimal                                 # current price from TradingView
     premium: Decimal | None = None                 # required for TRAIL action only
     limit_price: Decimal | None = None             # manual trades only: LIMIT entry price; None = MARKET
+    option_type: Literal["CE", "PE"] | None = None # voice commands only: explicit option type
+    strike: float | None = None                    # voice commands only: explicit strike price; None = ATM
     timeframe: str                                 # e.g. "5", "15", "60"
     alert_id: str                                  # unique ID from Pine Script
     timestamp: datetime                            # ISO8601, TradingView sends UTC

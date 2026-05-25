@@ -8,6 +8,13 @@ from datetime import datetime
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
+
+def _round_to_tick(price: float, tick: float) -> float:
+    """Round price to nearest valid tick boundary (handles MCX 0.05/0.10 ticks)."""
+    if tick <= 0:
+        return round(price, 2)
+    return round(round(price / tick) * tick, 2)
+
 log = logging.getLogger(__name__)
 _IST = ZoneInfo("Asia/Kolkata")
 
@@ -26,6 +33,7 @@ class _TrailPos:
     best_price: float      # best LTP seen since entry; drives when to trail
     gtt_db_id: int         # DB Gtt.id
     kite_gtt_id: int | None
+    tick_size: float = 0.01  # minimum price increment; rounds the trailed SL
     last_update: float = field(default_factory=time.monotonic)
 
 
@@ -64,6 +72,7 @@ class TrailingSlManager:
         fill_price: float,
         gtt_db_id: int,
         kite_gtt_id: int | None,
+        tick_size: float = 0.01,
     ) -> None:
         pos = _TrailPos(
             tradingsymbol=tradingsymbol,
@@ -78,6 +87,7 @@ class TrailingSlManager:
             best_price=fill_price,
             gtt_db_id=gtt_db_id,
             kite_gtt_id=kite_gtt_id,
+            tick_size=tick_size,
         )
         with self._lock:
             self._positions[instrument_token] = pos
@@ -123,13 +133,13 @@ class TrailingSlManager:
             if ltp <= pos.best_price:
                 return
             new_best = ltp
-            new_sl = round(new_best * (1.0 - pos.sl_pct), 2)
+            new_sl = _round_to_tick(new_best * (1.0 - pos.sl_pct), pos.tick_size)
             sl_improved = new_sl > pos.current_sl
         else:  # SELL (short): lower LTP is favorable
             if ltp >= pos.best_price:
                 return
             new_best = ltp
-            new_sl = round(new_best * (1.0 + pos.sl_pct), 2)
+            new_sl = _round_to_tick(new_best * (1.0 + pos.sl_pct), pos.tick_size)
             sl_improved = new_sl < pos.current_sl
 
         pos.best_price = new_best

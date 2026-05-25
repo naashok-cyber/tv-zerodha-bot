@@ -139,6 +139,13 @@ def _check_risk_guards(session: Any, settings: Settings) -> tuple[bool, str]:
     return True, ""
 
 
+def _round_to_tick(price: float, tick: float) -> float:
+    """Round price to nearest valid tick boundary (handles MCX 0.05/0.10 ticks)."""
+    if tick <= 0:
+        return round(price, 2)
+    return round(round(price / tick) * tick, 2)
+
+
 # ── EntryFilledEvent callback ─────────────────────────────────────────────────
 
 def _on_entry_filled(event: EntryFilledEvent) -> None:
@@ -227,6 +234,16 @@ def _on_entry_filled(event: EntryFilledEvent) -> None:
                 # Short (written option): SL when premium rises, target when it falls
                 sl_price = fill_price + sl_distance
                 target_price = max(fill_price * (1.0 - state.get_sell_options_profit_pct(settings.SELL_OPTIONS_PROFIT_PCT)), 0.05)
+
+        # Round SL and target to the instrument's minimum tick size so GTT
+        # trigger prices are always valid tradeable prices (MCX tick: 0.05–0.10).
+        _tick = (instrument.tick_size or 0.01) if instrument else 0.01
+        sl_price = _round_to_tick(sl_price, _tick)
+        target_price = _round_to_tick(target_price, _tick)
+        # Re-apply floors after rounding (options premiums must stay positive).
+        if instrument_type not in ("EQ", "FUT"):
+            sl_price = max(sl_price, _tick)
+            target_price = max(target_price, _tick)
 
         position = Position(
             order_id=order.id,
@@ -383,6 +400,7 @@ def _on_entry_filled(event: EntryFilledEvent) -> None:
                 fill_price=fill_price,
                 gtt_db_id=gtt.id,
                 kite_gtt_id=kite_gtt_id,
+                tick_size=(instrument.tick_size or 0.01) if instrument else 0.01,
             )
             if _watcher is not None:
                 _watcher.subscribe([instrument.instrument_token])
@@ -961,10 +979,10 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
                 return
 
         # ── NATURALGAS / NATGASMINI: near-month future entry ─────────────────
-        # NG options are illiquid; always trade the near-month FUT directly.
-        # Other MCX commodities (CRUDEOIL, GOLD, SILVER, etc.) have liquid
-        # options and fall through to the CE/PE path below.
-        if underlying.is_natural_gas:
+        # NG options are illiquid; default to near-month FUT.
+        # Exception: voice commands with explicit option_type="CE"/"PE" fall
+        # through to the options path below to trade the specific contract.
+        if underlying.is_natural_gas and alert_data.option_type not in ("CE", "PE"):
             try:
                 resolved = resolve_expiry(
                     underlying.name, session, instrument_type="FUT",
@@ -1068,6 +1086,13 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
                         alert_id, fut_instr.tradingsymbol,
                     )
             return
+
+        # NG with explicit option_type falls through to the options path below.
+        if underlying.is_natural_gas and alert_data.option_type in ("CE", "PE"):
+            log.info(
+                "Alert %d: NG explicit option_type=%s → options path",
+                alert_id, alert_data.option_type,
+            )
 
         # ── EQUITY (CNC) entry ────────────────────────────────────────────────
         # MCX symbols (CRUDEOILM, GOLD, etc.) sometimes arrive with instrument_type="EQUITY"
@@ -1233,9 +1258,13 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
             session.commit()
             return
 
-        # ── Non-NG options entry ───────────────────────────────────────────────
+        # ── Options entry (NFO + MCX; also NG when option_type is explicit) ──
         trade_mode = state.get_trade_mode()
-        if trade_mode == "BUY_OPTIONS":
+        if alert_data.option_type in ("CE", "PE"):
+            # Voice command with explicit option type: honor it directly
+            flag = alert_data.option_type
+            entry_side = "SELL" if alert_data.action == "SELL" else "BUY"
+        elif trade_mode == "BUY_OPTIONS":
             flag = "CE" if alert_data.action == "BUY" else "PE"
             entry_side = "BUY"
         else:  # SELL_OPTIONS: write the opposite type
@@ -1262,8 +1291,13 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
                 session.commit()
                 return
         log.info("[%s] Alert %d: %s signal → %s %s", trade_mode, alert_id, alert_data.action, entry_side, flag)
-        target_delta = settings.TARGET_DELTA if trade_mode == "BUY_OPTIONS" else settings.SELL_OPTIONS_TARGET_DELTA
-        delta_fallbacks = settings.DELTA_FALLBACK_STEPS if trade_mode == "BUY_OPTIONS" else settings.SELL_OPTIONS_DELTA_FALLBACK_STEPS
+        if alert_data.option_type in ("CE", "PE"):
+            # Voice explicit: derive delta from entry_side, not bot trade_mode
+            target_delta = settings.SELL_OPTIONS_TARGET_DELTA if entry_side == "SELL" else settings.TARGET_DELTA
+            delta_fallbacks = settings.SELL_OPTIONS_DELTA_FALLBACK_STEPS if entry_side == "SELL" else settings.DELTA_FALLBACK_STEPS
+        else:
+            target_delta = settings.TARGET_DELTA if trade_mode == "BUY_OPTIONS" else settings.SELL_OPTIONS_TARGET_DELTA
+            delta_fallbacks = settings.DELTA_FALLBACK_STEPS if trade_mode == "BUY_OPTIONS" else settings.SELL_OPTIONS_DELTA_FALLBACK_STEPS
 
         if _dry_run(settings):
             log.info(
@@ -1328,26 +1362,55 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
             session.commit()
             return
 
-        try:
-            selection = select_strike(
-                underlying.name,
-                resolved.expiry_date,
-                flag,
-                kite_client,
-                spot_ltp,
-                session,
-                alert_id=alert_id,
-                segment=underlying.segment,
-                target_delta=target_delta,
-                settings=settings,
+        if alert_data.strike:
+            # Voice command with specific strike: look up instrument directly
+            from types import SimpleNamespace as _NS
+            _vi = (
+                session.query(Instrument)
+                .filter(
+                    Instrument.name == underlying.name,
+                    Instrument.instrument_type == flag,
+                    Instrument.exchange == underlying.segment,
+                    Instrument.expiry == resolved.expiry_date,
+                    Instrument.strike == float(alert_data.strike),
+                )
+                .first()
             )
-        except NoValidStrikeError as exc:
-            _fail_alert(session, alert, "NoValidStrikeError", exc)
-            session.commit()
-            return
+            if _vi is None:
+                _fail_alert(
+                    session, alert, "NoValidStrikeError",
+                    ValueError(
+                        f"No {flag} at strike {alert_data.strike} for "
+                        f"{underlying.name} expiry {resolved.expiry_date}"
+                    ),
+                )
+                session.commit()
+                return
+            _vq_key = f"{underlying.segment}:{_vi.tradingsymbol}"
+            option_ltp = float(kite_client.quote(_vq_key)[_vq_key]["last_price"])
+            selection = _NS(instrument=_vi, option_ltp=option_ltp)
+            lot_size = _vi.lot_size
+        else:
+            try:
+                selection = select_strike(
+                    underlying.name,
+                    resolved.expiry_date,
+                    flag,
+                    kite_client,
+                    spot_ltp,
+                    session,
+                    alert_id=alert_id,
+                    segment=underlying.segment,
+                    target_delta=target_delta,
+                    settings=settings,
+                )
+            except NoValidStrikeError as exc:
+                _fail_alert(session, alert, "NoValidStrikeError", exc)
+                session.commit()
+                return
 
-        lot_size = selection.instrument.lot_size
-        option_ltp = float(selection.option_ltp)
+            lot_size = selection.instrument.lot_size
+            option_ltp = float(selection.option_ltp)
         # MCX: Kite quotes LTP per underlying unit (barrel/gram/kg) but orders are placed in lots.
         # Multiply by units-per-lot so sizing reflects the true premium per lot.
         mcx_units = settings.MCX_LOT_UNITS.get(underlying.name, 1) if underlying.segment == "MCX" else 1
@@ -1429,7 +1492,12 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
                 )
                 qty = risk.compute_futures_qty(capital_risk_opt, sl_per_unit, Decimal(str(lot_size)))
 
-        qty = min(qty, state.get_max_lots(settings.MAX_LOTS_PER_TRADE) * lot_size)
+        # Voice commands carry an explicit lot count (quantity_hint) — honor it
+        # instead of the risk-based sizing above. TV alerts use risk sizing.
+        if alert_data.option_type in ("CE", "PE") and alert.quantity_hint and alert.quantity_hint > 0:
+            qty = min(alert.quantity_hint, state.get_max_lots(settings.MAX_LOTS_PER_TRADE)) * lot_size
+        else:
+            qty = min(qty, state.get_max_lots(settings.MAX_LOTS_PER_TRADE) * lot_size)
 
         lots_count = qty // lot_size
         total_premium = option_ltp * mcx_units * qty
