@@ -105,6 +105,7 @@ class Order(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     dry_run: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     raw_response: Mapped[str | None] = mapped_column(Text)
+    straddle_id: Mapped[str | None] = mapped_column(String(36))   # links both legs of a straddle
 
     alert: Mapped[Alert] = relationship("Alert", back_populates="orders")
     position: Mapped[Position | None] = relationship("Position", back_populates="order", uselist=False)
@@ -302,4 +303,19 @@ def init_db(database_url: str | None = None) -> Engine:
     else:
         engine = create_engine(url)
     Base.metadata.create_all(engine)
+    _migrate(engine)
     return engine
+
+
+def _migrate(engine: Engine) -> None:
+    """Apply additive schema changes not handled by create_all (new nullable columns)."""
+    migrations = [
+        "ALTER TABLE orders ADD COLUMN straddle_id VARCHAR(36)",
+    ]
+    with engine.connect() as conn:
+        for stmt in migrations:
+            try:
+                conn.execute(text(stmt))
+                conn.commit()
+            except Exception:
+                pass  # column already exists — ignore
