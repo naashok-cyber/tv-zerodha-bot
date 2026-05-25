@@ -1611,8 +1611,7 @@ _QUICK_TRADE_PANEL = """
 <div class="card" id="qt-panel">
 <div class="ct">Quick Trade &#x26A1;</div>
 <div id="qt-input-area" style="padding:16px">
-<textarea id="qt-text" rows="2" style="width:100%;font-size:18px;padding:12px 14px;border:1.5px solid #E5E5EA;border-radius:10px;resize:none;font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','Helvetica Neue',Arial,sans-serif;background:#FAFAFA;color:#1C1C1E;-webkit-appearance:none;transition:border-color .2s;margin-bottom:8px;display:block" placeholder="Type or dictate your trade &#x2014; e.g. buy one lot NIFTY ATM call"></textarea>
-<div id="qt-token-badge" style="display:inline-block;font-size:.74em;font-weight:500;padding:4px 10px;border-radius:20px;margin-bottom:10px;background:rgba(255,149,0,.1);color:#C93400">&#x26A0; No token &#x2014; open Settings</div>
+<textarea id="qt-text" rows="2" style="width:100%;font-size:18px;padding:12px 14px;border:1.5px solid #E5E5EA;border-radius:10px;resize:none;font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','Helvetica Neue',Arial,sans-serif;background:#FAFAFA;color:#1C1C1E;-webkit-appearance:none;transition:border-color .2s;margin-bottom:10px;display:block" placeholder="Type or dictate your trade &#x2014; e.g. buy one lot NIFTY ATM call"></textarea>
 <div id="qt-err" style="display:none;background:rgba(255,59,48,.08);color:#D70015;border-radius:8px;padding:9px 12px;font-size:.82em;font-weight:500;margin-bottom:10px"></div>
 <button id="qt-parse-btn" class="btn bp bfull">Parse Trade</button>
 </div>
@@ -1632,29 +1631,9 @@ _QUICK_TRADE_PANEL = """
 </div>
 </div>
 <div id="qt-result" style="display:none;padding:16px;border-top:.5px solid rgba(0,0,0,.08)"></div>
-<div style="border-top:.5px solid rgba(0,0,0,.08)">
-<button id="qt-settings-toggle" style="width:100%;background:none;border:none;padding:12px 16px;text-align:left;font-size:.8em;color:#636366;cursor:pointer;font-family:inherit;display:flex;align-items:center;gap:6px;font-weight:500">Settings &#x2699;&#xFE0F;</button>
-<div id="qt-settings-body" style="display:none;padding:0 16px 16px;border-top:.5px solid rgba(0,0,0,.06)">
-<div style="background:rgba(0,122,255,.06);border-radius:10px;padding:12px;margin:12px 0;font-size:.78em;color:#3A3A3C;line-height:1.55">&#x1F512; Your auth token is stored as a browser cookie (1-year expiry) on this device only. It never leaves your device except in HTTPS calls to your own server. Clear it before sharing this browser. The token grants full trade-placement authority &#x2014; treat it like a password.</div>
-<div style="margin-bottom:14px">
-<div style="font-size:.72em;font-weight:600;color:#8E8E93;margin-bottom:6px;text-transform:uppercase;letter-spacing:.07em">Voice Auth Token</div>
-<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-<input id="qt-token-input" type="password" autocomplete="off" placeholder="Paste VOICE_AUTH_TOKEN" style="flex:1;min-width:0;padding:9px 12px;border:1.5px solid #E5E5EA;border-radius:8px;font-size:.84em;background:#F9F9F9;color:#1C1C1E;font-family:inherit;-webkit-appearance:none">
-<button id="qt-save-token" class="btn bp">Save</button>
-<button id="qt-clear-token" class="btn bm">Clear</button>
-</div>
-<div id="qt-token-msg" style="display:none;font-size:.76em;margin-top:6px"></div>
-</div>
-<div style="margin-bottom:10px">
-<div style="font-size:.72em;font-weight:600;color:#8E8E93;margin-bottom:6px;text-transform:uppercase;letter-spacing:.07em">Admin Token (optional &#x2014; enables channel status)</div>
-<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-<input id="qt-admin-token-input" type="password" autocomplete="off" placeholder="Paste ADMIN_AUTH_TOKEN" style="flex:1;min-width:0;padding:9px 12px;border:1.5px solid #E5E5EA;border-radius:8px;font-size:.84em;background:#F9F9F9;color:#1C1C1E;font-family:inherit;-webkit-appearance:none">
-<button id="qt-save-admin-token" class="btn bn">Save</button>
-</div>
-<div id="qt-admin-token-msg" style="display:none;font-size:.76em;margin-top:6px"></div>
-</div>
-<div id="qt-channel-status" style="font-size:.82em;color:#8E8E93;padding-top:4px">Channel status: unknown &#x2014; admin token required to check</div>
-</div>
+<div style="border-top:.5px solid rgba(0,0,0,.08);padding:12px 16px;display:flex;align-items:center;justify-content:space-between">
+<div id="qt-channel-status" style="font-size:.8em;color:#8E8E93">Checking channel&#x2026;</div>
+<button id="qt-toggle-channel-btn" class="btn bg2" style="font-size:.76em;padding:6px 14px;display:none">Enable Channel</button>
 </div>
 </div>
 <div class="card" id="qt-log-card">
@@ -1667,70 +1646,9 @@ _QUICK_TRADE_PANEL = """
 <script>
 (function(){
 'use strict';
-var CK_KEY='ztVoiceToken',CK_ADM='ztAdminToken';
 var st={token:null,transcript:null,expiresAt:null,timer:null,log:[]};
 function el(i){return document.getElementById(i);}
 
-// Cookie helpers — far more persistent than localStorage on iOS Safari/PWA
-function setCk(name,val,days){
-  var exp=new Date(Date.now()+(days||365)*864e5).toUTCString();
-  document.cookie=name+'='+encodeURIComponent(val)+'; expires='+exp+'; path=/; SameSite=Strict';
-}
-function getCk(name){
-  var m=document.cookie.match('(?:^|; )'+name+'=([^;]*)');
-  return m?decodeURIComponent(m[1]):'';
-}
-function delCk(name){
-  document.cookie=name+'=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/; SameSite=Strict';
-}
-function getVTok(){return getCk(CK_KEY);}
-
-function updateTokenBadge(){
-  var e=el('qt-token-badge');if(!e)return;
-  var v=getVTok();
-  if(v){
-    e.textContent='🔑 Token: …'+v.slice(-6);
-    e.style.color='#248A3D';e.style.background='rgba(52,199,89,.1)';
-  }else{
-    e.textContent='⚠ No token — open Settings';
-    e.style.color='#C93400';e.style.background='rgba(255,149,0,.1)';
-  }
-}
-
-el('qt-settings-toggle').addEventListener('click',function(){
-  var b=el('qt-settings-body'),open=b.style.display!=='none';
-  b.style.display=open?'none':'block';
-});
-
-el('qt-save-token').addEventListener('click',function(){
-  var v=el('qt-token-input').value.trim();
-  if(!v)return;
-  setCk(CK_KEY,v,365);
-  el('qt-token-input').value='';
-  showMsg('qt-token-msg','✓ Token saved (1 year)','ok');
-  updateTokenBadge();checkChannel();
-});
-el('qt-clear-token').addEventListener('click',function(){
-  delCk(CK_KEY);
-  showMsg('qt-token-msg','Token cleared','neu');
-  updateTokenBadge();
-});
-el('qt-save-admin-token').addEventListener('click',function(){
-  var v=el('qt-admin-token-input').value.trim();
-  if(!v)return;
-  setCk(CK_ADM,v,365);
-  el('qt-admin-token-input').value='';
-  showMsg('qt-admin-token-msg','✓ Admin token saved (1 year)','ok');
-  checkChannel();
-});
-
-function showMsg(id,msg,type){
-  var e=el(id);if(!e)return;
-  e.textContent=msg;
-  e.style.color=type==='ok'?'#248A3D':type==='err'?'#D70015':'#636366';
-  e.style.display='block';
-  setTimeout(function(){e.style.display='none';},3000);
-}
 function showErr(msg){var e=el('qt-err');e.textContent=msg;e.style.display='block';}
 function hideErr(){el('qt-err').style.display='none';}
 
@@ -1742,18 +1660,16 @@ el('qt-text').addEventListener('keydown',function(e){
 function parseTrade(){
   var text=el('qt-text').value.trim();
   if(!text){showErr('Please enter a trade command');return;}
-  var tok=getVTok();
-  if(!tok){showErr('Auth token required — open Settings to add it');return;}
   hideErr();
   setParseLoading(true);
-  fetch('/voice/transcribe',{
+  fetch('/control/voice/proxy/transcribe',{
     method:'POST',
-    headers:{'Content-Type':'application/json','X-Voice-Auth-Token':tok},
+    headers:{'Content-Type':'application/json'},
     body:JSON.stringify({text:text})
   }).then(function(r){
     return r.json().then(function(d){return{ok:r.ok,status:r.status,data:d};});
   }).then(function(res){
-    if(res.status===401){showErr('Auth token rejected — check Settings');return;}
+    if(res.status===401){window.location='/auth/login';return;}
     if(res.status===403){showErr('Voice channel disabled on server');return;}
     if(!res.ok){showErr((res.data&&res.data.detail)||'Server error — please try again');return;}
     var d=res.data;
@@ -1801,10 +1717,10 @@ function startTimer(secs){
   clearInterval(st.timer);
   st.timer=setInterval(function(){
     var rem=Math.max(0,Math.ceil((st.expiresAt-Date.now())/1000));
-    el('qt-timer').textContent=rem>0?'Token expires in '+rem+'s':'Token expired — please re-parse';
+    el('qt-timer').textContent=rem>0?'Expires in '+rem+'s':'Expired — please re-parse';
     if(rem===0){
       clearInterval(st.timer);
-      el('qt-exec-btn').disabled=true;el('qt-exec-btn').textContent='Token expired';
+      el('qt-exec-btn').disabled=true;el('qt-exec-btn').textContent='Expired';
       el('qt-reparse-btn').style.display='inline-flex';
       resumePageRefresh();
     }
@@ -1814,13 +1730,14 @@ function startTimer(secs){
 el('qt-exec-btn').addEventListener('click',function(){
   if(!st.token)return;
   setBothLoading(true);
-  fetch('/voice/confirm',{
+  fetch('/control/voice/proxy/confirm',{
     method:'POST',
-    headers:{'Content-Type':'application/json','X-Voice-Auth-Token':getVTok()},
+    headers:{'Content-Type':'application/json'},
     body:JSON.stringify({confirmation_token:st.token,approved:true})
   }).then(function(r){
-    return r.json().then(function(d){return{ok:r.ok,data:d};});
+    return r.json().then(function(d){return{ok:r.ok,status:r.status,data:d};});
   }).then(function(res){
+    if(res.status===401){window.location='/auth/login';return;}
     if(!res.ok){
       var e=el('qt-confirm-err');
       e.textContent='⚠ '+((res.data&&res.data.detail)||'Execution failed — try again');
@@ -1838,9 +1755,9 @@ el('qt-exec-btn').addEventListener('click',function(){
 el('qt-cancel-btn').addEventListener('click',function(){
   clearInterval(st.timer);
   if(st.token){
-    fetch('/voice/cancel',{
+    fetch('/control/voice/proxy/cancel',{
       method:'POST',
-      headers:{'Content-Type':'application/json','X-Voice-Auth-Token':getVTok()},
+      headers:{'Content-Type':'application/json'},
       body:JSON.stringify({confirmation_token:st.token})
     }).catch(function(){});
   }
@@ -1849,6 +1766,14 @@ el('qt-cancel-btn').addEventListener('click',function(){
 });
 
 el('qt-reparse-btn').addEventListener('click',function(){resetUI();setTimeout(parseTrade,50);});
+
+var _toggleBtn=el('qt-toggle-channel-btn');
+if(_toggleBtn)_toggleBtn.addEventListener('click',function(){
+  fetch('/control/voice/proxy/toggle',{method:'POST',headers:{'Content-Type':'application/json'}})
+    .then(function(r){return r.ok?r.json():null;})
+    .then(function(d){if(d)updateChannelStatus(d.voice_channel_enabled);})
+    .catch(function(){});
+});
 
 function setBothLoading(on){
   el('qt-exec-btn').disabled=on;el('qt-cancel-btn').disabled=on;
@@ -1923,20 +1848,24 @@ function renderLog(){
   }).join('');
 }
 
+function updateChannelStatus(enabled){
+  var e=el('qt-channel-status'),b=el('qt-toggle-channel-btn');if(!e)return;
+  e.textContent='Channel: '+(enabled?'🟢 Enabled':'🔴 Disabled');
+  e.style.color=enabled?'#248A3D':'#D70015';
+  if(b){b.textContent=enabled?'Disable Channel':'Enable Channel';b.style.display='inline-flex';}
+}
+
 function checkChannel(){
-  var adm=getCk(CK_ADM),e=el('qt-channel-status');if(!e)return;
-  if(!adm){e.textContent='Channel status: unknown — admin token required';e.style.color='#8E8E93';return;}
-  fetch('/admin/voice/status',{headers:{'X-Admin-Token':adm}})
+  var e=el('qt-channel-status');if(!e)return;
+  fetch('/control/voice/proxy/status')
     .then(function(r){return r.ok?r.json():null;})
     .then(function(d){
-      if(!d){e.textContent='Channel status: admin token rejected';e.style.color='#D70015';return;}
-      var on=d.voice_channel_enabled;
-      e.textContent='Channel: '+(on?'🟢 Enabled':'🔴 Disabled');
-      e.style.color=on?'#248A3D':'#D70015';
+      if(!d){e.textContent='Channel status: unavailable';e.style.color='#8E8E93';return;}
+      updateChannelStatus(d.voice_channel_enabled);
     }).catch(function(){e.textContent='Channel status: unavailable';e.style.color='#8E8E93';});
 }
 
-updateTokenBadge();checkChannel();renderLog();
+checkChannel();renderLog();
 })();
 </script>
 """
@@ -2530,6 +2459,98 @@ async def update_risk(
         except ValueError:
             pass
     return Response(status_code=302, headers={"Location": "/control"})
+
+
+# ── Voice proxy — dashboard-auth'd wrappers so browser needs no token ─────────
+
+import httpx as _httpx  # noqa: E402 — already in requirements.txt
+
+_VOICE_BASE = "http://127.0.0.1:8000"
+
+
+async def _voice_proxy(method: str, path: str, body: bytes, settings) -> Response:
+    """Forward a voice API call with server-side token injection."""
+    tok = settings.VOICE_AUTH_TOKEN
+    if not tok:
+        return Response(
+            content='{"detail":"VOICE_AUTH_TOKEN not set on server"}',
+            status_code=503, media_type="application/json",
+        )
+    async with _httpx.AsyncClient() as client:
+        r = await client.request(
+            method, f"{_VOICE_BASE}{path}",
+            content=body,
+            headers={"Content-Type": "application/json", "X-Voice-Auth-Token": tok},
+            timeout=30.0,
+        )
+    return Response(content=r.content, status_code=r.status_code, media_type="application/json")
+
+
+@app.post("/control/voice/proxy/transcribe")
+async def vp_transcribe(
+    request: Request,
+    _: None = Depends(_auth_guard),
+    settings: Settings = Depends(get_current_settings),
+) -> Response:
+    return await _voice_proxy("POST", "/voice/transcribe", await request.body(), settings)
+
+
+@app.post("/control/voice/proxy/confirm")
+async def vp_confirm(
+    request: Request,
+    _: None = Depends(_auth_guard),
+    settings: Settings = Depends(get_current_settings),
+) -> Response:
+    return await _voice_proxy("POST", "/voice/confirm", await request.body(), settings)
+
+
+@app.post("/control/voice/proxy/cancel")
+async def vp_cancel(
+    request: Request,
+    _: None = Depends(_auth_guard),
+    settings: Settings = Depends(get_current_settings),
+) -> Response:
+    return await _voice_proxy("POST", "/voice/cancel", await request.body(), settings)
+
+
+@app.get("/control/voice/proxy/status")
+async def vp_status(
+    _: None = Depends(_auth_guard),
+    settings: Settings = Depends(get_current_settings),
+) -> Response:
+    admin_tok = settings.ADMIN_AUTH_TOKEN
+    if not admin_tok:
+        return Response(
+            content='{"detail":"ADMIN_AUTH_TOKEN not set on server"}',
+            status_code=503, media_type="application/json",
+        )
+    async with _httpx.AsyncClient() as client:
+        r = await client.get(
+            f"{_VOICE_BASE}/admin/voice/status",
+            headers={"X-Admin-Token": admin_tok},
+            timeout=10.0,
+        )
+    return Response(content=r.content, status_code=r.status_code, media_type="application/json")
+
+
+@app.post("/control/voice/proxy/toggle")
+async def vp_toggle(
+    _: None = Depends(_auth_guard),
+    settings: Settings = Depends(get_current_settings),
+) -> Response:
+    admin_tok = settings.ADMIN_AUTH_TOKEN
+    if not admin_tok:
+        return Response(
+            content='{"detail":"ADMIN_AUTH_TOKEN not set on server"}',
+            status_code=503, media_type="application/json",
+        )
+    async with _httpx.AsyncClient() as client:
+        r = await client.post(
+            f"{_VOICE_BASE}/admin/voice/toggle",
+            headers={"X-Admin-Token": admin_tok},
+            timeout=10.0,
+        )
+    return Response(content=r.content, status_code=r.status_code, media_type="application/json")
 
 
 # ── /orders — consolidated trade view ────────────────────────────────────────
