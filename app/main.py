@@ -38,7 +38,7 @@ from app.storage import (
     WebSession, _register_factory, init_db,
 )
 from app.strike_selector import NoValidStrikeError, select_strike
-from app.symbol_mapper import resolve_underlying
+from app.symbol_mapper import _MCX_COMMODITY_NAMES as _MCX_NAMES, resolve_underlying
 from app.schemas import AlertPayload
 from app.watcher import EntryFilledEvent, GttFilledEvent, OrderWatcher
 
@@ -719,12 +719,19 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
         # ── Time-of-day entry filter ──────────────────────────────────────────
         if alert_data.action in ("BUY", "SELL"):
             _entry_start = _parse_hhmm(state.get_entry_window_start(settings.ENTRY_WINDOW_START))
-            _entry_end = _parse_hhmm(state.get_entry_window_end(settings.ENTRY_WINDOW_END))
+            # MCX commodities trade until 23:30 IST — use a separate end cutoff.
+            _raw = alert_data.tv_ticker.upper().split(":")[-1]
+            if _raw.endswith("1!"):
+                _raw = _raw[:-2]
+            _is_mcx = _raw in _MCX_NAMES or _raw in settings.NATURAL_GAS_NAMES
+            _mcx_end = "23:00"
+            _entry_end = _parse_hhmm(_mcx_end if _is_mcx else state.get_entry_window_end(settings.ENTRY_WINDOW_END))
+            _window_end_label = _mcx_end if _is_mcx else settings.ENTRY_WINDOW_END
             _now_time = now.time().replace(second=0, microsecond=0)
             if not (_entry_start <= _now_time <= _entry_end):
                 log.info(
                     "Alert %d: blocked — outside entry window [%s–%s] at %s",
-                    alert_id, settings.ENTRY_WINDOW_START, settings.ENTRY_WINDOW_END,
+                    alert_id, settings.ENTRY_WINDOW_START, _window_end_label,
                     now.strftime("%H:%M"),
                 )
                 alert.processed = True
