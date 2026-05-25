@@ -1611,7 +1611,8 @@ _QUICK_TRADE_PANEL = """
 <div class="card" id="qt-panel">
 <div class="ct">Quick Trade &#x26A1;</div>
 <div id="qt-input-area" style="padding:16px">
-<textarea id="qt-text" rows="2" style="width:100%;font-size:18px;padding:12px 14px;border:1.5px solid #E5E5EA;border-radius:10px;resize:none;font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','Helvetica Neue',Arial,sans-serif;background:#FAFAFA;color:#1C1C1E;-webkit-appearance:none;transition:border-color .2s;margin-bottom:10px;display:block" placeholder="Type or dictate your trade &#x2014; e.g. buy one lot NIFTY ATM call"></textarea>
+<textarea id="qt-text" rows="2" style="width:100%;font-size:18px;padding:12px 14px;border:1.5px solid #E5E5EA;border-radius:10px;resize:none;font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','Helvetica Neue',Arial,sans-serif;background:#FAFAFA;color:#1C1C1E;-webkit-appearance:none;transition:border-color .2s;margin-bottom:8px;display:block" placeholder="Type or dictate your trade &#x2014; e.g. buy one lot NIFTY ATM call"></textarea>
+<div id="qt-token-badge" style="display:inline-block;font-size:.74em;font-weight:500;padding:4px 10px;border-radius:20px;margin-bottom:10px;background:rgba(255,149,0,.1);color:#C93400">&#x26A0; No token &#x2014; open Settings</div>
 <div id="qt-err" style="display:none;background:rgba(255,59,48,.08);color:#D70015;border-radius:8px;padding:9px 12px;font-size:.82em;font-weight:500;margin-bottom:10px"></div>
 <button id="qt-parse-btn" class="btn bp bfull">Parse Trade</button>
 </div>
@@ -1634,7 +1635,7 @@ _QUICK_TRADE_PANEL = """
 <div style="border-top:.5px solid rgba(0,0,0,.08)">
 <button id="qt-settings-toggle" style="width:100%;background:none;border:none;padding:12px 16px;text-align:left;font-size:.8em;color:#636366;cursor:pointer;font-family:inherit;display:flex;align-items:center;gap:6px;font-weight:500">Settings &#x2699;&#xFE0F;</button>
 <div id="qt-settings-body" style="display:none;padding:0 16px 16px;border-top:.5px solid rgba(0,0,0,.06)">
-<div style="background:rgba(0,122,255,.06);border-radius:10px;padding:12px;margin:12px 0;font-size:.78em;color:#3A3A3C;line-height:1.55">&#x1F512; Your auth token is stored only in this browser&#x2019;s localStorage. It never leaves your device except in API calls to your own server over HTTPS. Clear it before sharing this browser. The token grants full trade-placement authority &#x2014; treat it like a password.</div>
+<div style="background:rgba(0,122,255,.06);border-radius:10px;padding:12px;margin:12px 0;font-size:.78em;color:#3A3A3C;line-height:1.55">&#x1F512; Your auth token is stored as a browser cookie (1-year expiry) on this device only. It never leaves your device except in HTTPS calls to your own server. Clear it before sharing this browser. The token grants full trade-placement authority &#x2014; treat it like a password.</div>
 <div style="margin-bottom:14px">
 <div style="font-size:.72em;font-weight:600;color:#8E8E93;margin-bottom:6px;text-transform:uppercase;letter-spacing:.07em">Voice Auth Token</div>
 <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
@@ -1666,10 +1667,35 @@ _QUICK_TRADE_PANEL = """
 <script>
 (function(){
 'use strict';
-var LS_KEY='voiceAuthToken',LS_ADM='adminAuthToken';
+var CK_KEY='ztVoiceToken',CK_ADM='ztAdminToken';
 var st={token:null,transcript:null,expiresAt:null,timer:null,log:[]};
 function el(i){return document.getElementById(i);}
-function getVTok(){return localStorage.getItem(LS_KEY)||'';}
+
+// Cookie helpers — far more persistent than localStorage on iOS Safari/PWA
+function setCk(name,val,days){
+  var exp=new Date(Date.now()+(days||365)*864e5).toUTCString();
+  document.cookie=name+'='+encodeURIComponent(val)+'; expires='+exp+'; path=/; SameSite=Strict';
+}
+function getCk(name){
+  var m=document.cookie.match('(?:^|; )'+name+'=([^;]*)');
+  return m?decodeURIComponent(m[1]):'';
+}
+function delCk(name){
+  document.cookie=name+'=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/; SameSite=Strict';
+}
+function getVTok(){return getCk(CK_KEY);}
+
+function updateTokenBadge(){
+  var e=el('qt-token-badge');if(!e)return;
+  var v=getVTok();
+  if(v){
+    e.textContent='🔑 Token: …'+v.slice(-6);
+    e.style.color='#248A3D';e.style.background='rgba(52,199,89,.1)';
+  }else{
+    e.textContent='⚠ No token — open Settings';
+    e.style.color='#C93400';e.style.background='rgba(255,149,0,.1)';
+  }
+}
 
 el('qt-settings-toggle').addEventListener('click',function(){
   var b=el('qt-settings-body'),open=b.style.display!=='none';
@@ -1679,21 +1705,22 @@ el('qt-settings-toggle').addEventListener('click',function(){
 el('qt-save-token').addEventListener('click',function(){
   var v=el('qt-token-input').value.trim();
   if(!v)return;
-  localStorage.setItem(LS_KEY,v);
+  setCk(CK_KEY,v,365);
   el('qt-token-input').value='';
-  showMsg('qt-token-msg','✓ Token saved','ok');
-  checkChannel();
+  showMsg('qt-token-msg','✓ Token saved (1 year)','ok');
+  updateTokenBadge();checkChannel();
 });
 el('qt-clear-token').addEventListener('click',function(){
-  localStorage.removeItem(LS_KEY);
+  delCk(CK_KEY);
   showMsg('qt-token-msg','Token cleared','neu');
+  updateTokenBadge();
 });
 el('qt-save-admin-token').addEventListener('click',function(){
   var v=el('qt-admin-token-input').value.trim();
   if(!v)return;
-  localStorage.setItem(LS_ADM,v);
+  setCk(CK_ADM,v,365);
   el('qt-admin-token-input').value='';
-  showMsg('qt-admin-token-msg','✓ Admin token saved','ok');
+  showMsg('qt-admin-token-msg','✓ Admin token saved (1 year)','ok');
   checkChannel();
 });
 
@@ -1897,7 +1924,7 @@ function renderLog(){
 }
 
 function checkChannel(){
-  var adm=localStorage.getItem(LS_ADM),e=el('qt-channel-status');if(!e)return;
+  var adm=getCk(CK_ADM),e=el('qt-channel-status');if(!e)return;
   if(!adm){e.textContent='Channel status: unknown — admin token required';e.style.color='#8E8E93';return;}
   fetch('/admin/voice/status',{headers:{'X-Admin-Token':adm}})
     .then(function(r){return r.ok?r.json():null;})
@@ -1909,7 +1936,7 @@ function checkChannel(){
     }).catch(function(){e.textContent='Channel status: unavailable';e.style.color='#8E8E93';});
 }
 
-checkChannel();renderLog();
+updateTokenBadge();checkChannel();renderLog();
 })();
 </script>
 """
