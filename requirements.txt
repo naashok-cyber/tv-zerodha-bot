@@ -56,6 +56,9 @@ pycparser==3.0
 webauthn
 cbor2
 
+# Voice channel — NLU via Claude
+anthropic
+
 # ── Runtime transitive ────────────────────────────────────────────────────────
 annotated-types==0.7.0
 greenlet==3.4.0

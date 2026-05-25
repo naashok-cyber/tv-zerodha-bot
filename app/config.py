@@ -190,6 +190,23 @@ class Settings(BaseSettings):
     BACKOFF_MAX_TRIES: int = 5
     BACKOFF_INITIAL_WAIT_SECS: float = 1.0
 
+    # ── Voice channel ──────────────────────────────────────────────────────────
+    VOICE_AUTH_TOKEN: str = ""          # Required; 401 if empty or wrong
+    ADMIN_AUTH_TOKEN: str = ""          # Required; 401 if empty or wrong
+    ANTHROPIC_API_KEY: str = ""         # Required for NLU; 503 if empty
+    OPENAI_API_KEY: str = ""            # Optional; needed only when TRANSCRIPTION_MODE=whisper
+    VOICE_NLU_MODEL: str = "claude-sonnet-4-6"
+    VOICE_ALLOWED_INSTRUMENTS: list[str] = [
+        "NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX",
+        "CRUDEOIL", "CRUDEOILM", "GOLD", "SILVER",
+    ]
+    VOICE_NFO_INSTRUMENTS: list[str] = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"]
+    VOICE_MCX_INSTRUMENTS: list[str] = ["CRUDEOIL", "CRUDEOILM", "GOLD", "SILVER"]
+    VOICE_MAX_LOTS: int = 5
+    VOICE_CONFIRM_TTL_SECONDS: int = 60
+    VOICE_DEDUP_SECONDS: int = 10
+    VOICE_RATE_LIMIT: int = 30          # max requests per 60-second window per token
+    VOICE_CONFIG_PATH: str = "data/voice_config.json"
 
 
 @lru_cache(maxsize=1)

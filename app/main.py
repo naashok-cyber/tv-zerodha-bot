@@ -505,6 +505,11 @@ _security = HTTPBasic(auto_error=False)
 from app.webauthn_routes import router as _webauthn_router  # noqa: E402
 app.include_router(_webauthn_router)
 
+from app.routes.voice import router as _voice_router  # noqa: E402
+from app.routes.admin_voice import router as _admin_voice_router  # noqa: E402
+app.include_router(_voice_router)
+app.include_router(_admin_voice_router)
+
 
 @app.exception_handler(RequestValidationError)
 async def _validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
