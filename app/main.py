@@ -720,7 +720,7 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
         if alert_data.action in ("BUY", "SELL"):
             _entry_start = _parse_hhmm(state.get_entry_window_start(settings.ENTRY_WINDOW_START))
             # MCX commodities trade until 23:30 IST — use a separate end cutoff.
-            _raw = alert_data.tv_ticker.upper().split(":")[-1]
+            _raw = alert_data.symbol.upper().split(":")[-1]
             if _raw.endswith("1!"):
                 _raw = _raw[:-2]
             _is_mcx = _raw in _MCX_NAMES or _raw in settings.NATURAL_GAS_NAMES
