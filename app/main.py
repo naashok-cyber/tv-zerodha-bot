@@ -1694,7 +1694,7 @@ function pausePageRefresh(){
 }
 function resumePageRefresh(){
   var m=document.querySelector('meta[http-equiv="refresh"]');
-  if(m)m.setAttribute('content','30');
+  if(m)m.setAttribute('content','120');
 }
 
 function showConfirm(d){
@@ -1880,7 +1880,7 @@ def _shell(active: str, content: str, wide: bool = False, refresh: bool = False)
         for p, lbl in pages
     )
     wrap_cls = "wrap wrap-lg" if wide else "wrap wrap-sm"
-    refresh_meta = "<meta http-equiv='refresh' content='30'>" if refresh else ""
+    refresh_meta = "<meta http-equiv='refresh' content='120'>" if refresh else ""
     lut_html = (
         "<span id='lut' style='font-size:.68em;color:rgba(255,255,255,.35);"
         "margin-left:auto;padding:10px 14px;white-space:nowrap'></span>"
