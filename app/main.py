@@ -217,11 +217,17 @@ def _on_entry_filled(event: EntryFilledEvent) -> None:
             sl_risk_pct = fill_price * sl_pct          # percentage-based SL distance
             qty = event.fill_qty
 
-            # Ensure the SL band is wide enough that:
-            #   (a) max loss >= ₹1000 (loss-floor widening for cheap options), and
-            #   (b) absolute distance >= ₹1 (avoids GTT rejection on near-zero premiums).
+            # Ensure the SL band is wide enough that max INR loss >= ₹1000.
+            # MCX options have lot_size=1 in instruments CSV but each lot represents
+            # MCX_LOT_UNITS underlying units (e.g. 10 barrels for CRUDEOILM).
+            # Use effective monetary qty so the floor is per-unit price distance, not per-lot.
+            _mcx_units = (
+                settings.MCX_LOT_UNITS.get(meta.get("underlying", order.tradingsymbol), 1)
+                if order.exchange == "MCX" else 1
+            )
+            _eff_qty = qty * _mcx_units
             _MIN_GTT_LOSS_INR = 1000.0
-            min_loss_dist = _MIN_GTT_LOSS_INR / qty if qty > 0 else sl_risk_pct
+            min_loss_dist = _MIN_GTT_LOSS_INR / _eff_qty if _eff_qty > 0 else sl_risk_pct
             sl_distance = max(sl_risk_pct, min_loss_dist, 1.0)
             # Target keeps original %-based distance (preserves R:R intent) with ₹1 floor.
             target_distance = max(rr * sl_risk_pct, 1.0)
@@ -233,7 +239,21 @@ def _on_entry_filled(event: EntryFilledEvent) -> None:
             else:
                 # Short (written option): SL when premium rises, target when it falls
                 sl_price = fill_price + sl_distance
-                target_price = max(fill_price * (1.0 - state.get_sell_options_profit_pct(settings.SELL_OPTIONS_PROFIT_PCT)), 0.05)
+                # Formula target: % drops as premium rises (quicker exit on expensive options).
+                # /control override takes priority when explicitly set.
+                _manual_pct = state.get_sell_options_profit_pct(None)
+                if _manual_pct is not None:
+                    _profit_pct = _manual_pct
+                else:
+                    _profit_pct = max(
+                        settings.SELL_OPTIONS_PROFIT_FLOOR,
+                        settings.SELL_OPTIONS_PROFIT_BASE - fill_price * settings.SELL_OPTIONS_PROFIT_SLOPE,
+                    )
+                target_price = max(fill_price * (1.0 - _profit_pct), 0.05)
+                log.info(
+                    "_on_entry_filled: %s fill=%.2f profit_target=%.0f%% → target=%.2f",
+                    order.tradingsymbol, fill_price, _profit_pct * 100, target_price,
+                )
 
         # Round SL and target to the instrument's minimum tick size so GTT
         # trigger prices are always valid tradeable prices (MCX tick: 0.05–0.10).
@@ -385,6 +405,8 @@ def _on_entry_filled(event: EntryFilledEvent) -> None:
                 trail_sl_pct = settings.EQUITY_SL_PCT
             elif instrument_type == "FUT":
                 trail_sl_pct = settings.FUTURES_SL_PCT
+            elif meta.get("straddle_id") and entry_side == "SELL":
+                trail_sl_pct = settings.STRADDLE_PER_LEG_SL_MULTIPLIER - 1.0
             else:
                 trail_sl_pct = state.get_sl_pct(settings.SL_PREMIUM_PCT)
             _trailing_manager.register(
@@ -529,14 +551,15 @@ def _process_straddle(alert_id: int, entry_data: dict, settings: Settings) -> No
             session.commit()
             return
 
+        _straddle_exchange = entry_data.get("exchange", "MCX")
         ce_instr = (
             session.query(Instrument)
-            .filter(Instrument.tradingsymbol == ce_sym, Instrument.exchange == "MCX")
+            .filter(Instrument.tradingsymbol == ce_sym, Instrument.exchange == _straddle_exchange)
             .first()
         )
         pe_instr = (
             session.query(Instrument)
-            .filter(Instrument.tradingsymbol == pe_sym, Instrument.exchange == "MCX")
+            .filter(Instrument.tradingsymbol == pe_sym, Instrument.exchange == _straddle_exchange)
             .first()
         )
         if ce_instr is None or pe_instr is None:
@@ -558,7 +581,10 @@ def _process_straddle(alert_id: int, entry_data: dict, settings: Settings) -> No
             try:
                 from app.voice.straddle import validate_straddle
                 _kite_check = get_session_manager().get_kite()
-                _sv = validate_straddle(underlying, quantity, _kite_check, session, settings, now)
+                _sv = validate_straddle(
+                    underlying, quantity, _kite_check, session, settings, now,
+                    exchange=entry_data.get("exchange", "MCX"),
+                )
                 if not _sv.margin_ok:
                     log.error(
                         "_process_straddle %d: margin now insufficient at execution (%s) — aborting",
@@ -661,7 +687,7 @@ def _process_straddle(alert_id: int, entry_data: dict, settings: Settings) -> No
                 alert_id=alert_id,
                 kite_order_id=kite_oid,
                 variety="regular",
-                exchange="MCX",
+                exchange=_straddle_exchange,
                 tradingsymbol=sym,
                 transaction_type="SELL",
                 order_type="MARKET",
@@ -712,6 +738,7 @@ async def lifespan(app: FastAPI):
         on_tick_callback=_trailing_manager.on_ticks,
     )
     state.set_trade_mode(get_settings().TRADE_MODE.value)
+    state.load_overrides_from_disk()
     _scheduler = make_scheduler(session_factory=_SessionFactory)
     _scheduler.start()
     daily_session_check(now=datetime.now(IST))
@@ -957,7 +984,9 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
                     return
 
         # ── Time-of-day entry filter ──────────────────────────────────────────
-        if alert_data.action in ("BUY", "SELL"):
+        # Voice orders are manual commands — skip the time gate.
+        _is_voice = bool(alert.strategy_id and alert.strategy_id.startswith(("voice_", "straddle_")))
+        if alert_data.action in ("BUY", "SELL") and not _is_voice:
             _entry_start = _parse_hhmm(state.get_entry_window_start(settings.ENTRY_WINDOW_START))
             # MCX commodities trade until 23:30 IST — use a separate end cutoff.
             _raw = alert_data.symbol.upper().split(":")[-1]
@@ -1270,8 +1299,9 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
         else:  # SELL_OPTIONS: write the opposite type
             flag = "PE" if alert_data.action == "BUY" else "CE"
             entry_side = "SELL"
-        # Block new SELL_OPTIONS entries on weekly expiry day
-        if entry_side == "SELL" and state.get_no_entry_on_expiry_day(settings.NO_ENTRY_ON_EXPIRY_DAY):
+        # Block new SELL_OPTIONS entries on weekly expiry day (voice = manual override, skip)
+        _is_voice_order = bool(alert.strategy_id and alert.strategy_id.startswith(("voice_", "straddle_")))
+        if entry_side == "SELL" and state.get_no_entry_on_expiry_day(settings.NO_ENTRY_ON_EXPIRY_DAY) and not _is_voice_order:
             _is_expiry = (
                 session.query(Instrument)
                 .filter(

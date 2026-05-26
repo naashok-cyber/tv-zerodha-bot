@@ -94,7 +94,12 @@ class Settings(BaseSettings):
 
     # ── Options (v2) ──────────────────────────────────────────────────────────
     NO_ENTRY_ON_EXPIRY_DAY: bool = True      # block SELL_OPTIONS on weekly expiry day
-    SELL_OPTIONS_PROFIT_PCT: float = 0.50    # exit short options when premium drops to this fraction of entry
+    SELL_OPTIONS_PROFIT_PCT: float = 0.50    # fallback flat target (used only when /control override is set)
+    # Formula-based profit target: target_pct = max(FLOOR, BASE − fill × SLOPE)
+    # At ₹100 → ~52%, ₹300 → ~46%, ₹500 → ~40%, ₹700 → ~34%, ₹1000+ → 25% floor
+    SELL_OPTIONS_PROFIT_BASE: float = 0.55   # starting % at zero premium
+    SELL_OPTIONS_PROFIT_SLOPE: float = 0.0003 # % reduction per ₹1 of premium
+    SELL_OPTIONS_PROFIT_FLOOR: float = 0.25  # minimum target % regardless of premium
     TARGET_DELTA: float = 0.65
     DELTA_FALLBACK_STEPS: list[float] = [0.50, 0.35, 0.25]  # tried in order when primary delta strike exceeds capital
     SELL_OPTIONS_TARGET_DELTA: float = 0.50          # ATM for writing options (SELL_OPTIONS mode)
@@ -168,8 +173,8 @@ class Settings(BaseSettings):
     INSTRUMENTS_REFRESH_TIME: str = "08:30"
     NSE_SQUAREOFF_TIME: str = "15:25"   # daily EOD squareoff for open NFO positions
     MCX_SQUAREOFF_TIME: str = "23:25"
-    ENTRY_WINDOW_START: str = "09:45"         # HH:MM IST; block new entries before this
-    ENTRY_WINDOW_END: str = "14:30"           # HH:MM IST; block new entries after this
+    ENTRY_WINDOW_START: str = "09:30"         # HH:MM IST; block new entries before this
+    ENTRY_WINDOW_END: str = "15:00"           # HH:MM IST; block new entries after this (MCX uses 23:00)
     EXPIRY_DAY_SQUAREOFF_TIME: str = "14:00"  # HH:MM IST; close expiry-day NFO positions early
 
     # ── Symbol / Instruments ──────────────────────────────────────────────────
@@ -191,10 +196,15 @@ class Settings(BaseSettings):
     BACKOFF_INITIAL_WAIT_SECS: float = 1.0
 
     # ── Straddle ──────────────────────────────────────────────────────────────
-    STRADDLE_STRIKE_INTERVAL: float = 2.5       # MCX NG option strike spacing (points)
+    STRADDLE_STRIKE_INTERVAL: float = 2.5       # fallback strike spacing when not in STRADDLE_STRIKE_INTERVALS
+    STRADDLE_STRIKE_INTERVALS: dict[str, float] = {
+        "NATURALGAS": 2.5, "NATGASMINI": 2.5,
+        "NIFTY": 50.0, "BANKNIFTY": 100.0, "FINNIFTY": 50.0,
+        "MIDCPNIFTY": 25.0, "SENSEX": 100.0,
+    }
     STRADDLE_MAX_SPREAD_PCT: float = 1.0        # max bid-ask spread % per leg (1% default)
     STRADDLE_SL_MULTIPLIER: float = 1.5         # combined SL = net_credit × this
-    STRADDLE_PER_LEG_SL_MULTIPLIER: float = 3.0 # per-leg hard SL = entry_premium × this
+    STRADDLE_PER_LEG_SL_MULTIPLIER: float = 1.5 # per-leg hard SL = entry_premium × this
     STRADDLE_FILL_TIMEOUT_SECS: int = 5         # seconds to wait for concurrent leg fills
     STRADDLE_DELTA_TOLERANCE: float = 0.15      # ATM sanity: expect |delta| in 0.35–0.65
 

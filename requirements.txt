@@ -52,9 +52,6 @@ cryptography==47.0.0
 cffi==2.0.0
 pycparser==3.0
 
-# WebAuthn / biometric login
-webauthn
-cbor2
 
 # Voice channel — NLU via Claude
 anthropic

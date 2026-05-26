@@ -201,6 +201,7 @@ async def transcribe(
     underlying  = nlu.get("underlying", "")
     quantity    = int(nlu.get("quantity", 1))
     action_type = nlu.get("action_type", "entry")
+    exchange    = nlu.get("exchange", "NFO")
 
     allowed = set(settings.VOICE_ALLOWED_INSTRUMENTS)
     if underlying not in allowed:
@@ -254,6 +255,7 @@ async def transcribe(
                 straddle_sv = validate_straddle(
                     underlying, quantity, _kite, db, settings,
                     now=datetime.now(_IST),
+                    exchange=exchange,
                 )
                 straddle_report = build_validation_report(straddle_sv)
                 straddle_spread_warn = not straddle_sv.spread_ok

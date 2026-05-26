@@ -52,7 +52,7 @@ Translation rules:
 • "square off [instrument]"          → action="SQUARE_OFF", action_type="square_off"
 • "short straddle [X]" / "[X] short straddle" / "straddle on [X]" →
     action="STRADDLE_SHORT", action_type="straddle_short", option_type=null, strike=null
-  Note: straddle_short always targets MCX Natural Gas; exchange="MCX"
+  Use the exchange matching the underlying (NFO for NIFTY/BANKNIFTY/FINNIFTY/MIDCPNIFTY/SENSEX; MCX for NATURALGAS/CRUDEOIL etc)
 • If instrument NOT in whitelist → still parse best guess, set confidence=0.0
 • confidence < 0.85 when: instrument ambiguous, quantity not stated, action unclear
 • List EVERY field you assumed or guessed in uncertain_fields
@@ -94,7 +94,13 @@ Input: "Short straddle on natural gas with 2 lots"
 {{"action":"STRADDLE_SHORT","underlying":"NATURALGAS","quantity":2,"option_type":null,"strike":null,"limit_price":null,"target_delta":0.5,"options_mode":true,"exchange":"MCX","current_price":0,"target":null,"stoploss":null,"confidence":0.97,"uncertain_fields":[],"action_type":"straddle_short"}}
 
 Input: "NG short straddle 1 lot"
-{{"action":"STRADDLE_SHORT","underlying":"NATURALGAS","quantity":1,"option_type":null,"strike":null,"limit_price":null,"target_delta":0.5,"options_mode":true,"exchange":"MCX","current_price":0,"target":null,"stoploss":null,"confidence":0.96,"uncertain_fields":[],"action_type":"straddle_short"}}"""
+{{"action":"STRADDLE_SHORT","underlying":"NATURALGAS","quantity":1,"option_type":null,"strike":null,"limit_price":null,"target_delta":0.5,"options_mode":true,"exchange":"MCX","current_price":0,"target":null,"stoploss":null,"confidence":0.96,"uncertain_fields":[],"action_type":"straddle_short"}}
+
+Input: "Short straddle on NIFTY 1 lot"
+{{"action":"STRADDLE_SHORT","underlying":"NIFTY","quantity":1,"option_type":null,"strike":null,"limit_price":null,"target_delta":0.5,"options_mode":true,"exchange":"NFO","current_price":0,"target":null,"stoploss":null,"confidence":0.97,"uncertain_fields":[],"action_type":"straddle_short"}}
+
+Input: "BANKNIFTY short straddle 2 lots"
+{{"action":"STRADDLE_SHORT","underlying":"BANKNIFTY","quantity":2,"option_type":null,"strike":null,"limit_price":null,"target_delta":0.5,"options_mode":true,"exchange":"NFO","current_price":0,"target":null,"stoploss":null,"confidence":0.97,"uncertain_fields":[],"action_type":"straddle_short"}}"""
 
 
 def call_nlu(
