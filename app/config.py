@@ -148,7 +148,7 @@ class Settings(BaseSettings):
         "ALUMINIUM":  5000,  # kg/lot (1 lot = 5 MT)
         "NICKEL":     1500,  # kg/lot (1 lot = 1500 kg)
     }
-    FUTURES_SL_PCT: float = 0.008   # SL distance as fraction of price for NG near-month futures
+    FUTURES_SL_PCT: float = 0.015   # SL distance as fraction of price for futures (NG, CRUDE, etc.)
     EQUITY_SL_PCT: float = 0.01     # SL = 1% of fill price for CNC equity trades; target = RR_RATIO × SL
 
     # ── Risk module (risk.py) — Decimal for monetary precision ───────────────
