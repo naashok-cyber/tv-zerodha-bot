@@ -428,6 +428,91 @@ def _on_entry_filled(event: EntryFilledEvent) -> None:
                 _watcher.subscribe([instrument.instrument_token])
 
 
+# ── Restore trailing SL after restart ────────────────────────────────────────
+
+def _restore_trailing_sl() -> None:
+    """Re-register TrailingSL for all open positions after a container restart.
+
+    Trailing state is in-memory only; every restart wipes it.  This function
+    reads active GTTs from the DB and re-registers them so the trailing SL
+    resumes from where it left off without widening any already-locked SL.
+    """
+    if _trailing_manager is None or _watcher is None or _SessionFactory is None:
+        return
+    settings = get_settings()
+    try:
+        with _SessionFactory() as session:
+            from app.storage import Gtt, Instrument, Order, Position
+            rows = (
+                session.query(Position, Gtt, Order)
+                .join(Gtt, Position.gtt_id == Gtt.id)
+                .join(Order, Position.order_id == Order.id)
+                .filter(Gtt.status == "ACTIVE", Gtt.dry_run == False)  # noqa: E712
+                .all()
+            )
+            restored = 0
+            for pos, gtt, order in rows:
+                instr = (
+                    session.query(Instrument)
+                    .filter(
+                        Instrument.tradingsymbol == pos.tradingsymbol,
+                        Instrument.exchange == pos.exchange,
+                    )
+                    .first()
+                )
+                if instr is None:
+                    log.warning(
+                        "_restore_trailing_sl: instrument not found %s/%s — skipping",
+                        pos.exchange, pos.tradingsymbol,
+                    )
+                    continue
+
+                # Match sl_pct logic from _on_entry_filled
+                if pos.instrument_type == "EQ":
+                    sl_pct = settings.EQUITY_SL_PCT
+                elif pos.instrument_type == "FUT":
+                    sl_pct = settings.FUTURES_SL_PCT
+                elif order.straddle_id and order.transaction_type == "SELL":
+                    sl_pct = settings.STRADDLE_PER_LEG_SL_MULTIPLIER - 1.0
+                else:
+                    sl_pct = state.get_sl_pct(settings.SL_PREMIUM_PCT)
+
+                current_sl = float(gtt.sl_trigger)
+                entry_side = order.transaction_type
+
+                # Derive the implied best_price from the current (trailed) SL so
+                # the manager resumes from the correct anchor rather than the original fill.
+                # For SELL: current_sl = best_price × (1 + sl_pct)  → best_price = current_sl / (1 + sl_pct)
+                # For BUY:  current_sl = best_price × (1 − sl_pct)  → best_price = current_sl / (1 − sl_pct)
+                if entry_side == "SELL":
+                    implied_best = current_sl / (1.0 + sl_pct)
+                else:
+                    denom = 1.0 - sl_pct
+                    implied_best = current_sl / denom if denom > 0 else current_sl
+
+                _trailing_manager.register(
+                    tradingsymbol=pos.tradingsymbol,
+                    instrument_token=instr.instrument_token,
+                    exchange=pos.exchange,
+                    entry_side=entry_side,
+                    sl_pct=sl_pct,
+                    qty=order.quantity,
+                    product=order.product,
+                    target_price=float(gtt.target_trigger),
+                    initial_sl=current_sl,
+                    fill_price=implied_best,
+                    gtt_db_id=gtt.id,
+                    kite_gtt_id=gtt.kite_gtt_id,
+                    tick_size=float(instr.tick_size or 0.01),
+                )
+                _watcher.subscribe([instr.instrument_token])
+                restored += 1
+
+        log.info("_restore_trailing_sl: re-registered %d open position(s)", restored)
+    except Exception as exc:
+        log.error("_restore_trailing_sl: failed — %s", exc, exc_info=True)
+
+
 # ── GttFilledEvent callback ───────────────────────────────────────────────────
 
 def _on_gtt_filled(event: GttFilledEvent) -> None:
@@ -755,6 +840,7 @@ async def lifespan(app: FastAPI):
                     access_token=_stored_token,
                 )
                 log.info("OrderWatcher started at startup with stored token")
+                _restore_trailing_sl()
         except Exception as _exc:
             log.warning("Could not start OrderWatcher at startup: %s", _exc)
     # Run instrument refresh in a background thread so the server starts
