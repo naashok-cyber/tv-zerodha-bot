@@ -241,11 +241,30 @@ class TrailingSlManager:
                     pos.tradingsymbol, old_sl, new_sl, ltp, pos.best_price,
                 )
         except Exception as exc:
-            log.error(
-                "TrailingSL: update failed for %s: %s", pos.tradingsymbol, exc, exc_info=True
-            )
-            self._revert(pos, old_sl)
+            from kiteconnect.exceptions import InputException
+            if isinstance(exc, InputException) and "invalid trigger" in str(exc).lower():
+                # GTT was deleted/triggered on the broker side — stop retrying
+                log.error(
+                    "TrailingSL: GTT %s gone from Kite for %s (Invalid trigger ID) — "
+                    "marking KITE_INVALID and unregistering",
+                    kite_gtt_id, pos.tradingsymbol,
+                )
+                try:
+                    from app.storage import Gtt
+                    with self._session_factory() as _s:
+                        _g = _s.query(Gtt).filter(Gtt.id == pos.gtt_db_id).first()
+                        if _g:
+                            _g.status = "KITE_INVALID"
+                            _s.commit()
+                except Exception as _db_exc:
+                    log.error("TrailingSL: failed to mark GTT dead in DB: %s", _db_exc)
+                self.unregister(pos.instrument_token)
+            else:
+                log.error(
+                    "TrailingSL: update failed for %s: %s", pos.tradingsymbol, exc, exc_info=True
+                )
+                self._revert(pos, old_sl)
 
     def _revert(self, pos: _TrailPos, old_sl: float) -> None:
         pos.current_sl = old_sl
-        pos.last_update = 0.0  # allow retry on next tick
+        pos.last_update = time.monotonic()  # respect UPDATE_INTERVAL before retrying
