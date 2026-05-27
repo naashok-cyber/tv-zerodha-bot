@@ -44,8 +44,9 @@ Translation rules:
 • Bearish (buy put, long put, buy PE)    → action = "SELL"  (system maps SELL → PE entry)
 • "one lot" / "1 lot" → quantity=1; "two lots" → 2; etc. Default=1 if not stated
 • "ATM" or no strike → strike = null  (system finds ATM via delta 0.65)
-• "at <price>" / "limit <price>" / "<price> limit" → limit_price = <price> (LIMIT order at that price)
+• "at <price>" / "limit <price>" / "<price> limit" / "for <price>" / "priced at <price>" → limit_price = <price> (LIMIT order at that price)
 • strike vs limit_price: "NIFTY 25000 call at 145" → strike=25000, limit_price=145 (strike is the option strike; limit_price is the premium to pay)
+• "BANKNIFTY 55000 call for 1500" → strike=55000, limit_price=1500 ("for" introduces the premium, not the strike)
 • For futures (NATURALGAS, NATGASMINI): "at 296" means limit_price=296 (the futures price, not an option strike)
 • limit_price=null when no price is specified → system places MARKET order
 • "exit all", "square off all [X]"   → action="EXIT_ALL",   action_type="exit_all"
@@ -71,6 +72,9 @@ Input: "Buy NIFTY ATM call at 145"
 
 Input: "Buy NIFTY 25000 call at 145"
 {{"action":"BUY","underlying":"NIFTY","quantity":1,"option_type":"CE","strike":25000.0,"limit_price":145.0,"target_delta":0.65,"options_mode":true,"exchange":"NFO","current_price":0,"target":null,"stoploss":null,"confidence":0.98,"uncertain_fields":[],"action_type":"entry"}}
+
+Input: "Sell BANKNIFTY 55000 call for 1500"
+{{"action":"SELL","underlying":"BANKNIFTY","quantity":1,"option_type":"CE","strike":55000.0,"limit_price":1500.0,"target_delta":0.65,"options_mode":true,"exchange":"NFO","current_price":0,"target":null,"stoploss":null,"confidence":0.97,"uncertain_fields":[],"action_type":"entry"}}
 
 Input: "Sell natural gas at 296"
 {{"action":"SELL","underlying":"NATURALGAS","quantity":1,"option_type":null,"limit_price":296.0,"target_delta":0.65,"options_mode":true,"exchange":"MCX","current_price":0,"target":null,"stoploss":null,"confidence":0.97,"uncertain_fields":[],"action_type":"entry"}}
