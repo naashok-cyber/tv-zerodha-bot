@@ -14,6 +14,7 @@ _OVERRIDES_PATH = "data/state_overrides.json"
 # ── Session / mode state ──────────────────────────────────────────────────────
 SESSION_INVALID: bool = False
 TRADE_MODE: str = "BUY_OPTIONS"
+STOCK_MODE: str = "FNO"  # "EQUITY" → CNC equity; "FNO" → options
 
 # ── Live overrides — None means "use .env / config default" ──────────────────
 _PAPER_MODE: Optional[bool] = None      # True=paper(dry-run), False=live; None=use .env
@@ -41,6 +42,7 @@ def _save_overrides() -> None:
     """Write current overrides to disk. Must be called while holding _lock."""
     data = {
         "trade_mode": TRADE_MODE,
+        "stock_mode": STOCK_MODE,
         "paper_mode": _PAPER_MODE,
         "max_lots": _MAX_LOTS_OVERRIDE,
         "max_daily_loss": _MAX_DAILY_LOSS_OVERRIDE,
@@ -69,7 +71,7 @@ def _save_overrides() -> None:
 
 def load_overrides_from_disk() -> None:
     """Restore persisted overrides from disk. Call once at application startup."""
-    global TRADE_MODE, _PAPER_MODE
+    global TRADE_MODE, STOCK_MODE, _PAPER_MODE
     global _MAX_LOTS_OVERRIDE, _MAX_DAILY_LOSS_OVERRIDE, _SL_PCT_OVERRIDE
     global _RR_RATIO_OVERRIDE, _DAILY_PROFIT_TARGET_OVERRIDE, _SELL_OPTIONS_PROFIT_PCT_OVERRIDE
     global _ENTRY_WINDOW_START_OVERRIDE, _ENTRY_WINDOW_END_OVERRIDE, _NO_ENTRY_ON_EXPIRY_DAY_OVERRIDE
@@ -88,6 +90,8 @@ def load_overrides_from_disk() -> None:
     with _lock:
         if data.get("trade_mode"):
             TRADE_MODE = data["trade_mode"]
+        if data.get("stock_mode"):
+            STOCK_MODE = data["stock_mode"]
         if "paper_mode" in data:
             _PAPER_MODE = data["paper_mode"]
         if "max_lots" in data:
@@ -158,6 +162,28 @@ def toggle_trade_mode() -> str:
         TRADE_MODE = _cycle.get(TRADE_MODE, "BUY_OPTIONS")
         _save_overrides()
         return TRADE_MODE
+
+
+# ── Stock mode (EQUITY CNC vs F&O OPTIONS for non-index NSE symbols) ─────────
+
+def get_stock_mode() -> str:
+    with _lock:
+        return STOCK_MODE
+
+
+def set_stock_mode(value: str) -> None:
+    global STOCK_MODE
+    with _lock:
+        STOCK_MODE = value
+        _save_overrides()
+
+
+def toggle_stock_mode() -> str:
+    global STOCK_MODE
+    with _lock:
+        STOCK_MODE = "EQUITY" if STOCK_MODE == "FNO" else "FNO"
+        _save_overrides()
+        return STOCK_MODE
 
 
 # ── Paper / live mode (DRY_RUN override) ─────────────────────────────────────
