@@ -40,8 +40,8 @@ Return ONLY a valid JSON object with this exact schema (no markdown, no explanat
 Translation rules:
 • "call" / "CE"  → option_type = "CE"
 • "put"  / "PE"  → option_type = "PE"
-• Bullish (buy call, long call, buy CE)  → action = "BUY"
-• Bearish (buy put, long put, buy PE)    → action = "SELL"  (system maps SELL → PE entry)
+• "buy" / "long" → action = "BUY";  "sell" / "short" / "write" → action = "SELL"
+• action always reflects the user's literal direction — do NOT invert for puts
 • "one lot" / "1 lot" → quantity=1; "two lots" → 2; etc. Default=1 if not stated
 • "ATM" or no strike → strike = null  (system finds ATM via delta 0.65)
 • "at <price>" / "limit <price>" / "<price> limit" / "for <price>" / "priced at <price>" → limit_price = <price> (LIMIT order at that price)
@@ -66,6 +66,9 @@ Input: "Buy one lot of BANKNIFTY ATM call"
 
 Input: "Sell two lots NIFTY 25000 put"
 {{"action":"SELL","underlying":"NIFTY","quantity":2,"option_type":"PE","strike":25000.0,"limit_price":null,"target_delta":0.65,"options_mode":true,"exchange":"NFO","current_price":0,"target":null,"stoploss":null,"confidence":0.97,"uncertain_fields":[],"action_type":"entry"}}
+
+Input: "Buy 1 lot MIDCPNIFTY 14700 PE at 220"
+{{"action":"BUY","underlying":"MIDCPNIFTY","quantity":1,"option_type":"PE","strike":14700.0,"limit_price":220.0,"target_delta":0.65,"options_mode":true,"exchange":"NFO","current_price":0,"target":null,"stoploss":null,"confidence":0.98,"uncertain_fields":[],"action_type":"entry"}}
 
 Input: "Buy NIFTY ATM call at 145"
 {{"action":"BUY","underlying":"NIFTY","quantity":1,"option_type":"CE","strike":null,"limit_price":145.0,"target_delta":0.65,"options_mode":true,"exchange":"NFO","current_price":0,"target":null,"stoploss":null,"confidence":0.97,"uncertain_fields":[],"action_type":"entry"}}

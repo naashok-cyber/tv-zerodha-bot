@@ -255,16 +255,6 @@ def _on_entry_filled(event: EntryFilledEvent) -> None:
                     order.tradingsymbol, fill_price, _profit_pct * 100, target_price,
                 )
 
-        # Webhook-provided SL/target override the auto-calculated values when present.
-        _webhook_sl = meta.get("webhook_sl")
-        _webhook_target = meta.get("webhook_target")
-        if _webhook_sl is not None:
-            sl_price = float(_webhook_sl)
-            log.info("_on_entry_filled: using webhook sl_price=%.4f for %s", sl_price, order.tradingsymbol)
-        if _webhook_target is not None:
-            target_price = float(_webhook_target)
-            log.info("_on_entry_filled: using webhook target_price=%.4f for %s", target_price, order.tradingsymbol)
-
         # Round SL and target to the instrument's minimum tick size so GTT
         # trigger prices are always valid tradeable prices (MCX tick: 0.05–0.10).
         _tick = (instrument.tick_size or 0.01) if instrument else 0.01
@@ -290,6 +280,12 @@ def _on_entry_filled(event: EntryFilledEvent) -> None:
         )
         session.add(position)
         session.flush()  # get position.id
+
+        # Pre-compute buffered GTT limits so place call AND Gtt row store the same values.
+        from app.orders import compute_oco_limits
+        _sl_limit_d, _tgt_limit_d = compute_oco_limits(
+            sl_price, target_price, entry_side, settings.OCO_SLIPPAGE_BUFFER_PCT,
+        )
 
         kite_gtt_id = None
         gtt_error: str | None = None
@@ -328,9 +324,9 @@ def _on_entry_filled(event: EntryFilledEvent) -> None:
                         instrument,
                         event.fill_qty,
                         sl_trigger=Decimal(str(sl_price)),
-                        sl_limit=Decimal(str(sl_price)),
+                        sl_limit=_sl_limit_d,
                         target_trigger=Decimal(str(target_price)),
-                        target_limit=Decimal(str(target_price)),
+                        target_limit=_tgt_limit_d,
                         last_price=Decimal(str(fill_price)),
                         product=order.product,
                         entry_side=entry_side,
@@ -395,8 +391,8 @@ def _on_entry_filled(event: EntryFilledEvent) -> None:
             tradingsymbol=order.tradingsymbol,
             sl_trigger=sl_price,
             target_trigger=target_price,
-            sl_order_price=sl_price,
-            target_order_price=target_price,
+            sl_order_price=float(_sl_limit_d),
+            target_order_price=float(_tgt_limit_d),
             last_price_at_placement=fill_price,
             status="ACTIVE" if (not _dry_run(settings) and gtt_error is None) else ("GTT_FAILED" if gtt_error else "DRY_RUN"),
             placed_at=now,
@@ -832,9 +828,21 @@ async def lifespan(app: FastAPI):
         on_gtt_filled=_on_gtt_filled,
         on_tick_callback=_trailing_manager.on_ticks,
     )
-    state.set_trade_mode(get_settings().TRADE_MODE.value)
+    # Order matters: load_overrides_from_disk() FIRST so module-default
+    # globals are replaced by persisted values. set_trade_mode() triggers a
+    # save, so calling it before load would write the empty in-memory state
+    # to disk and wipe everything the user persisted.
     state.load_overrides_from_disk()
-    _scheduler = make_scheduler(session_factory=_SessionFactory)
+    if not state.get_trade_mode():
+        state.set_trade_mode(get_settings().TRADE_MODE.value)
+    def _watcher_restart(api_key: str, access_token: str) -> None:
+        if _watcher is not None:
+            _watcher.restart(api_key=api_key, access_token=access_token)
+
+    _scheduler = make_scheduler(
+        session_factory=_SessionFactory,
+        watcher_restart_fn=_watcher_restart,
+    )
     _scheduler.start()
     daily_session_check(now=datetime.now(IST))
     # Start watcher immediately if a valid token is already stored, so fill
@@ -1028,6 +1036,30 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
         now = alert_data.timestamp
         product = settings.PRODUCT_TYPE.value
 
+        # ── Stock mode routing (toggleable from /control) ─────────────────────
+        # For non-indexed NSE symbols (stocks), the /control STOCK_MODE toggle
+        # decides whether BUY/SELL trades as EQUITY (CNC) or F&O OPTIONS.
+        # Index symbols (segment NFO/BFO) and MCX commodities (segment MCX) are
+        # untouched — they always route as today. Default "FNO" preserves the
+        # pre-existing webhook behavior so this is a no-op until the toggle flips.
+        if (
+            alert_data.action in ("BUY", "SELL")
+            and underlying.segment == "NSE"
+        ):
+            _stock_mode = state.get_stock_mode()
+            if _stock_mode == "EQUITY" and alert_data.instrument_type != "EQUITY":
+                alert_data = alert_data.model_copy(update={"instrument_type": "EQUITY"})
+                log.info(
+                    "Alert %d: STOCK_MODE=EQUITY → routing %s as equity CNC",
+                    alert_id, underlying.name,
+                )
+            elif _stock_mode == "FNO" and alert_data.instrument_type != "OPTIONS":
+                alert_data = alert_data.model_copy(update={"instrument_type": "OPTIONS"})
+                log.info(
+                    "Alert %d: STOCK_MODE=FNO → routing %s as options",
+                    alert_id, underlying.name,
+                )
+
         if alert_data.action == "TRAIL":
             log.info(
                 "Alert %d: TRAIL action ignored — tick-based trailing SL is active automatically",
@@ -1103,124 +1135,6 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
                 session.commit()
                 return
 
-        # ── NATURALGAS / NATGASMINI: near-month future entry ─────────────────
-        # NG options are illiquid; default to near-month FUT.
-        # Exception: voice commands with explicit option_type="CE"/"PE" fall
-        # through to the options path below to trade the specific contract.
-        if underlying.is_natural_gas and alert_data.option_type not in ("CE", "PE"):
-            try:
-                resolved = resolve_expiry(
-                    underlying.name, session, instrument_type="FUT",
-                    segment=underlying.segment, now=now, settings=settings,
-                )
-            except NoEligibleExpiryError as exc:
-                _fail_alert(session, alert, "NoEligibleExpiryError", exc)
-                session.commit()
-                return
-
-            fut_instr = (
-                session.query(Instrument)
-                .filter(
-                    Instrument.name == underlying.name,
-                    Instrument.instrument_type == "FUT",
-                    Instrument.exchange == underlying.segment,
-                    Instrument.expiry == resolved.expiry_date,
-                )
-                .first()
-            )
-            if fut_instr is None:
-                log.error("Alert %d: NG FUT instrument not found for expiry %s", alert_id, resolved.expiry_date)
-                alert.processed = True
-                session.commit()
-                return
-
-            sl_frac = settings.SL_PERCENT
-            entry_px_d = alert_data.price
-            # Kite's instruments.csv stores lot_size=1 for MCX futures; the true
-            # contract size (MMBtu/lot) lives in MCX_LOT_UNITS.  SL must be in
-            # INR-per-contract so compute_futures_qty produces contracts, not units.
-            mcx_lot_units = Decimal(str(settings.MCX_LOT_UNITS.get(underlying.name, 1)))
-            sl_distance_d = entry_px_d * sl_frac * mcx_lot_units
-            sl_distance = float(sl_distance_d)
-            target_distance = state.get_rr_ratio(settings.RR_RATIO) * sl_distance
-
-            daily_remaining = risk.daily_loss_remaining(session, now)
-            capital_risk = min(
-                Decimal(str(state.get_capital_per_trade(settings.CAPITAL_PER_TRADE))) * settings.RISK_PCT,
-                daily_remaining,
-            )
-            qty = risk.compute_futures_qty(capital_risk, sl_distance_d, Decimal(str(fut_instr.lot_size)))
-
-            if qty < fut_instr.lot_size:
-                log.warning("Alert %d: NG sizing — insufficient capital for 1 lot (qty=%d)", alert_id, qty)
-                alert.processed = True
-                session.commit()
-                return
-
-            qty = min(qty, state.get_max_lots(settings.MAX_LOTS_PER_TRADE) * fut_instr.lot_size)
-
-            ng_side = "BUY" if alert_data.action == "BUY" else "SELL"
-            _ng_lp  = alert_data.limit_price
-            _ng_ot  = "LIMIT" if _ng_lp else "MARKET"
-            kite_order_id = None
-            if not _dry_run(settings):
-                kite_client = get_session_manager().get_kite()
-                kite_order_id = place_entry(kite_client, fut_instr, ng_side, qty, _ng_ot, product, price=_ng_lp)
-                if kite_order_id:
-                    _pending_order_meta[kite_order_id] = {
-                        "instrument_type": "FUT",
-                        "entry_side": ng_side,
-                        "underlying": underlying.name,
-                        "dry_run": False,
-                        "webhook_sl": alert_data.sl_price,
-                        "webhook_target": alert_data.target_price,
-                    }
-            else:
-                log.info(
-                    "Alert %d: DRY_RUN — would place %s %s %d lots %s (sl_dist=%.4f)",
-                    alert_id, _ng_ot, ng_side, qty // fut_instr.lot_size, fut_instr.tradingsymbol, sl_distance,
-                )
-
-            order = Order(
-                alert_id=alert_id,
-                kite_order_id=kite_order_id,
-                variety="regular",
-                exchange=fut_instr.exchange,
-                tradingsymbol=fut_instr.tradingsymbol,
-                transaction_type=ng_side,
-                order_type=_ng_ot,
-                price=float(_ng_lp) if _ng_lp else None,
-                product=product,
-                quantity=qty,
-                status="PENDING" if not _dry_run(settings) else "DRY_RUN",
-                placed_at=now,
-                updated_at=now,
-                dry_run=_dry_run(settings),
-            )
-            session.add(order)
-            session.flush()
-
-            alert.processed = True
-            session.commit()
-            # Register AFTER commit so _on_entry_filled can find the Order row.
-            # MARKET orders fill in milliseconds; committing first closes the race.
-            if kite_order_id and not _dry_run(settings):
-                if _watcher is not None:
-                    _watcher.watch_order(kite_order_id, kite_fetcher=get_session_manager().get_kite)
-                else:
-                    log.error(
-                        "Alert %d: _watcher is None — GTT will not be placed for %s",
-                        alert_id, fut_instr.tradingsymbol,
-                    )
-            return
-
-        # NG with explicit option_type falls through to the options path below.
-        if underlying.is_natural_gas and alert_data.option_type in ("CE", "PE"):
-            log.info(
-                "Alert %d: NG explicit option_type=%s → options path",
-                alert_id, alert_data.option_type,
-            )
-
         # ── EQUITY (CNC) entry ────────────────────────────────────────────────
         # MCX symbols (CRUDEOILM, GOLD, etc.) sometimes arrive with instrument_type="EQUITY"
         # due to a TradingView alert template misconfiguration. Guard against misrouting them.
@@ -1288,8 +1202,6 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
                             "instrument_type": "EQ",
                             "underlying": underlying.name,
                             "dry_run": False,
-                            "webhook_sl": alert_data.sl_price,
-                            "webhook_target": alert_data.target_price,
                         }
                 else:
                     log.info(
@@ -1404,7 +1316,7 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
             adx_threshold = state.get_adx_threshold(settings.ADX_THRESHOLD)
             if alert_data.adx is None or alert_data.adx >= adx_threshold:
                 log.info(
-                    "Alert %d: RANGE_SELL skipped — ADX=%s (threshold=%.1f, need ADX < threshold)",
+                    "Alert %d: RANGE_SELL skipped -- ADX=%s (threshold=%.1f, need ADX < threshold)",
                     alert_id,
                     f"{alert_data.adx:.1f}" if alert_data.adx is not None else "not provided",
                     adx_threshold,
@@ -1572,6 +1484,15 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
         sl_per_unit = Decimal(str(option_ltp * mcx_units)) * Decimal(str(state.get_sl_pct(settings.SL_PREMIUM_PCT)))
         qty = risk.compute_futures_qty(capital_risk_opt, sl_per_unit, Decimal(str(lot_size)))
 
+        if qty < lot_size and alert_data.strike:
+            # User explicitly named a strike — honour it at minimum 1 lot, don't override.
+            log.warning(
+                "Alert %d: explicit strike %s — risk budget ₹%.0f < 1 lot cost; "
+                "placing minimum 1 lot as requested (strike override not allowed for voice)",
+                alert_id, selection.instrument.tradingsymbol, float(capital_risk_opt),
+            )
+            qty = lot_size
+
         if qty < lot_size:
             log.warning(
                 "Alert %d: options sizing — 0 lots at ltp=%.4f mcx_units=%d risk_budget=%.0f; "
@@ -1664,8 +1585,6 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
                 "underlying": underlying.name,
                 "entry_side": entry_side,
                 "dry_run": False,
-                "webhook_sl": alert_data.sl_price,
-                "webhook_target": alert_data.target_price,
             }
 
         order = Order(
@@ -1724,7 +1643,12 @@ async def webhook(
 
     # TradingView sends Content-Type: text/plain even for JSON bodies, so we
     # must parse manually instead of relying on FastAPI's automatic JSON binding.
-    raw_body = await request.body()
+    from starlette.requests import ClientDisconnect
+    try:
+        raw_body = await request.body()
+    except ClientDisconnect:
+        log.error("webhook: TradingView disconnected before body was delivered (ClientDisconnect) — alert lost")
+        return Response(status_code=499)  # client closed request
     try:
         payload = AlertPayload.model_validate(json.loads(raw_body))
     except json.JSONDecodeError as exc:
@@ -2648,6 +2572,15 @@ async def toggle_trade_mode(
     return Response(status_code=302, headers={"Location": "/control"})
 
 
+@app.post("/control/stock-mode/toggle")
+async def toggle_stock_mode(
+    _: None = Depends(_auth_guard),
+) -> Response:
+    new_mode = state.toggle_stock_mode()
+    log.info("Stock mode toggled to %s", new_mode)
+    return Response(status_code=302, headers={"Location": "/control"})
+
+
 # ── /control — unified dashboard ──────────────────────────────────────────────
 
 
@@ -2662,6 +2595,7 @@ async def control_page(
 
     # ── live state ────────────────────────────────────────────────────────────
     trade_mode = state.get_trade_mode()
+    stock_mode = state.get_stock_mode()
     paper = _dry_run(settings)
     estop = state.is_emergency_stop()
     overrides = state.get_all_overrides()
@@ -2708,11 +2642,12 @@ async def control_page(
     consec_pct = (consec / eff_consec_limit * 100) if eff_consec_limit else 0
     consec_bar, consec_vc = _bar(consec_pct)
 
-    eff_adx_threshold = state.get_adx_threshold(settings.ADX_THRESHOLD)
-
     # ── badges / buttons ──────────────────────────────────────────────────────
+    eff_adx_threshold = state.get_adx_threshold(settings.ADX_THRESHOLD)
     mode_pill    = "pg" if trade_mode == "BUY_OPTIONS" else ("pr" if trade_mode == "SELL_OPTIONS" else "pa")
     mode_display = trade_mode.replace("_", " ")
+    stock_pill    = "pa" if stock_mode == "EQUITY" else "pp"
+    stock_display = "EQUITY (CNC)" if stock_mode == "EQUITY" else "F&amp;O OPTIONS"
     paper_pill   = "pa" if paper else "pp"
     paper_label  = "PAPER MODE" if paper else "LIVE TRADING"
     paper_lbl    = "Go LIVE" if paper else "Go PAPER"
@@ -2810,12 +2745,15 @@ async def control_page(
         # mode / switches
         + "<div class='card'><div class='ct'>Mode</div>"
         + f"<div class='mdr'><div class='mdl'>Trade Mode&ensp;<span class='pill {mode_pill}'>{mode_display}</span>"
-        + ("<span style='font-size:.72em;color:#8E8E93'>&ensp;BUY signal→SELL CE&ensp;SELL signal→SELL PE&ensp;(ADX&lt;threshold only)</span>" if trade_mode == "RANGE_SELL" else "")
-        + ("<span style='font-size:.72em;color:#8E8E93'>&ensp;BUY signal→SELL PE&ensp;SELL signal→SELL CE</span>" if trade_mode == "SELL_OPTIONS" else "")
-        + ("<span style='font-size:.72em;color:#8E8E93'>&ensp;BUY signal→BUY CE&ensp;SELL signal→BUY PE</span>" if trade_mode == "BUY_OPTIONS" else "")
+        + ("<span style='font-size:.72em;color:#8E8E93'>&ensp;BUY->SELL CE&ensp;SELL->SELL PE&ensp;(ADX&lt;threshold only)</span>" if trade_mode == "RANGE_SELL" else "")
+        + ("<span style='font-size:.72em;color:#8E8E93'>&ensp;BUY->SELL PE&ensp;SELL->SELL CE</span>" if trade_mode == "SELL_OPTIONS" else "")
+        + ("<span style='font-size:.72em;color:#8E8E93'>&ensp;BUY->BUY CE&ensp;SELL->BUY PE</span>" if trade_mode == "BUY_OPTIONS" else "")
         + "</div>"
         + "<form method='post' action='/trade-mode/toggle' style='margin:0'>"
         + "<button class='btn bn' type='submit'>Cycle</button></form></div>"
+        + f"<div class='mdr'><div class='mdl'>Stocks (non-index)&ensp;<span class='pill {stock_pill}'>{stock_display}</span></div>"
+        + "<form method='post' action='/control/stock-mode/toggle' style='margin:0'>"
+        + "<button class='btn bn' type='submit'>Toggle</button></form></div>"
         + f"<div class='mdr'><div class='mdl'>Paper / Live&ensp;<span class='pill {paper_pill}'>{paper_label}</span></div>"
         + "<form method='post' action='/control/paper-mode/toggle' style='margin:0'>"
         + f"<button class='btn {paper_cls}' type='submit'>{paper_lbl}</button></form></div>"
@@ -2871,7 +2809,7 @@ async def control_page(
         + f"<input class='pi' type='number' name='consecutive_losses_limit' value='{eff_consec_limit}' min='1' max='20' step='1'>"
         + "<div class='pu'>losses</div></div>"
         + f"<div class='pr2'><div class='pl'>ADX threshold (Range Sell){src_val('adx_threshold', eff_adx_threshold, settings.ADX_THRESHOLD)}</div>"
-        + f"<input class='pi' type='number' name='adx_threshold' value='{eff_adx_threshold:.1f}' min='5' max='100' step='1' title='RANGE_SELL mode: trade only when ADX &lt; this value'>"
+        + f"<input class='pi' type='number' name='adx_threshold' value='{eff_adx_threshold:.1f}' min='5' max='100' step='1'>"
         + "<div class='pu'>ADX</div></div>"
         + "<div style='display:flex;gap:8px;padding:12px 16px 16px'>"
         + "<button class='btn bp' type='submit' style='flex:1'>Apply</button>"
@@ -2981,12 +2919,11 @@ async def update_risk(
             log.info(
                 "Risk params updated: max_lots=%s max_loss=%s sl_pct=%s rr=%s "
                 "profit_target=%s sell_ppt=%s entry_start=%s entry_end=%s no_expiry=%s "
-                "max_trades=%s max_pos=%s capital=%s consec=%s adx_threshold=%s",
+                "max_trades=%s max_pos=%s capital=%s consec=%s",
                 max_lots, max_daily_loss, sl_pct, rr_ratio,
                 daily_profit_target, sell_options_profit_pct,
                 entry_window_start, entry_window_end, no_entry_on_expiry_day,
-                max_trades_per_day, max_open_positions, capital_per_trade,
-                consecutive_losses_limit, adx_threshold,
+                max_trades_per_day, max_open_positions, capital_per_trade, consecutive_losses_limit,
             )
         except ValueError:
             pass

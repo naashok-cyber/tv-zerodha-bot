@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
-from typing import Any
+import threading
+import time
+from datetime import datetime, timedelta
+from typing import Any, Callable
 from zoneinfo import ZoneInfo
+
+import requests.exceptions
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from sqlalchemy.orm import sessionmaker
@@ -13,6 +17,61 @@ from app.config import IST, get_settings
 from app.kite_session import get_session_manager
 
 log = logging.getLogger(__name__)
+
+_precise_timers: list["_PreciseTimer"] = []
+
+
+class _PreciseTimer:
+    """Dedicated thread that fires a callback at a fixed HH:MM IST daily.
+
+    Avoids APScheduler's thread-pool scheduling jitter under CPU throttling.
+    Wakes 10 s before target to ensure the thread is warm, then busy-waits
+    the final window so the job fires within ~100 ms of its target time.
+    """
+
+    def __init__(self, name: str, hour: int, minute: int, callback: Callable, *args: Any, **kwargs: Any) -> None:
+        self._name = name
+        self._hour = hour
+        self._minute = minute
+        self._callback = callback
+        self._args = args
+        self._kwargs = kwargs
+        self._stop_event = threading.Event()
+        self._thread = threading.Thread(target=self._run, name=f"precise-timer-{name}", daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+        log.info("[PreciseTimer] %s scheduled daily at %02d:%02d IST", self._name, self._hour, self._minute)
+
+    def stop(self) -> None:
+        self._stop_event.set()
+
+    def _next_fire(self) -> datetime:
+        now = datetime.now(IST)
+        target = now.replace(hour=self._hour, minute=self._minute, second=0, microsecond=0)
+        if target <= now:
+            target += timedelta(days=1)
+        return target
+
+    def _run(self) -> None:
+        while not self._stop_event.is_set():
+            target = self._next_fire()
+            # Sleep until 10 s before target — coarse sleep keeps thread in RAM
+            coarse_wait = (target - datetime.now(IST)).total_seconds() - 10
+            if coarse_wait > 0:
+                self._stop_event.wait(timeout=coarse_wait)
+            if self._stop_event.is_set():
+                break
+            # Tight busy-wait for final 10 s so we fire within ~100 ms
+            while datetime.now(IST) < target:
+                time.sleep(0.05)
+            if self._stop_event.is_set():
+                break
+            log.info("[PreciseTimer] %s firing at %s", self._name, datetime.now(IST).strftime("%H:%M:%S"))
+            try:
+                self._callback(*self._args, **self._kwargs)
+            except Exception as exc:
+                log.error("[PreciseTimer] %s callback failed: %s", self._name, exc, exc_info=True)
 
 _last_checked_at: datetime | None = None
 
@@ -29,6 +88,12 @@ def daily_session_check(now: datetime | None = None) -> None:
         kite.profile()
         state.set_session_invalid(False)
         log.info("[scheduler] session OK for %s", now.date())
+    except (
+        requests.exceptions.ConnectionError,
+        requests.exceptions.Timeout,
+        requests.exceptions.ChunkedEncodingError,
+    ) as exc:
+        log.warning("[scheduler] session check skipped — transient network error (session state unchanged): %s", exc)
     except Exception as exc:
         state.set_session_invalid(True)
         log.warning("[scheduler] session invalid — manual login required: %s", exc)
@@ -214,10 +279,55 @@ def expiry_day_squareoff_job(session_factory: Any, dry_run: bool = False) -> Non
     )
 
 
-def make_scheduler(settings: Any = None, session_factory: Any = None) -> BackgroundScheduler:
+def auto_login_job(
+    watcher_restart_fn: Callable[[str, str], None] | None = None,
+) -> None:
+    """Run headless Kite login and restart the OrderWatcher with the fresh token."""
+    from app.auto_login import auto_kite_login, KiteAutoLoginError
+    settings = get_settings()
+
+    if not settings.PYOTP_AUTO_LOGIN:
+        log.debug("[scheduler] auto-login skipped (PYOTP_AUTO_LOGIN=false)")
+        return
+
+    try:
+        auto_kite_login(settings, on_success=watcher_restart_fn)
+        # Immediately validate the fresh token so SESSION_INVALID is cleared
+        # and the 08:00 session check reflects the actual login time.
+        daily_session_check()
+    except KiteAutoLoginError as exc:
+        state.set_session_invalid(True)
+        log.error("[scheduler] auto-login failed: %s", exc)
+    except Exception as exc:
+        state.set_session_invalid(True)
+        log.error("[scheduler] auto-login unexpected error: %s", exc, exc_info=True)
+
+
+def make_scheduler(
+    settings: Any = None,
+    session_factory: Any = None,
+    watcher_restart_fn: Callable[[str, str], None] | None = None,
+) -> BackgroundScheduler:
     if settings is None:
         settings = get_settings()
     scheduler = BackgroundScheduler(timezone=ZoneInfo("Asia/Kolkata"))
+
+    if settings.PYOTP_AUTO_LOGIN:
+        al_h, al_m = _parse_hhmm(settings.KITE_AUTO_LOGIN_TIME)
+        scheduler.add_job(
+            auto_login_job,
+            trigger="cron",
+            hour=al_h,
+            minute=al_m,
+            kwargs={"watcher_restart_fn": watcher_restart_fn},
+            id="auto_kite_login",
+            misfire_grace_time=300,  # run even if up to 5 min late (scheduler thread busy)
+        )
+        log.info(
+            "[scheduler] auto-login scheduled at %s IST",
+            settings.KITE_AUTO_LOGIN_TIME,
+        )
+
     scheduler.add_job(
         daily_session_check,
         trigger="cron",
@@ -249,6 +359,7 @@ def make_scheduler(settings: Any = None, session_factory: Any = None) -> Backgro
                 "dry_run": settings_obj.DRY_RUN,
             },
             id="nse_eod_squareoff",
+            misfire_grace_time=120,
         )
         mcx_h, mcx_m = _parse_hhmm(settings_obj.MCX_SQUAREOFF_TIME)
         scheduler.add_job(
@@ -263,6 +374,7 @@ def make_scheduler(settings: Any = None, session_factory: Any = None) -> Backgro
                 "dry_run": settings_obj.DRY_RUN,
             },
             id="mcx_eod_squareoff",
+            misfire_grace_time=120,
         )
         exp_h, exp_m = _parse_hhmm(settings_obj.EXPIRY_DAY_SQUAREOFF_TIME)
         scheduler.add_job(
@@ -275,5 +387,67 @@ def make_scheduler(settings: Any = None, session_factory: Any = None) -> Backgro
                 "dry_run": settings_obj.DRY_RUN,
             },
             id="expiry_day_squareoff",
+            misfire_grace_time=120,
         )
+
+    if settings.SCHEDULED_STRADDLE_ENABLED and session_factory is not None:
+        from app.scheduled_straddle import run_scheduled_straddle, squareoff_scheduled_straddles
+
+        co_h, co_m = _parse_hhmm(settings.CRUDEOILM_STRADDLE_TIME)
+        co_timer = _PreciseTimer(
+            "CRUDEOILM_straddle", co_h, co_m,
+            run_scheduled_straddle,
+            underlying="CRUDEOILM",
+            exchange="MCX",
+            qty=settings.CRUDEOILM_STRADDLE_QTY,
+            settings=settings,
+            session_factory=session_factory,
+            adx_threshold=None,
+        )
+        co_timer.start()
+        _precise_timers.append(co_timer)
+        log.info(
+            "[scheduler] CRUDEOILM straddle (PreciseTimer) at %s IST (%d lots, no ADX gate)",
+            settings.CRUDEOILM_STRADDLE_TIME,
+            settings.CRUDEOILM_STRADDLE_QTY,
+        )
+
+        ng_h, ng_m = _parse_hhmm(settings.NG_STRADDLE_TIME)
+        ng_timer = _PreciseTimer(
+            "NATURALGAS_straddle", ng_h, ng_m,
+            run_scheduled_straddle,
+            underlying="NATURALGAS",
+            exchange="MCX",
+            qty=settings.NG_STRADDLE_QTY,
+            settings=settings,
+            session_factory=session_factory,
+            adx_threshold=settings.NG_STRADDLE_ADX_THRESHOLD,
+        )
+        ng_timer.start()
+        _precise_timers.append(ng_timer)
+        log.info(
+            "[scheduler] NATURALGAS straddle (PreciseTimer) at %s IST (%d lots, ADX<%s gate)",
+            settings.NG_STRADDLE_TIME,
+            settings.NG_STRADDLE_QTY,
+            settings.NG_STRADDLE_ADX_THRESHOLD,
+        )
+
+        sq_h, sq_m = _parse_hhmm(settings.STRADDLE_SQUAREOFF_TIME)
+        scheduler.add_job(
+            squareoff_scheduled_straddles,
+            trigger="cron",
+            hour=sq_h,
+            minute=sq_m,
+            kwargs={
+                "settings"       : settings,
+                "session_factory": session_factory,
+            },
+            id="sched_straddle_squareoff",
+            misfire_grace_time=120,
+        )
+        log.info(
+            "[scheduler] scheduled straddle squareoff at %s IST",
+            settings.STRADDLE_SQUAREOFF_TIME,
+        )
+
     return scheduler

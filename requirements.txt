@@ -49,6 +49,8 @@ zope.interface==8.4
 
 # Encryption
 cryptography==47.0.0
+# TOTP for headless Kite auto-login
+pyotp==2.9.0
 cffi==2.0.0
 pycparser==3.0
 

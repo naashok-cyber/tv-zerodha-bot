@@ -1,6 +1,7 @@
 services:
   bot:
     build: .
+    user: "924011989:924011989"
     expose:
       - "8000"
     env_file:

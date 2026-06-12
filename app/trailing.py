@@ -178,7 +178,8 @@ class TrailingSlManager:
         kite_gtt_id: int | None,
         ltp: float,
     ) -> None:
-        from app.orders import modify_gtt
+        from app.config import get_settings
+        from app.orders import compute_oco_limits, modify_gtt
         from app.storage import Position as DbPosition, Gtt, Instrument
 
         try:
@@ -208,14 +209,21 @@ class TrailingSlManager:
                     self.unregister(pos.instrument_token)
                     return
 
+                buffer_pct = float(get_settings().OCO_SLIPPAGE_BUFFER_PCT)
+                sl_limit_d, tgt_limit_d = compute_oco_limits(
+                    new_sl, pos.target_price, pos.entry_side, buffer_pct,
+                )
+                sl_limit_r = _round_to_tick(float(sl_limit_d), pos.tick_size)
+                tgt_limit_r = _round_to_tick(float(tgt_limit_d), pos.tick_size)
+
                 if kite_gtt_id is not None:
                     modify_gtt(
                         kite,
                         kite_gtt_id,
                         sl_trigger=new_sl,
-                        sl_limit=new_sl,
+                        sl_limit=sl_limit_r,
                         target_trigger=pos.target_price,
-                        target_limit=pos.target_price,
+                        target_limit=tgt_limit_r,
                         last_price=ltp,
                         instrument=instrument,
                         qty=pos.qty,
@@ -225,7 +233,8 @@ class TrailingSlManager:
 
                 if db_gtt:
                     db_gtt.sl_trigger = new_sl
-                    db_gtt.sl_order_price = new_sl
+                    db_gtt.sl_order_price = sl_limit_r
+                    db_gtt.target_order_price = tgt_limit_r
                     db_gtt.modification_count += 1
                     db_gtt.updated_at = now_dt
 

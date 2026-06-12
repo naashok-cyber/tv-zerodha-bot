@@ -12,11 +12,11 @@ def get_audit_logger() -> logging.Logger:
     global _audit
     if _audit is not None:
         return _audit
-    os.makedirs("logs", exist_ok=True)
+    os.makedirs("data/logs", exist_ok=True)
     logger = logging.getLogger("voice_audit")
     if not logger.handlers:
         handler = RotatingFileHandler(
-            "logs/voice_audit.log",
+            "data/logs/voice_audit.log",
             maxBytes=10 * 1024 * 1024,
             backupCount=5,
         )

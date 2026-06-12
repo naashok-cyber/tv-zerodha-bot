@@ -64,8 +64,9 @@ def compute_futures_qty(
 
 def daily_loss_remaining(db: Any, today_ist: Any) -> Decimal:
     """Return remaining daily loss allowance; floored at 0. Injects today_ist — no internal clock."""
+    import app.state as state
     settings = get_settings()
-    cap = settings.MAX_DAILY_LOSS
+    cap = Decimal(str(state.get_max_daily_loss(float(settings.MAX_DAILY_LOSS))))
 
     today_start = today_ist.replace(hour=0, minute=0, second=0, microsecond=0)
     rows = (
