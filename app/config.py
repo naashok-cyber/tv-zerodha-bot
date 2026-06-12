@@ -72,6 +72,10 @@ class Settings(BaseSettings):
     KITE_MAX_TOKEN_AGE_HOURS: int = 20
     EXPECTED_EGRESS_IP: str = ""  # must match IP registered on developers.kite.trade
     PYOTP_AUTO_LOGIN: bool = False  # unofficial; keep False unless you accept Zerodha's stance
+    KITE_USER_ID: str = ""          # required when PYOTP_AUTO_LOGIN=true
+    KITE_PASSWORD: str = ""         # required when PYOTP_AUTO_LOGIN=true
+    KITE_TOTP_SECRET: str = ""      # required when PYOTP_AUTO_LOGIN=true
+    KITE_AUTO_LOGIN_TIME: str = "07:45"  # HH:MM IST; auto-login cron time
 
     # ── Telegram ──────────────────────────────────────────────────────────────
     TELEGRAM_BOT_TOKEN: str = ""  # notifier is a no-op when empty
@@ -202,6 +206,7 @@ class Settings(BaseSettings):
     STRADDLE_STRIKE_INTERVAL: float = 2.5       # fallback strike spacing when not in STRADDLE_STRIKE_INTERVALS
     STRADDLE_STRIKE_INTERVALS: dict[str, float] = {
         "NATURALGAS": 2.5, "NATGASMINI": 2.5,
+        "CRUDEOIL": 50.0, "CRUDEOILM": 10.0,
         "NIFTY": 50.0, "BANKNIFTY": 100.0, "FINNIFTY": 50.0,
         "MIDCPNIFTY": 25.0, "SENSEX": 100.0,
     }
@@ -210,6 +215,20 @@ class Settings(BaseSettings):
     STRADDLE_PER_LEG_SL_MULTIPLIER: float = 1.5 # per-leg hard SL = entry_premium × this
     STRADDLE_FILL_TIMEOUT_SECS: int = 5         # seconds to wait for concurrent leg fills
     STRADDLE_DELTA_TOLERANCE: float = 0.15      # ATM sanity: expect |delta| in 0.35–0.65
+    OCO_SLIPPAGE_BUFFER_PCT: float = 0.002      # GTT limit offset from trigger (0.2%) to fill on gap moves
+
+    # ── Scheduled straddle ────────────────────────────────────────────────────
+    SCHEDULED_STRADDLE_ENABLED: bool = False
+    CRUDEOILM_STRADDLE_TIME: str = "22:00"    # HH:MM IST entry time
+    CRUDEOILM_STRADDLE_QTY: int = 5           # lots per leg
+    NG_STRADDLE_TIME: str = "22:05"
+    NG_STRADDLE_QTY: int = 1
+    NG_STRADDLE_ADX_THRESHOLD: float = 22.0   # skip if ADX >= this
+    STRADDLE_SQUAREOFF_TIME: str = "23:20"    # HH:MM IST
+
+    # ── ADX (for scheduled straddle gate) ─────────────────────────────────────
+    ADX_PERIOD: int = 14
+    ADX_CANDLE_INTERVAL: str = "10minute"     # Kite interval string for historical candles
 
     # ── Voice channel ──────────────────────────────────────────────────────────
     VOICE_AUTH_TOKEN: str = ""          # Required; 401 if empty or wrong
