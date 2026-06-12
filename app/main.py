@@ -255,6 +255,16 @@ def _on_entry_filled(event: EntryFilledEvent) -> None:
                     order.tradingsymbol, fill_price, _profit_pct * 100, target_price,
                 )
 
+        # Webhook-provided SL/target override the auto-calculated values when present.
+        _webhook_sl = meta.get("webhook_sl")
+        _webhook_target = meta.get("webhook_target")
+        if _webhook_sl is not None:
+            sl_price = float(_webhook_sl)
+            log.info("_on_entry_filled: using webhook sl_price=%.4f for %s", sl_price, order.tradingsymbol)
+        if _webhook_target is not None:
+            target_price = float(_webhook_target)
+            log.info("_on_entry_filled: using webhook target_price=%.4f for %s", target_price, order.tradingsymbol)
+
         # Round SL and target to the instrument's minimum tick size so GTT
         # trigger prices are always valid tradeable prices (MCX tick: 0.05–0.10).
         _tick = (instrument.tick_size or 0.01) if instrument else 0.01
@@ -1162,6 +1172,8 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
                         "entry_side": ng_side,
                         "underlying": underlying.name,
                         "dry_run": False,
+                        "webhook_sl": alert_data.sl_price,
+                        "webhook_target": alert_data.target_price,
                     }
             else:
                 log.info(
@@ -1276,6 +1288,8 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
                             "instrument_type": "EQ",
                             "underlying": underlying.name,
                             "dry_run": False,
+                            "webhook_sl": alert_data.sl_price,
+                            "webhook_target": alert_data.target_price,
                         }
                 else:
                     log.info(
@@ -1382,8 +1396,23 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
         elif trade_mode == "BUY_OPTIONS":
             flag = "CE" if alert_data.action == "BUY" else "PE"
             entry_side = "BUY"
-        else:  # SELL_OPTIONS: write the opposite type
+        elif trade_mode == "SELL_OPTIONS":
+            # Write the opposite type (PE on BUY signal, CE on SELL signal)
             flag = "PE" if alert_data.action == "BUY" else "CE"
+            entry_side = "SELL"
+        else:  # RANGE_SELL: sell same-direction option; only fires when ADX < threshold
+            adx_threshold = state.get_adx_threshold(settings.ADX_THRESHOLD)
+            if alert_data.adx is None or alert_data.adx >= adx_threshold:
+                log.info(
+                    "Alert %d: RANGE_SELL skipped — ADX=%s (threshold=%.1f, need ADX < threshold)",
+                    alert_id,
+                    f"{alert_data.adx:.1f}" if alert_data.adx is not None else "not provided",
+                    adx_threshold,
+                )
+                alert.processed = True
+                session.commit()
+                return
+            flag = "CE" if alert_data.action == "BUY" else "PE"
             entry_side = "SELL"
         # Block new SELL_OPTIONS entries on weekly expiry day (voice = manual override, skip)
         _is_voice_order = bool(alert.strategy_id and alert.strategy_id.startswith(("voice_", "straddle_")))
@@ -1412,8 +1441,9 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
             target_delta = settings.SELL_OPTIONS_TARGET_DELTA if entry_side == "SELL" else settings.TARGET_DELTA
             delta_fallbacks = settings.SELL_OPTIONS_DELTA_FALLBACK_STEPS if entry_side == "SELL" else settings.DELTA_FALLBACK_STEPS
         else:
-            target_delta = settings.TARGET_DELTA if trade_mode == "BUY_OPTIONS" else settings.SELL_OPTIONS_TARGET_DELTA
-            delta_fallbacks = settings.DELTA_FALLBACK_STEPS if trade_mode == "BUY_OPTIONS" else settings.SELL_OPTIONS_DELTA_FALLBACK_STEPS
+            _is_buying = trade_mode == "BUY_OPTIONS"
+            target_delta = settings.TARGET_DELTA if _is_buying else settings.SELL_OPTIONS_TARGET_DELTA
+            delta_fallbacks = settings.DELTA_FALLBACK_STEPS if _is_buying else settings.SELL_OPTIONS_DELTA_FALLBACK_STEPS
 
         if _dry_run(settings):
             log.info(
@@ -1634,6 +1664,8 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
                 "underlying": underlying.name,
                 "entry_side": entry_side,
                 "dry_run": False,
+                "webhook_sl": alert_data.sl_price,
+                "webhook_target": alert_data.target_price,
             }
 
         order = Order(
@@ -2676,8 +2708,10 @@ async def control_page(
     consec_pct = (consec / eff_consec_limit * 100) if eff_consec_limit else 0
     consec_bar, consec_vc = _bar(consec_pct)
 
+    eff_adx_threshold = state.get_adx_threshold(settings.ADX_THRESHOLD)
+
     # ── badges / buttons ──────────────────────────────────────────────────────
-    mode_pill    = "pg" if trade_mode == "BUY_OPTIONS" else "pr"
+    mode_pill    = "pg" if trade_mode == "BUY_OPTIONS" else ("pr" if trade_mode == "SELL_OPTIONS" else "pa")
     mode_display = trade_mode.replace("_", " ")
     paper_pill   = "pa" if paper else "pp"
     paper_label  = "PAPER MODE" if paper else "LIVE TRADING"
@@ -2775,9 +2809,13 @@ async def control_page(
 
         # mode / switches
         + "<div class='card'><div class='ct'>Mode</div>"
-        + f"<div class='mdr'><div class='mdl'>Trade Mode&ensp;<span class='pill {mode_pill}'>{mode_display}</span></div>"
+        + f"<div class='mdr'><div class='mdl'>Trade Mode&ensp;<span class='pill {mode_pill}'>{mode_display}</span>"
+        + ("<span style='font-size:.72em;color:#8E8E93'>&ensp;BUY signal→SELL CE&ensp;SELL signal→SELL PE&ensp;(ADX&lt;threshold only)</span>" if trade_mode == "RANGE_SELL" else "")
+        + ("<span style='font-size:.72em;color:#8E8E93'>&ensp;BUY signal→SELL PE&ensp;SELL signal→SELL CE</span>" if trade_mode == "SELL_OPTIONS" else "")
+        + ("<span style='font-size:.72em;color:#8E8E93'>&ensp;BUY signal→BUY CE&ensp;SELL signal→BUY PE</span>" if trade_mode == "BUY_OPTIONS" else "")
+        + "</div>"
         + "<form method='post' action='/trade-mode/toggle' style='margin:0'>"
-        + "<button class='btn bn' type='submit'>Toggle</button></form></div>"
+        + "<button class='btn bn' type='submit'>Cycle</button></form></div>"
         + f"<div class='mdr'><div class='mdl'>Paper / Live&ensp;<span class='pill {paper_pill}'>{paper_label}</span></div>"
         + "<form method='post' action='/control/paper-mode/toggle' style='margin:0'>"
         + f"<button class='btn {paper_cls}' type='submit'>{paper_lbl}</button></form></div>"
@@ -2832,6 +2870,9 @@ async def control_page(
         + f"<div class='pr2'><div class='pl'>Consec. losses limit{src_val('consecutive_losses_limit', eff_consec_limit, settings.CONSECUTIVE_LOSSES_LIMIT)}</div>"
         + f"<input class='pi' type='number' name='consecutive_losses_limit' value='{eff_consec_limit}' min='1' max='20' step='1'>"
         + "<div class='pu'>losses</div></div>"
+        + f"<div class='pr2'><div class='pl'>ADX threshold (Range Sell){src_val('adx_threshold', eff_adx_threshold, settings.ADX_THRESHOLD)}</div>"
+        + f"<input class='pi' type='number' name='adx_threshold' value='{eff_adx_threshold:.1f}' min='5' max='100' step='1' title='RANGE_SELL mode: trade only when ADX &lt; this value'>"
+        + "<div class='pu'>ADX</div></div>"
         + "<div style='display:flex;gap:8px;padding:12px 16px 16px'>"
         + "<button class='btn bp' type='submit' style='flex:1'>Apply</button>"
         + "<button class='btn bm' type='submit' name='reset' value='1' style='flex:1'>Reset to defaults</button>"
@@ -2889,6 +2930,7 @@ async def update_risk(
     max_open_positions: str = Form(default=""),
     capital_per_trade: str = Form(default=""),
     consecutive_losses_limit: str = Form(default=""),
+    adx_threshold: str = Form(default=""),
 ) -> Response:
     if reset == "1":
         state.set_max_lots(None)
@@ -2904,6 +2946,7 @@ async def update_risk(
         state.set_max_open_positions(None)
         state.set_capital_per_trade(None)
         state.set_consecutive_losses_limit(None)
+        state.set_adx_threshold(None)
         log.info("Risk params reset to .env defaults")
     else:
         try:
@@ -2933,14 +2976,17 @@ async def update_risk(
                 state.set_capital_per_trade(float(capital_per_trade))
             if consecutive_losses_limit.strip():
                 state.set_consecutive_losses_limit(int(consecutive_losses_limit))
+            if adx_threshold.strip():
+                state.set_adx_threshold(float(adx_threshold))
             log.info(
                 "Risk params updated: max_lots=%s max_loss=%s sl_pct=%s rr=%s "
                 "profit_target=%s sell_ppt=%s entry_start=%s entry_end=%s no_expiry=%s "
-                "max_trades=%s max_pos=%s capital=%s consec=%s",
+                "max_trades=%s max_pos=%s capital=%s consec=%s adx_threshold=%s",
                 max_lots, max_daily_loss, sl_pct, rr_ratio,
                 daily_profit_target, sell_options_profit_pct,
                 entry_window_start, entry_window_end, no_entry_on_expiry_day,
-                max_trades_per_day, max_open_positions, capital_per_trade, consecutive_losses_limit,
+                max_trades_per_day, max_open_positions, capital_per_trade,
+                consecutive_losses_limit, adx_threshold,
             )
         except ValueError:
             pass

@@ -29,10 +29,12 @@ class SizingMode(str, Enum):
 
 
 class TradeMode(str, Enum):
-    # BUY_OPTIONS: BUY signal → buy CE, SELL signal → buy PE  (default)
-    # SELL_OPTIONS: BUY signal → sell PE, SELL signal → sell CE  (write/short options)
+    # BUY_OPTIONS:  BUY signal → buy CE,  SELL signal → buy PE  (directional)
+    # SELL_OPTIONS: BUY signal → sell PE, SELL signal → sell CE  (theta decay, opposite type)
+    # RANGE_SELL:   BUY signal → sell CE, SELL signal → sell PE  (contrarian, same type; only when ADX < threshold)
     BUY_OPTIONS = "BUY_OPTIONS"
     SELL_OPTIONS = "SELL_OPTIONS"
+    RANGE_SELL = "RANGE_SELL"
 
 
 class Settings(BaseSettings):
@@ -125,6 +127,7 @@ class Settings(BaseSettings):
     MAX_SPREAD_PCT: float = 0.05             # 5% of LTP bid-ask limit
     SIZING_MODE: SizingMode = SizingMode.PREMIUM_BASED
     TRADE_MODE: TradeMode = TradeMode.BUY_OPTIONS   # override in .env; can also be toggled live via /trade-mode/toggle
+    ADX_THRESHOLD: float = 20.0                     # RANGE_SELL mode: skip trade when ADX >= this value
     RISK_FREE_RATE: float = 0.065            # India 10-yr G-sec proxy for Black-Scholes / Black-76
     DIVIDEND_YIELD_DEFAULT: float = 0.0     # q for all underlyings not in OVERRIDES
     DIVIDEND_YIELD_OVERRIDES: dict[str, float] = {}  # per-symbol q; e.g. {"INFY": 0.025}

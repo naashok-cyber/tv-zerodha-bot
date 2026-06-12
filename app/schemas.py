@@ -18,8 +18,11 @@ class AlertPayload(BaseModel):
     price: Decimal                                 # current price from TradingView
     premium: Decimal | None = None                 # required for TRAIL action only
     limit_price: Decimal | None = None             # manual trades only: LIMIT entry price; None = MARKET
+    sl_price: Decimal | None = None                 # explicit SL trigger price for GTT; None = auto-calculate
+    target_price: Decimal | None = None             # explicit profit-target price for GTT; None = auto-calculate
     option_type: Literal["CE", "PE"] | None = None # voice commands only: explicit option type
     strike: float | None = None                    # voice commands only: explicit strike price; None = ATM
+    adx: float | None = None                       # RANGE_SELL mode: ADX value from Pine Script; trade skipped when >= ADX_THRESHOLD
     timeframe: str                                 # e.g. "5", "15", "60"
     alert_id: str                                  # unique ID from Pine Script
     timestamp: datetime                            # ISO8601, TradingView sends UTC
@@ -46,6 +49,20 @@ class AlertPayload(BaseModel):
     def limit_price_positive(cls, v: Decimal | None) -> Decimal | None:
         if v is not None and v <= 0:
             raise ValueError("limit_price must be > 0")
+        return v
+
+    @field_validator("sl_price")
+    @classmethod
+    def sl_price_positive(cls, v: Decimal | None) -> Decimal | None:
+        if v is not None and v <= 0:
+            raise ValueError("sl_price must be > 0")
+        return v
+
+    @field_validator("target_price")
+    @classmethod
+    def target_price_positive(cls, v: Decimal | None) -> Decimal | None:
+        if v is not None and v <= 0:
+            raise ValueError("target_price must be > 0")
         return v
 
     @field_validator("alert_id")

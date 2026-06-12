@@ -32,6 +32,7 @@ _MAX_TRADES_PER_DAY_OVERRIDE: Optional[int] = None
 _MAX_OPEN_POSITIONS_OVERRIDE: Optional[int] = None
 _CAPITAL_PER_TRADE_OVERRIDE: Optional[float] = None
 _CONSECUTIVE_LOSSES_LIMIT_OVERRIDE: Optional[int] = None
+_ADX_THRESHOLD_OVERRIDE: Optional[float] = None
 
 
 # ── Persistence ───────────────────────────────────────────────────────────────
@@ -55,6 +56,7 @@ def _save_overrides() -> None:
         "max_open_positions": _MAX_OPEN_POSITIONS_OVERRIDE,
         "capital_per_trade": _CAPITAL_PER_TRADE_OVERRIDE,
         "consecutive_losses_limit": _CONSECUTIVE_LOSSES_LIMIT_OVERRIDE,
+        "adx_threshold": _ADX_THRESHOLD_OVERRIDE,
         # SESSION_INVALID and _EMERGENCY_STOP intentionally omitted — always reset on restart
     }
     try:
@@ -72,7 +74,7 @@ def load_overrides_from_disk() -> None:
     global _RR_RATIO_OVERRIDE, _DAILY_PROFIT_TARGET_OVERRIDE, _SELL_OPTIONS_PROFIT_PCT_OVERRIDE
     global _ENTRY_WINDOW_START_OVERRIDE, _ENTRY_WINDOW_END_OVERRIDE, _NO_ENTRY_ON_EXPIRY_DAY_OVERRIDE
     global _TRAILING_SL_ENABLED, _MAX_TRADES_PER_DAY_OVERRIDE, _MAX_OPEN_POSITIONS_OVERRIDE
-    global _CAPITAL_PER_TRADE_OVERRIDE, _CONSECUTIVE_LOSSES_LIMIT_OVERRIDE
+    global _CAPITAL_PER_TRADE_OVERRIDE, _CONSECUTIVE_LOSSES_LIMIT_OVERRIDE, _ADX_THRESHOLD_OVERRIDE
 
     if not os.path.exists(_OVERRIDES_PATH):
         return
@@ -116,6 +118,8 @@ def load_overrides_from_disk() -> None:
             _CAPITAL_PER_TRADE_OVERRIDE = data["capital_per_trade"]
         if "consecutive_losses_limit" in data:
             _CONSECUTIVE_LOSSES_LIMIT_OVERRIDE = data["consecutive_losses_limit"]
+        if "adx_threshold" in data:
+            _ADX_THRESHOLD_OVERRIDE = data["adx_threshold"]
 
     log.info("state: restored overrides from %s", _OVERRIDES_PATH)
 
@@ -149,8 +153,9 @@ def set_trade_mode(value: str) -> None:
 
 def toggle_trade_mode() -> str:
     global TRADE_MODE
+    _cycle = {"BUY_OPTIONS": "SELL_OPTIONS", "SELL_OPTIONS": "RANGE_SELL", "RANGE_SELL": "BUY_OPTIONS"}
     with _lock:
-        TRADE_MODE = "SELL_OPTIONS" if TRADE_MODE == "BUY_OPTIONS" else "BUY_OPTIONS"
+        TRADE_MODE = _cycle.get(TRADE_MODE, "BUY_OPTIONS")
         _save_overrides()
         return TRADE_MODE
 
@@ -372,6 +377,18 @@ def set_consecutive_losses_limit(value: Optional[int]) -> None:
         _save_overrides()
 
 
+def get_adx_threshold(env_default: float) -> float:
+    with _lock:
+        return _ADX_THRESHOLD_OVERRIDE if _ADX_THRESHOLD_OVERRIDE is not None else env_default
+
+
+def set_adx_threshold(value: Optional[float]) -> None:
+    global _ADX_THRESHOLD_OVERRIDE
+    with _lock:
+        _ADX_THRESHOLD_OVERRIDE = value if (value is not None and value > 0) else None
+        _save_overrides()
+
+
 def get_all_overrides() -> dict:
     """Return current effective override state for display."""
     with _lock:
@@ -392,4 +409,5 @@ def get_all_overrides() -> dict:
             "max_open_positions": _MAX_OPEN_POSITIONS_OVERRIDE,
             "capital_per_trade": _CAPITAL_PER_TRADE_OVERRIDE,
             "consecutive_losses_limit": _CONSECUTIVE_LOSSES_LIMIT_OVERRIDE,
+            "adx_threshold": _ADX_THRESHOLD_OVERRIDE,
         }
