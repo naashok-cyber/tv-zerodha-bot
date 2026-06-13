@@ -241,6 +241,12 @@ def _check_leg(
 
 # ── Main orchestrator ─────────────────────────────────────────────────────────
 
+def _is_last_weekday_of_month(d: date) -> bool:
+    """True if d is the last occurrence of its weekday in the calendar month."""
+    from datetime import timedelta
+    return (d + timedelta(days=7)).month != d.month
+
+
 def validate_straddle(
     underlying: str,
     quantity: int,
@@ -249,6 +255,7 @@ def validate_straddle(
     settings: Settings,
     now: datetime | None = None,
     exchange: str = "MCX",
+    monthly_only: bool = False,
 ) -> StraddleValidation:
     """Run pre-execution straddle validation.
 
@@ -261,19 +268,28 @@ def validate_straddle(
     now_ist = now or datetime.now(IST)
 
     # ── 1. Expiry ─────────────────────────────────────────────────────────────
-    segment = "MCX" if exchange == "MCX" else "NFO"
-    try:
-        resolved = resolve_expiry(
-            underlying, session,
-            instrument_type="CE",
-            segment=segment,
-            now=now_ist,
-            settings=settings,
-        )
-    except NoEligibleExpiryError as exc:
-        raise RuntimeError(f"No eligible expiry for {underlying} options: {exc}") from exc
-
-    expiry = resolved.expiry_date
+    if monthly_only:
+        from datetime import timedelta
+        from app.symbol_mapper import list_expiries
+        _all_exp = list_expiries(underlying, "CE", session)
+        _today = now_ist.date()
+        _monthly = sorted(e for e in _all_exp if e >= _today and _is_last_weekday_of_month(e))
+        if not _monthly:
+            raise RuntimeError(f"No monthly expiry found for {underlying} (monthly_only=True)")
+        expiry = _monthly[0]
+    else:
+        segment = "MCX" if exchange == "MCX" else "NFO"
+        try:
+            resolved = resolve_expiry(
+                underlying, session,
+                instrument_type="CE",
+                segment=segment,
+                now=now_ist,
+                settings=settings,
+            )
+        except NoEligibleExpiryError as exc:
+            raise RuntimeError(f"No eligible expiry for {underlying} options: {exc}") from exc
+        expiry = resolved.expiry_date
 
     # ── 2. Near-month futures LTP → ATM strike ────────────────────────────────
     fut = (

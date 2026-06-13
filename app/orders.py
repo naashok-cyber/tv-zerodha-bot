@@ -299,9 +299,11 @@ def square_off(
     product: str,
     entry_side: str = "BUY",
     variety: str = "regular",
+    limit_price: float | None = None,
 ) -> str | None:
-    """Place a MARKET order opposite to entry_side to close a position.
+    """Place an order opposite to entry_side to close a position.
 
+    limit_price: when provided, places a LIMIT order at that price instead of MARKET.
     Guards against duplicate closes:
       1. Per-symbol process lock — serializes concurrent calls for the same symbol
       2. Recent-squareoff TTL — same process won't re-close within 30s
@@ -333,21 +335,35 @@ def square_off(
             _recent_squareoffs[symbol] = now_mono
             return None
 
-        params: dict[str, Any] = {
-            "variety": variety,
-            "exchange": instrument.exchange,
-            "tradingsymbol": symbol,
-            "transaction_type": exit_side,
-            "quantity": qty,
-            "order_type": "MARKET",
-            "product": product,
-            "market_protection": -1,
-        }
+        if limit_price is not None:
+            params: dict[str, Any] = {
+                "variety": variety,
+                "exchange": instrument.exchange,
+                "tradingsymbol": symbol,
+                "transaction_type": exit_side,
+                "quantity": qty,
+                "order_type": "LIMIT",
+                "price": limit_price,
+                "product": product,
+            }
+        else:
+            params = {
+                "variety": variety,
+                "exchange": instrument.exchange,
+                "tradingsymbol": symbol,
+                "transaction_type": exit_side,
+                "quantity": qty,
+                "order_type": "MARKET",
+                "product": product,
+                "market_protection": -1,
+            }
 
         order_id: str = backoff_call(kite_client.place_order, **params)
         _recent_squareoffs[symbol] = now_mono
         log.info(
-            "Square-off order %s: %s %d %s MARKET (kite_net_qty=%d)",
-            order_id, exit_side, qty, symbol, kite_qty,
+            "Square-off order %s: %s %d %s %s (kite_net_qty=%d)",
+            order_id, exit_side, qty, symbol,
+            f"LIMIT@{limit_price}" if limit_price is not None else "MARKET",
+            kite_qty,
         )
         return order_id

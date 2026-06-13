@@ -390,6 +390,55 @@ def make_scheduler(
             misfire_grace_time=120,
         )
 
+    if session_factory is not None:
+        from app.window_straddle import (
+            get_all_entry_jobs, get_all_exit_jobs,
+            run_window_straddle_entry, squareoff_window_straddle,
+        )
+        for _ws_spec in get_all_entry_jobs():
+            scheduler.add_job(
+                run_window_straddle_entry,
+                trigger="cron",
+                day_of_week=_ws_spec["day_of_week"],
+                hour=_ws_spec["hour"],
+                minute=_ws_spec["minute"],
+                kwargs={
+                    "underlying": _ws_spec["underlying"],
+                    "exchange": _ws_spec["exchange"],
+                    "qty": _ws_spec["qty"],
+                    "monthly_only": _ws_spec["monthly_only"],
+                    "entry_hhmm": _ws_spec["entry_hhmm"],
+                    "settings": settings,
+                    "session_factory": session_factory,
+                },
+                id=_ws_spec["job_id"],
+                misfire_grace_time=120,
+            )
+            log.info(
+                "[scheduler] window straddle entry: %s at %s IST (%s)",
+                _ws_spec["underlying"], _ws_spec["entry_hhmm"], _ws_spec["day_of_week"],
+            )
+        for _ws_und, _ws_exch, _ws_exit_hhmm, _ws_job_id in get_all_exit_jobs():
+            _ws_h, _ws_m = _parse_hhmm(_ws_exit_hhmm)
+            scheduler.add_job(
+                squareoff_window_straddle,
+                trigger="cron",
+                hour=_ws_h,
+                minute=_ws_m,
+                kwargs={
+                    "underlying": _ws_und,
+                    "exchange": _ws_exch,
+                    "settings": settings,
+                    "session_factory": session_factory,
+                },
+                id=_ws_job_id,
+                misfire_grace_time=120,
+            )
+            log.info(
+                "[scheduler] window straddle exit: %s at %s IST",
+                _ws_und, _ws_exit_hhmm,
+            )
+
     if settings.SCHEDULED_STRADDLE_ENABLED and session_factory is not None:
         from app.scheduled_straddle import run_scheduled_straddle, squareoff_scheduled_straddles
 

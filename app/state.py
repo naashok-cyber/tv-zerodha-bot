@@ -29,6 +29,7 @@ _ENTRY_WINDOW_START_OVERRIDE: Optional[str] = None  # "HH:MM"
 _ENTRY_WINDOW_END_OVERRIDE: Optional[str] = None    # "HH:MM"
 _NO_ENTRY_ON_EXPIRY_DAY_OVERRIDE: Optional[bool] = None
 _TRAILING_SL_ENABLED: bool = True
+_WINDOW_STRADDLE_ENABLED: bool = False
 _MAX_TRADES_PER_DAY_OVERRIDE: Optional[int] = None
 _MAX_OPEN_POSITIONS_OVERRIDE: Optional[int] = None
 _CAPITAL_PER_TRADE_OVERRIDE: Optional[float] = None
@@ -54,6 +55,7 @@ def _save_overrides() -> None:
         "entry_window_end": _ENTRY_WINDOW_END_OVERRIDE,
         "no_entry_on_expiry_day": _NO_ENTRY_ON_EXPIRY_DAY_OVERRIDE,
         "trailing_sl_enabled": _TRAILING_SL_ENABLED,
+        "window_straddle_enabled": _WINDOW_STRADDLE_ENABLED,
         "max_trades_per_day": _MAX_TRADES_PER_DAY_OVERRIDE,
         "max_open_positions": _MAX_OPEN_POSITIONS_OVERRIDE,
         "capital_per_trade": _CAPITAL_PER_TRADE_OVERRIDE,
@@ -75,8 +77,9 @@ def load_overrides_from_disk() -> None:
     global _MAX_LOTS_OVERRIDE, _MAX_DAILY_LOSS_OVERRIDE, _SL_PCT_OVERRIDE
     global _RR_RATIO_OVERRIDE, _DAILY_PROFIT_TARGET_OVERRIDE, _SELL_OPTIONS_PROFIT_PCT_OVERRIDE
     global _ENTRY_WINDOW_START_OVERRIDE, _ENTRY_WINDOW_END_OVERRIDE, _NO_ENTRY_ON_EXPIRY_DAY_OVERRIDE
-    global _TRAILING_SL_ENABLED, _MAX_TRADES_PER_DAY_OVERRIDE, _MAX_OPEN_POSITIONS_OVERRIDE
-    global _CAPITAL_PER_TRADE_OVERRIDE, _CONSECUTIVE_LOSSES_LIMIT_OVERRIDE, _ADX_THRESHOLD_OVERRIDE
+    global _TRAILING_SL_ENABLED, _WINDOW_STRADDLE_ENABLED, _MAX_TRADES_PER_DAY_OVERRIDE
+    global _MAX_OPEN_POSITIONS_OVERRIDE, _CAPITAL_PER_TRADE_OVERRIDE
+    global _CONSECUTIVE_LOSSES_LIMIT_OVERRIDE, _ADX_THRESHOLD_OVERRIDE
 
     if not os.path.exists(_OVERRIDES_PATH):
         return
@@ -114,6 +117,8 @@ def load_overrides_from_disk() -> None:
             _NO_ENTRY_ON_EXPIRY_DAY_OVERRIDE = data["no_entry_on_expiry_day"]
         if "trailing_sl_enabled" in data:
             _TRAILING_SL_ENABLED = data["trailing_sl_enabled"]
+        if "window_straddle_enabled" in data:
+            _WINDOW_STRADDLE_ENABLED = data["window_straddle_enabled"]
         if "max_trades_per_day" in data:
             _MAX_TRADES_PER_DAY_OVERRIDE = data["max_trades_per_day"]
         if "max_open_positions" in data:
@@ -353,6 +358,28 @@ def toggle_trailing_enabled() -> bool:
         return _TRAILING_SL_ENABLED
 
 
+# ── Window straddle strategy ──────────────────────────────────────────────────
+
+def is_window_straddle_enabled() -> bool:
+    with _lock:
+        return _WINDOW_STRADDLE_ENABLED
+
+
+def set_window_straddle_enabled(value: bool) -> None:
+    global _WINDOW_STRADDLE_ENABLED
+    with _lock:
+        _WINDOW_STRADDLE_ENABLED = value
+        _save_overrides()
+
+
+def toggle_window_straddle() -> bool:
+    global _WINDOW_STRADDLE_ENABLED
+    with _lock:
+        _WINDOW_STRADDLE_ENABLED = not _WINDOW_STRADDLE_ENABLED
+        _save_overrides()
+        return _WINDOW_STRADDLE_ENABLED
+
+
 # ── Additional risk overrides ─────────────────────────────────────────────────
 
 def get_max_trades_per_day(env_default: int) -> int:
@@ -431,6 +458,7 @@ def get_all_overrides() -> dict:
             "entry_window_end": _ENTRY_WINDOW_END_OVERRIDE,
             "no_entry_on_expiry_day": _NO_ENTRY_ON_EXPIRY_DAY_OVERRIDE,
             "trailing_sl_enabled": _TRAILING_SL_ENABLED,
+            "window_straddle_enabled": _WINDOW_STRADDLE_ENABLED,
             "max_trades_per_day": _MAX_TRADES_PER_DAY_OVERRIDE,
             "max_open_positions": _MAX_OPEN_POSITIONS_OVERRIDE,
             "capital_per_trade": _CAPITAL_PER_TRADE_OVERRIDE,

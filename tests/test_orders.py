@@ -34,10 +34,14 @@ def _instrument(
     return inst
 
 
-def _kite(order_id: str = "order123") -> MagicMock:
+def _kite(order_id: str = "order123", tradingsymbol: str = "NIFTY2541722750CE", exchange: str = "NFO") -> MagicMock:
     kite = MagicMock()
     kite.place_order.return_value = order_id
     kite.GTT_TYPE_OCO = "two-leg"
+    # square_off calls is_position_open() → positions(); return an open position so the order isn't skipped
+    kite.positions.return_value = {
+        "net": [{"tradingsymbol": tradingsymbol, "exchange": exchange, "quantity": 75}]
+    }
     return kite
 
 

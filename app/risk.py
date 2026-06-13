@@ -86,7 +86,7 @@ def daily_realized_pnl(db: Any, today_ist: Any) -> Decimal:
     return sum((Decimal(str(r[0])) for r in rows), Decimal("0"))
 
 
-def check_risk_gates(db: Any, today_ist: Any) -> None:
+def check_risk_gates(db: Any, today_ist: Any, consecutive_limit: int = 5) -> None:
     """Raise RiskHaltError if any gate is breached. Caller must skip this when DRY_RUN=True."""
     remaining = daily_loss_remaining(db, today_ist)
     if remaining == Decimal("0"):
@@ -103,7 +103,7 @@ def check_risk_gates(db: Any, today_ist: Any) -> None:
             consecutive += 1
         else:
             break
-    if consecutive >= 3:
+    if consecutive >= consecutive_limit:
         raise RiskHaltError(f"consecutive losing trades: {consecutive}")
 
 

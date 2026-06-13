@@ -91,7 +91,7 @@ def test_max_daily_loss_abs_configurable():
 
 
 def test_consecutive_losses_default():
-    assert _s().CONSECUTIVE_LOSSES_LIMIT == 3
+    assert _s().CONSECUTIVE_LOSSES_LIMIT == 5
 
 
 def test_rr_ratio_default():

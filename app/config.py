@@ -87,11 +87,11 @@ class Settings(BaseSettings):
     TOTAL_CAPITAL: float = 100_000.0          # ₹ 1 Lakh; base for % loss cap
     RISK_PER_TRADE_PCT: float = 1.0           # used in UNDERLYING_RISK_BASED mode
     MAX_DAILY_LOSS_ABS: float = 10_000.0      # ₹ absolute daily loss cap
-    MAX_TRADES_PER_DAY: int = 3
-    MAX_OPEN_POSITIONS: int = 3
+    MAX_TRADES_PER_DAY: int = 15
+    MAX_OPEN_POSITIONS: int = 10
     MAX_LOTS_PER_ORDER: int = 5               # exchange freeze-quantity guard for futures
     MAX_LOTS_PER_TRADE: int = 1               # hard cap: at most 1 lot per trade, all instruments
-    CONSECUTIVE_LOSSES_LIMIT: int = 3         # circuit breaker; resets only on manual intervention
+    CONSECUTIVE_LOSSES_LIMIT: int = 5         # circuit breaker; resets only on manual intervention
     RR_RATIO: float = 2.0                     # target_dist = RR_RATIO × sl_dist
     MARKET_PROTECTION_PCT: float = -1.0       # -1 = kiteconnect default; mandatory on MARKET/SL-M
 
@@ -223,7 +223,7 @@ class Settings(BaseSettings):
     CRUDEOILM_STRADDLE_QTY: int = 5           # lots per leg
     NG_STRADDLE_TIME: str = "22:05"
     NG_STRADDLE_QTY: int = 1
-    NG_STRADDLE_ADX_THRESHOLD: float = 22.0   # skip if ADX >= this
+    NG_STRADDLE_ADX_THRESHOLD: float = 25.0   # skip if ADX >= this
     STRADDLE_SQUAREOFF_TIME: str = "23:20"    # HH:MM IST
 
     # ── ADX (for scheduled straddle gate) ─────────────────────────────────────

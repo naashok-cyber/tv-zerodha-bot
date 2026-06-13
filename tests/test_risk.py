@@ -227,7 +227,7 @@ def test_check_risk_gates_daily_loss_gate_fires():
 
 
 def test_check_risk_gates_consecutive_loss_gate_fires_at_3():
-    """Exactly 3 consecutive losses triggers the circuit breaker."""
+    """Exactly 3 consecutive losses triggers the circuit breaker when limit=3."""
     from datetime import timedelta
     factory = _make_factory()
     s = _settings(MAX_DAILY_LOSS=Decimal("100000"))  # large cap so daily gate doesn't fire
@@ -239,7 +239,7 @@ def test_check_risk_gates_consecutive_loss_gate_fires_at_3():
         session.commit()
         with patch("app.risk.get_settings", return_value=s):
             with pytest.raises(RiskHaltError) as exc_info:
-                check_risk_gates(session, _now())
+                check_risk_gates(session, _now(), consecutive_limit=3)
     assert "consecutive" in exc_info.value.reason.lower()
 
 

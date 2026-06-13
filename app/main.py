@@ -102,6 +102,65 @@ def _trades_today_count(session: Any) -> int:
     )
 
 
+def _fetch_adx_for_underlying(underlying: Any, settings: Any, kite: Any, session: Any, now: datetime) -> float | None:
+    """Fetch ADX for `underlying` from Kite historical data.
+
+    Used by RANGE_SELL when the TV alert omits the adx field. Returns None on any failure.
+    NSE indices use the spot index instrument; MCX uses the near-month futures contract.
+    """
+    from app.adx import compute_adx
+
+    period = settings.ADX_PERIOD
+    interval = settings.ADX_CANDLE_INTERVAL
+    interval_mins = int(interval.replace("minute", "").replace("min", "")) if "min" in interval else 1
+    n_candles = period * 3 + 5
+
+    if underlying.segment == "MCX":
+        instr = (
+            session.query(Instrument)
+            .filter(
+                Instrument.name == underlying.name,
+                Instrument.instrument_type == "FUT",
+                Instrument.exchange == "MCX",
+                Instrument.expiry >= now.date(),
+            )
+            .order_by(Instrument.expiry)
+            .first()
+        )
+    else:
+        # NSE/BFO indices: spot_source is like "NSE:NIFTY 50"
+        parts = underlying.spot_source.split(":", 1)
+        exch, ts = (parts[0], parts[1]) if len(parts) == 2 else ("NSE", parts[0])
+        instr = (
+            session.query(Instrument)
+            .filter(Instrument.exchange == exch, Instrument.tradingsymbol == ts)
+            .first()
+        )
+
+    if instr is None:
+        log.warning("RANGE_SELL ADX: no instrument found for %s", underlying.name)
+        return None
+
+    from_dt = now - timedelta(minutes=n_candles * interval_mins + 60)
+    try:
+        raw = kite.historical_data(instr.instrument_token, from_dt, now, interval)
+    except Exception as exc:
+        log.warning("RANGE_SELL ADX: historical_data failed for %s: %s", underlying.name, exc)
+        return None
+
+    if not raw:
+        log.warning("RANGE_SELL ADX: empty candles for %s", underlying.name)
+        return None
+
+    adx = compute_adx(raw, period=period)
+    log.info(
+        "RANGE_SELL ADX(%d) %s on %s = %s",
+        period, underlying.name, interval,
+        f"{adx:.2f}" if adx is not None else "None",
+    )
+    return adx
+
+
 def _consecutive_losses(session: Any) -> int:
     rows = (
         session.query(ClosedTrade.exit_reason)
@@ -575,10 +634,13 @@ def _on_gtt_filled(event: GttFilledEvent) -> None:
 
         now = datetime.now(IST)
         risk.record_trade_result(session, entry_order.kite_order_id, pnl, now)
+        # Capture before commit expires the ORM object
+        _straddle_id: str | None = entry_order.straddle_id
+        _entry_kite_order_id: str = entry_order.kite_order_id
         session.commit()
         log.info(
             "_on_gtt_filled: %s pnl=%.2f order=%s",
-            event.tradingsymbol, float(pnl), entry_order.kite_order_id,
+            event.tradingsymbol, float(pnl), _entry_kite_order_id,
         )
 
     # Stop trailing now that the position is closed
@@ -586,6 +648,126 @@ def _on_gtt_filled(event: GttFilledEvent) -> None:
         _trailing_manager.unregister(_instr_token)
         if _watcher is not None:
             _watcher.unsubscribe([_instr_token])
+
+    # ── Straddle paired-leg exit ──────────────────────────────────────────────
+    # When one straddle leg is stopped out, immediately close the other leg too.
+    # The backtest strategy exits BOTH legs the moment either leg hits 1.5× entry.
+    if _straddle_id and _SessionFactory is not None:
+        try:
+            kite = get_session_manager().get_kite()
+        except Exception as _exc:
+            log.error("_on_gtt_filled: cannot get kite for paired-leg exit: %s", _exc)
+            kite = None
+
+        if kite is not None:
+            with _SessionFactory() as session2:
+                sibling_orders = (
+                    session2.query(Order)
+                    .filter(
+                        Order.straddle_id == _straddle_id,
+                        Order.kite_order_id != _entry_kite_order_id,
+                    )
+                    .all()
+                )
+                for sib_order in sibling_orders:
+                    sib_pos = (
+                        session2.query(Position)
+                        .outerjoin(ClosedTrade, Position.id == ClosedTrade.position_id)
+                        .filter(
+                            Position.order_id == sib_order.id,
+                            ClosedTrade.id == None,  # noqa: E711
+                        )
+                        .first()
+                    )
+                    if sib_pos is None:
+                        continue  # already closed
+
+                    sib_instr = (
+                        session2.query(Instrument)
+                        .filter(
+                            Instrument.tradingsymbol == sib_pos.tradingsymbol,
+                            Instrument.exchange == sib_pos.exchange,
+                        )
+                        .first()
+                    )
+                    if sib_instr is None:
+                        log.error(
+                            "_on_gtt_filled: paired-leg instrument not found for %s",
+                            sib_pos.tradingsymbol,
+                        )
+                        continue
+
+                    # Cancel active GTT on sibling
+                    sib_gtt = (
+                        session2.query(Gtt)
+                        .filter(Gtt.order_id == sib_order.id, Gtt.status == "ACTIVE")
+                        .first()
+                    )
+                    if sib_gtt and sib_gtt.kite_gtt_id:
+                        try:
+                            cancel_gtt(kite, sib_gtt.kite_gtt_id)
+                        except Exception as _exc:
+                            log.warning(
+                                "_on_gtt_filled: cancel GTT %d for paired leg %s failed: %s",
+                                sib_gtt.kite_gtt_id, sib_pos.tradingsymbol, _exc,
+                            )
+                        sib_gtt.status = "CANCELLED"
+                        sib_gtt.updated_at = datetime.now(IST)
+
+                    # Unregister trailing SL for sibling
+                    if _trailing_manager is not None and sib_instr:
+                        try:
+                            _trailing_manager.unregister(sib_instr.instrument_token)
+                        except Exception:
+                            pass
+
+                    # Fetch LTP for a limit exit; fall back to MARKET
+                    limit_px: float | None = None
+                    try:
+                        q_key = f"{sib_pos.exchange}:{sib_pos.tradingsymbol}"
+                        q = kite.quote([q_key])
+                        ltp = float(q.get(q_key, {}).get("last_price", 0.0))
+                        if ltp > 0:
+                            from app.symbol_mapper import round_to_tick
+                            tick = float(sib_instr.tick_size) if sib_instr.tick_size else 0.05
+                            limit_px = round_to_tick(ltp * 1.005, tick)
+                    except Exception as _exc:
+                        log.warning(
+                            "_on_gtt_filled: LTP fetch failed for paired leg %s — using MARKET: %s",
+                            sib_pos.tradingsymbol, _exc,
+                        )
+
+                    try:
+                        sq_id = square_off(
+                            kite, sib_instr, sib_pos.quantity,
+                            product=sib_order.product or "NRML",
+                            entry_side=sib_order.transaction_type or "SELL",
+                            limit_price=limit_px,
+                        )
+                        now2 = datetime.now(IST)
+                        ct = ClosedTrade(
+                            position_id=sib_pos.id,
+                            exchange=sib_pos.exchange,
+                            tradingsymbol=sib_pos.tradingsymbol,
+                            entry_premium=sib_pos.entry_premium,
+                            exit_premium=0.0,
+                            pnl=0.0,
+                            exit_reason="straddle_paired_sl_exit",
+                            opened_at=sib_pos.opened_at,
+                            closed_at=now2,
+                        )
+                        session2.add(ct)
+                        log.info(
+                            "_on_gtt_filled: paired-leg %s closed sq_order=%s (straddle_id=%s)",
+                            sib_pos.tradingsymbol, sq_id, _straddle_id[:8],
+                        )
+                    except Exception as _exc:
+                        log.error(
+                            "_on_gtt_filled: paired-leg squareoff failed for %s: %s",
+                            sib_pos.tradingsymbol, _exc,
+                            exc_info=True,
+                        )
+                session2.commit()
 
 
 # ── Short straddle executor ───────────────────────────────────────────────────
@@ -1090,7 +1272,7 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
 
         if not _dry_run(settings):
             try:
-                risk.check_risk_gates(session, now)
+                risk.check_risk_gates(session, now, state.get_consecutive_losses_limit(settings.CONSECUTIVE_LOSSES_LIMIT))
             except risk.RiskHaltError as exc:
                 log.warning("Alert %d: risk halt — %s", alert_id, exc.reason)
                 alert.processed = True
@@ -1312,20 +1494,39 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
             # Write the opposite type (PE on BUY signal, CE on SELL signal)
             flag = "PE" if alert_data.action == "BUY" else "CE"
             entry_side = "SELL"
-        else:  # RANGE_SELL: sell same-direction option; only fires when ADX < threshold
+        else:  # RANGE_SELL: ranging → sell same-direction; trending → fall back to SELL_OPTIONS
             adx_threshold = state.get_adx_threshold(settings.ADX_THRESHOLD)
-            if alert_data.adx is None or alert_data.adx >= adx_threshold:
+            adx_value = alert_data.adx
+
+            if adx_value is None:
+                # TV didn't send ADX — fetch it from Kite on ADX_CANDLE_INTERVAL
+                _rs_kite = get_session_manager().get_kite()
+                adx_value = _fetch_adx_for_underlying(underlying, settings, _rs_kite, session, now)
+
+            if adx_value is not None and adx_value < adx_threshold:
+                # Ranging market: sell same-direction (contrarian)
                 log.info(
-                    "Alert %d: RANGE_SELL skipped -- ADX=%s (threshold=%.1f, need ADX < threshold)",
-                    alert_id,
-                    f"{alert_data.adx:.1f}" if alert_data.adx is not None else "not provided",
-                    adx_threshold,
+                    "Alert %d: RANGE_SELL ADX=%.1f < %.1f (ranging) — sell %s",
+                    alert_id, adx_value, adx_threshold,
+                    "CE" if alert_data.action == "BUY" else "PE",
                 )
-                alert.processed = True
-                session.commit()
-                return
-            flag = "CE" if alert_data.action == "BUY" else "PE"
-            entry_side = "SELL"
+                flag = "CE" if alert_data.action == "BUY" else "PE"
+                entry_side = "SELL"
+            else:
+                # Trending (ADX >= threshold) or ADX unavailable → fall back to SELL_OPTIONS
+                if adx_value is None:
+                    log.warning(
+                        "Alert %d: RANGE_SELL ADX unavailable — falling back to SELL_OPTIONS",
+                        alert_id,
+                    )
+                else:
+                    log.info(
+                        "Alert %d: RANGE_SELL ADX=%.1f >= %.1f (trending) — falling back to SELL_OPTIONS",
+                        alert_id, adx_value, adx_threshold,
+                    )
+                # SELL_OPTIONS: sell opposite-direction option (with-trend premium collection)
+                flag = "PE" if alert_data.action == "BUY" else "CE"
+                entry_side = "SELL"
         # Block new SELL_OPTIONS entries on weekly expiry day (voice = manual override, skip)
         _is_voice_order = bool(alert.strategy_id and alert.strategy_id.startswith(("voice_", "straddle_")))
         if entry_side == "SELL" and state.get_no_entry_on_expiry_day(settings.NO_ENTRY_ON_EXPIRY_DAY) and not _is_voice_order:
@@ -2662,6 +2863,11 @@ async def control_page(
     trail_label = "TRAIL ON" if eff_trailing else "TRAIL OFF"
     trail_lbl   = "Disable Trailing" if eff_trailing else "Enable Trailing"
     trail_cls   = "ba" if eff_trailing else "bg2"
+    ws_enabled  = state.is_window_straddle_enabled()
+    ws_pill     = "pg" if ws_enabled else "pr"
+    ws_label    = "ON" if ws_enabled else "OFF"
+    ws_lbl      = "Disable" if ws_enabled else "Enable"
+    ws_cls      = "ba" if ws_enabled else "bg2"
 
     def src(key: str) -> str:
         return (
@@ -2745,7 +2951,7 @@ async def control_page(
         # mode / switches
         + "<div class='card'><div class='ct'>Mode</div>"
         + f"<div class='mdr'><div class='mdl'>Trade Mode&ensp;<span class='pill {mode_pill}'>{mode_display}</span>"
-        + ("<span style='font-size:.72em;color:#8E8E93'>&ensp;BUY->SELL CE&ensp;SELL->SELL PE&ensp;(ADX&lt;threshold only)</span>" if trade_mode == "RANGE_SELL" else "")
+        + ("<span style='font-size:.72em;color:#8E8E93'>&ensp;ranging: BUY->SELL CE&ensp;SELL->SELL PE&ensp;|&ensp;trending: falls back to SELL_OPTIONS</span>" if trade_mode == "RANGE_SELL" else "")
         + ("<span style='font-size:.72em;color:#8E8E93'>&ensp;BUY->SELL PE&ensp;SELL->SELL CE</span>" if trade_mode == "SELL_OPTIONS" else "")
         + ("<span style='font-size:.72em;color:#8E8E93'>&ensp;BUY->BUY CE&ensp;SELL->BUY PE</span>" if trade_mode == "BUY_OPTIONS" else "")
         + "</div>"
@@ -2760,6 +2966,9 @@ async def control_page(
         + f"<div class='mdr'><div class='mdl'>Trailing SL&ensp;<span class='pill {trail_pill}'>{trail_label}</span></div>"
         + "<form method='post' action='/control/trailing/toggle' style='margin:0'>"
         + f"<button class='btn {trail_cls}' type='submit'>{trail_lbl}</button></form></div>"
+        + f"<div class='mdr'><div class='mdl'>Window Straddle&ensp;<span class='pill {ws_pill}'>{ws_label}</span><span style='font-size:.70em;color:#8E8E93'>&ensp;NIFTY×2 BNF×1 CO×5 NG×2</span></div>"
+        + "<form method='post' action='/control/window-straddle/toggle' style='margin:0'>"
+        + f"<button class='btn {ws_cls}' type='submit'>{ws_lbl}</button></form></div>"
         + "<div style='margin-top:10px'><form method='post' action='/control/emergency-stop/toggle'>"
         + f"<button class='btn bfull {estop_cls}' type='submit'>{estop_lbl}</button>"
         + "</form></div></div>"
@@ -2847,6 +3056,13 @@ async def toggle_emergency_stop(_: None = Depends(_auth_guard)) -> Response:
 async def toggle_trailing(_: None = Depends(_auth_guard)) -> Response:
     new_val = state.toggle_trailing_enabled()
     log.info("Trailing SL toggled to %s", new_val)
+    return Response(status_code=302, headers={"Location": "/control"})
+
+
+@app.post("/control/window-straddle/toggle")
+async def toggle_window_straddle(_: None = Depends(_auth_guard)) -> Response:
+    new_val = state.toggle_window_straddle()
+    log.info("Window straddle toggled to %s", new_val)
     return Response(status_code=302, headers={"Location": "/control"})
 
 
