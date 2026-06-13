@@ -535,46 +535,41 @@ def main() -> None:
         if not ng_futures:
             log.warning("No %s futures found in instruments", underlying)
         else:
-            # Use the nearest-expiry futures token with continuous=True.
-            # Kite back-stitches expired monthly contracts into a single series,
-            # giving up to ~400 days of 5-min data from one token.
-            front = ng_futures[0]
-            log.info("  Continuous series via %s (token=%d)  %s → %s",
-                     front["tradingsymbol"], front["instrument_token"], start_date, end_date)
+            # MCX futures do not support continuous=True for sub-day intervals.
+            # Fetch each listed contract individually; each gives ~3 months back.
+            for fut in ng_futures:
+                exp = fut["expiry"]
+                # Fetch as far back as Kite allows (up to start_date)
+                fetch_from = max(start_date, exp - timedelta(days=100))
+                fetch_to   = min(end_date, exp)
+                if fetch_from > fetch_to:
+                    continue
 
-            for chunk_from, chunk_to in date_chunks(start_date, end_date):
-                try:
-                    bars = kite.historical_data(
-                        front["instrument_token"],
-                        _to_datetime(chunk_from),
-                        _to_datetime(chunk_to).replace(hour=23, minute=59, second=59),
-                        "5minute",
-                        continuous=True,   # ← back-stitched 1-year series
-                        oi=False,
-                    )
-                    time.sleep(API_DELAY_S)
-                    bars = bars or []
-                except Exception as exc:
-                    log.warning("  [API error] futures continuous chunk %s→%s: %s",
-                                chunk_from, chunk_to, exc)
-                    time.sleep(API_DELAY_S)
-                    bars = []
+                log.info("  %s (token=%d)  %s → %s",
+                         fut["tradingsymbol"], fut["instrument_token"], fetch_from, fetch_to)
 
-                rows = _bars_to_futures_rows(bars, front["expiry"], front["tradingsymbol"])
-                all_fut_rows.extend(rows)
-                log.info("    chunk %s→%s: %d bars", chunk_from, chunk_to, len(bars))
+                contract_rows: list[dict] = []
+                for chunk_from, chunk_to in date_chunks(fetch_from, fetch_to):
+                    bars = fetch_ohlc(kite, fut["instrument_token"], chunk_from, chunk_to,
+                                      "5minute", oi=False)
+                    rows = _bars_to_futures_rows(bars, exp, fut["tradingsymbol"])
+                    contract_rows.extend(rows)
+                    log.info("    chunk %s→%s: %d bars", chunk_from, chunk_to, len(bars))
+
+                all_fut_rows.extend(contract_rows)
+                if contract_rows:
+                    index["futures_coverage"][fut["tradingsymbol"]] = {
+                        "token":  fut["instrument_token"],
+                        "expiry": exp.isoformat(),
+                        "rows":   len(contract_rows),
+                    }
+                log.info("  → %d rows for %s", len(contract_rows), fut["tradingsymbol"])
 
             if all_fut_rows:
                 write_csv(futures_csv, all_fut_rows, CSV_FUTURES_FIELDS)
                 log.info("Wrote %d futures rows → %s", len(all_fut_rows), futures_csv)
-                index["futures_coverage"]["continuous"] = {
-                    "token":  front["instrument_token"],
-                    "symbol": front["tradingsymbol"],
-                    "rows":   len(all_fut_rows),
-                    "note":   "continuous=True back-stitched series",
-                }
             else:
-                log.warning("No futures 5-min data — Kite may not support continuous for this instrument")
+                log.warning("No futures 5-min data returned for any listed contract")
 
         index["total_futures_rows"] = len(all_fut_rows)
 
