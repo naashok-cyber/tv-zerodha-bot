@@ -65,15 +65,6 @@ WINDOW_STRADDLE_CFG: dict[str, dict] = {
             ("22:10", "23:25", _TUE_FRI),
         ],
     },
-    "CRUDEOILM": {
-        "exchange": "MCX",
-        "qty": 5,
-        "monthly_only": False,
-        "windows": [
-            ("09:05", "11:25", _MON_TUE_WED_FRI),
-            ("22:10", "23:25", _MON_TUE_WED_FRI),
-        ],
-    },
 }
 
 _EXIT_SLIPPAGE = 0.005  # 0.5% above LTP for buy-back limit orders

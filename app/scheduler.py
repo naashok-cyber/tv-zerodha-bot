@@ -439,27 +439,29 @@ def make_scheduler(
                 _ws_und, _ws_exit_hhmm,
             )
 
+    # Expiry snapshot jobs — run regardless of DRY_RUN; data collection only, never trades
+    from app.expiry_snapshot import run_nse_expiry_snapshot_job, run_mcx_expiry_snapshot_job
+    scheduler.add_job(
+        run_nse_expiry_snapshot_job,
+        trigger="cron",
+        hour=15,
+        minute=31,
+        id="nse_expiry_snapshot",
+        misfire_grace_time=300,
+    )
+    log.info("[scheduler] NSE expiry snapshot scheduled at 15:31 IST (NIFTY/BANKNIFTY/MIDCPNIFTY)")
+    scheduler.add_job(
+        run_mcx_expiry_snapshot_job,
+        trigger="cron",
+        hour=22,
+        minute=25,
+        id="mcx_expiry_snapshot",
+        misfire_grace_time=300,
+    )
+    log.info("[scheduler] MCX expiry snapshot scheduled at 22:25 IST (NATURALGAS/CRUDEOILM)")
+
     if settings.SCHEDULED_STRADDLE_ENABLED and session_factory is not None:
         from app.scheduled_straddle import run_scheduled_straddle, squareoff_scheduled_straddles
-
-        co_h, co_m = _parse_hhmm(settings.CRUDEOILM_STRADDLE_TIME)
-        co_timer = _PreciseTimer(
-            "CRUDEOILM_straddle", co_h, co_m,
-            run_scheduled_straddle,
-            underlying="CRUDEOILM",
-            exchange="MCX",
-            qty=settings.CRUDEOILM_STRADDLE_QTY,
-            settings=settings,
-            session_factory=session_factory,
-            adx_threshold=None,
-        )
-        co_timer.start()
-        _precise_timers.append(co_timer)
-        log.info(
-            "[scheduler] CRUDEOILM straddle (PreciseTimer) at %s IST (%d lots, no ADX gate)",
-            settings.CRUDEOILM_STRADDLE_TIME,
-            settings.CRUDEOILM_STRADDLE_QTY,
-        )
 
         ng_h, ng_m = _parse_hhmm(settings.NG_STRADDLE_TIME)
         ng_timer = _PreciseTimer(

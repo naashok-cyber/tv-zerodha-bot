@@ -18,7 +18,7 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 
-_SQUAREOFF_UNDERLYINGS = {"CRUDEOILM", "NATURALGAS"}
+_SQUAREOFF_UNDERLYINGS = {"NATURALGAS"}
 _SQUAREOFF_REASON = "scheduled_straddle_squareoff"
 
 

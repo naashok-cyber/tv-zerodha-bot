@@ -206,7 +206,7 @@ class Settings(BaseSettings):
     STRADDLE_STRIKE_INTERVAL: float = 2.5       # fallback strike spacing when not in STRADDLE_STRIKE_INTERVALS
     STRADDLE_STRIKE_INTERVALS: dict[str, float] = {
         "NATURALGAS": 5.0, "NATGASMINI": 2.5,
-        "CRUDEOIL": 50.0, "CRUDEOILM": 500.0,
+        "CRUDEOIL": 50.0,
         "NIFTY": 50.0, "BANKNIFTY": 100.0, "FINNIFTY": 50.0,
         "MIDCPNIFTY": 25.0, "SENSEX": 100.0,
     }
@@ -219,8 +219,6 @@ class Settings(BaseSettings):
 
     # ── Scheduled straddle ────────────────────────────────────────────────────
     SCHEDULED_STRADDLE_ENABLED: bool = False
-    CRUDEOILM_STRADDLE_TIME: str = "22:00"    # HH:MM IST entry time
-    CRUDEOILM_STRADDLE_QTY: int = 5           # lots per leg
     NG_STRADDLE_TIME: str = "22:05"
     NG_STRADDLE_QTY: int = 1
     NG_STRADDLE_ADX_THRESHOLD: float = 25.0   # skip if ADX >= this
@@ -238,11 +236,12 @@ class Settings(BaseSettings):
     VOICE_NLU_MODEL: str = "claude-sonnet-4-6"
     VOICE_ALLOWED_INSTRUMENTS: list[str] = [
         "NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX",
-        "CRUDEOIL", "CRUDEOILM", "GOLD", "SILVER",
+        "CRUDEOIL", "GOLD", "SILVER",
         "NATURALGAS", "NATGASMINI",
     ]
     VOICE_NFO_INSTRUMENTS: list[str] = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"]
-    VOICE_MCX_INSTRUMENTS: list[str] = ["CRUDEOIL", "CRUDEOILM", "GOLD", "SILVER", "NATURALGAS", "NATGASMINI"]
+    VOICE_MCX_INSTRUMENTS: list[str] = ["CRUDEOIL", "GOLD", "SILVER", "NATURALGAS", "NATGASMINI"]
+    WEBHOOK_BLOCKED_UNDERLYINGS: list[str] = ["CRUDEOILM"]
     VOICE_MAX_LOTS: int = 5
     VOICE_CONFIRM_TTL_SECONDS: int = 60
     VOICE_DEDUP_SECONDS: int = 10

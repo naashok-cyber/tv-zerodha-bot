@@ -1218,6 +1218,15 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
         now = alert_data.timestamp
         product = settings.PRODUCT_TYPE.value
 
+        if underlying.name in settings.WEBHOOK_BLOCKED_UNDERLYINGS:
+            log.warning(
+                "Alert %d: %s is in WEBHOOK_BLOCKED_UNDERLYINGS — skipping",
+                alert_id, underlying.name,
+            )
+            alert.processed = True
+            session.commit()
+            return
+
         # ── Stock mode routing (toggleable from /control) ─────────────────────
         # For non-indexed NSE symbols (stocks), the /control STOCK_MODE toggle
         # decides whether BUY/SELL trades as EQUITY (CNC) or F&O OPTIONS.
