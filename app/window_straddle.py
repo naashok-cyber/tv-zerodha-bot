@@ -175,9 +175,10 @@ def run_window_straddle_entry(
 
         if not sv.spread_ok:
             log.warning(
-                "[ws_entry] %s: spread too wide (%s) — proceeding anyway",
+                "[ws_entry] %s: spread too wide (%s) — skipping",
                 underlying, sv.block_reason,
             )
+            return
 
         alert = Alert(
             received_at=now,
@@ -216,7 +217,7 @@ def run_window_straddle_entry(
             "_straddle_net_credit": sv.net_credit_per_lot,
             "_straddle_est_sl": sv.estimated_sl_per_lot,
             "_straddle_all_ok": sv.all_ok,
-            "_straddle_force_spread": not sv.spread_ok,
+            "_straddle_force_spread": False,
         }
 
     log.info(
