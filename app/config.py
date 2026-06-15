@@ -205,7 +205,7 @@ class Settings(BaseSettings):
     # ── Straddle ──────────────────────────────────────────────────────────────
     STRADDLE_STRIKE_INTERVAL: float = 2.5       # fallback strike spacing when not in STRADDLE_STRIKE_INTERVALS
     STRADDLE_STRIKE_INTERVALS: dict[str, float] = {
-        "NATURALGAS": 100.0, "NATGASMINI": 2.5,
+        "NATURALGAS": 5.0, "NATGASMINI": 2.5,
         "CRUDEOIL": 50.0, "CRUDEOILM": 500.0,
         "NIFTY": 50.0, "BANKNIFTY": 100.0, "FINNIFTY": 50.0,
         "MIDCPNIFTY": 25.0, "SENSEX": 100.0,
