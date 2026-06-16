@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Place BUY LIMIT orders for CRUDEOILM PE strikes 7200-7900 (step 100)
-at 50% of IV-derived theoretical premium. 5 lots (qty=50) per strike.
+at 50% of IV-derived theoretical premium. qty=5 per strike.
 
 Run from repo root:
   docker compose run --rm -v $(pwd)/scripts:/app/scripts bot python scripts/place_crudeoilm_pe_ladder.py
@@ -17,9 +17,7 @@ from py_vollib.black import black as b76_price
 
 UNDERLYING   = "CRUDEOILM"
 STRIKES      = list(range(7200, 8000, 100))   # 7200..7900
-LOTS         = 5
-LOT_SIZE     = 10                              # barrels per lot
-QTY          = LOTS * LOT_SIZE                # 50
+QTY          = 5
 RISK_FREE    = 0.065
 TICK         = 0.10
 EXCHANGE     = "MCX"
@@ -33,7 +31,7 @@ def round_tick(price: float) -> float:
 kite = get_session_manager().get_kite()
 
 print("=" * 70)
-print(f"  CRUDEOILM PE Ladder — BUY LIMIT  ({len(STRIKES)} strikes × {LOTS} lots × {LOT_SIZE} = qty {QTY})")
+print(f"  CRUDEOILM PE Ladder — BUY LIMIT  ({len(STRIKES)} strikes × qty {QTY})")
 print("=" * 70)
 
 # ── Instruments ───────────────────────────────────────────────────────────────
