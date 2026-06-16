@@ -1503,7 +1503,7 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
             # Write the opposite type (PE on BUY signal, CE on SELL signal)
             flag = "PE" if alert_data.action == "BUY" else "CE"
             entry_side = "SELL"
-        else:  # RANGE_SELL: ranging → sell same-direction; trending → fall back to SELL_OPTIONS
+        else:  # RANGE_SELL: sell same-direction when ranging; fall back to SELL_OPTIONS when trending; skip if ADX unavailable
             adx_threshold = state.get_adx_threshold(settings.ADX_THRESHOLD)
             adx_value = alert_data.adx
 
@@ -1512,7 +1512,16 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
                 _rs_kite = get_session_manager().get_kite()
                 adx_value = _fetch_adx_for_underlying(underlying, settings, _rs_kite, session, now)
 
-            if adx_value is not None and adx_value < adx_threshold:
+            if adx_value is None:
+                # ADX still unavailable (e.g. insufficient candles at market open) → skip
+                log.warning(
+                    "Alert %d: RANGE_SELL ADX unavailable — skipping trade",
+                    alert_id,
+                )
+                alert.processed = True
+                session.commit()
+                return
+            elif adx_value < adx_threshold:
                 # Ranging market: sell same-direction (contrarian)
                 log.info(
                     "Alert %d: RANGE_SELL ADX=%.1f < %.1f (ranging) — sell %s",
@@ -1522,18 +1531,11 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
                 flag = "CE" if alert_data.action == "BUY" else "PE"
                 entry_side = "SELL"
             else:
-                # Trending (ADX >= threshold) or ADX unavailable → fall back to SELL_OPTIONS
-                if adx_value is None:
-                    log.warning(
-                        "Alert %d: RANGE_SELL ADX unavailable — falling back to SELL_OPTIONS",
-                        alert_id,
-                    )
-                else:
-                    log.info(
-                        "Alert %d: RANGE_SELL ADX=%.1f >= %.1f (trending) — falling back to SELL_OPTIONS",
-                        alert_id, adx_value, adx_threshold,
-                    )
-                # SELL_OPTIONS: sell opposite-direction option (with-trend premium collection)
+                # Trending (ADX >= threshold) → fall back to SELL_OPTIONS
+                log.info(
+                    "Alert %d: RANGE_SELL ADX=%.1f >= %.1f (trending) — falling back to SELL_OPTIONS",
+                    alert_id, adx_value, adx_threshold,
+                )
                 flag = "PE" if alert_data.action == "BUY" else "CE"
                 entry_side = "SELL"
         # Block new SELL_OPTIONS entries on weekly expiry day (voice = manual override, skip)
