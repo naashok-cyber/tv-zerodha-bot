@@ -28,21 +28,17 @@ def round_tick(price: float) -> float:
 
 
 def find_opts(instr: list[dict], expiry: date) -> list[dict]:
-    matches = [
-        r for r in instr
-        if r["name"] == UNDERLYING
-        and r["expiry"] == expiry
-        and (
-            r.get("instrument_type", "").upper() in ("CE", "PE", "OPT")
-            or r.get("segment", "") == "MCX-OPT"
-        )
-    ]
     seen: set[int] = set()
     deduped = []
-    for o in matches:
-        if o["instrument_token"] not in seen:
-            seen.add(o["instrument_token"])
-            deduped.append(o)
+    for r in instr:
+        if (
+            r["name"] == UNDERLYING
+            and r["expiry"] == expiry
+            and r.get("segment") == "MCX-OPT"
+            and r["instrument_token"] not in seen
+        ):
+            seen.add(r["instrument_token"])
+            deduped.append(r)
     return deduped
 
 
@@ -64,35 +60,51 @@ print("=" * 70)
 print(f"  {UNDERLYING} IV & Premium Scanner")
 print("=" * 70)
 
-# ── Near-month futures ────────────────────────────────────────────────────────
-print("\n[1] Resolving near-month futures...")
+# ── Fetch all instruments ─────────────────────────────────────────────────────
+print("\n[1] Fetching MCX instruments...")
 today = date.today()
 instr = kite.instruments("MCX")
 
+# ── Nearest live option expiry (skip today if expiring) ──────────────────────
+opt_expiries = sorted({
+    r["expiry"] for r in instr
+    if r["name"] == UNDERLYING and r.get("segment") == "MCX-OPT"
+})
+# Prefer expiry with at least 1 full day remaining
+opt_expiry = next(
+    (e for e in opt_expiries if e > today),
+    next((e for e in opt_expiries if e >= today), None),
+)
+if opt_expiry is None:
+    print("ERROR: No CRUDEOILM option expiries found.")
+    sys.exit(1)
+print(f"  Option expiry   : {opt_expiry}")
+
+# ── Nearest futures at or after the option expiry ────────────────────────────
 futs = sorted(
     [r for r in instr if r["name"] == UNDERLYING and r["instrument_type"] == "FUT"],
     key=lambda x: x["expiry"],
 )
 if not futs:
-    print("ERROR: No CRUDEOILM futures found in instruments.")
+    print("ERROR: No CRUDEOILM futures found.")
     sys.exit(1)
 
-fut = next((f for f in futs if f["expiry"] >= today), futs[0])
-print(f"  Contract : {fut['tradingsymbol']}  expiry={fut['expiry']}")
+fut = next((f for f in futs if f["expiry"] >= opt_expiry), futs[-1])
+print(f"  Futures contract: {fut['tradingsymbol']}  expiry={fut['expiry']}")
 
 ltp_resp = kite.ltp([f"MCX:{fut['tradingsymbol']}"])
 F = ltp_resp[f"MCX:{fut['tradingsymbol']}"]["last_price"]
 print(f"  Futures LTP (F) : ₹{F:.2f}")
 
 # ── Time to expiry ────────────────────────────────────────────────────────────
-expiry_dt = datetime(fut["expiry"].year, fut["expiry"].month, fut["expiry"].day, 23, 30)
+expiry_dt = datetime(opt_expiry.year, opt_expiry.month, opt_expiry.day, 23, 30)
 now = datetime.now()
 T = max((expiry_dt - now).total_seconds() / (365.25 * 24 * 3600), 1.0 / 8760)
 print(f"  Time to expiry  : {T * 365.25:.1f} calendar days  ({T:.6f} yr)")
 
 # ── Find ATM PE and back-solve IV ─────────────────────────────────────────────
 print("\n[2] Back-solving IV from ATM PE...")
-opts = find_opts(instr, fut["expiry"])
+opts = find_opts(instr, opt_expiry)
 print(f"  Options found   : {len(opts)}")
 
 atm_strike = round(F / 100) * 100
