@@ -141,7 +141,9 @@ def _fetch_adx_for_underlying(underlying: Any, settings: Any, kite: Any, session
         log.warning("RANGE_SELL ADX: no instrument found for %s", underlying.name)
         return None
 
-    from_dt = now - timedelta(minutes=n_candles * interval_mins + 60)
+    # Look back 7 calendar days so weekends/holidays never cause a candle shortage.
+    # 7 days ≈ 5 trading days × 375 NSE min = 187 10-min candles, well above n_candles=47.
+    from_dt = now - timedelta(days=7)
     try:
         raw = kite.historical_data(instr.instrument_token, from_dt, now, interval)
     except Exception as exc:
