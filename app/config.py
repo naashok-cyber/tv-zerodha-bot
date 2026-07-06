@@ -248,6 +248,27 @@ class Settings(BaseSettings):
     VOICE_RATE_LIMIT: int = 30          # max requests per 60-second window per token
     VOICE_CONFIG_PATH: str = "data/voice_config.json"
 
+    # ── Commodity debate agents (decision-support; no auto-execution) ─────────
+    COMMODITY_AGENTS_ENABLED: bool = False
+    COMMODITY_AGENTS_COMMODITIES: list[str] = [
+        "NATURALGAS", "CRUDEOIL", "GOLD", "SILVER", "NIFTY", "BANKNIFTY",
+    ]
+    COMMODITY_AGENTS_INTERVAL_MIN: int = 30
+    COMMODITY_AGENTS_LIVE: bool = False   # Phase-6 live-execution gate (not implemented)
+    COMMODITY_AGENTS_WEB_SEARCH: bool = True
+    COMMODITY_AGENT_MODEL_TREND: str = "claude-sonnet-5"
+    COMMODITY_AGENT_MODEL_EVENT: str = "claude-sonnet-5"
+    COMMODITY_AGENT_MODEL_VOL: str = "claude-sonnet-5"
+    COMMODITY_AGENT_MODEL_JUDGE: str = "claude-opus-4-8"
+    COMMODITY_BLACKOUT_PRE_HOURS: float = 3.0
+    COMMODITY_BLACKOUT_POST_HOURS: float = 1.0
+    COMMODITY_MAX_LOSS_PER_LOT: float = 15000.0   # ₹ worst-case per lot cap
+    COMMODITY_MAX_CONCURRENT: int = 2
+    COMMODITY_MAX_MARGIN_UTIL_PCT: float = 60.0
+    COMMODITY_AGENT_MAX_LOTS: int = 5
+    COMMODITY_NOTIFY_MIN_CONFIDENCE: float = 0.6   # Telegram push threshold
+    COMMODITY_DELTA_ALERT_THRESHOLD: float = 0.20  # straddle net delta/lot drift alert
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

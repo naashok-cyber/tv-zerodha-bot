@@ -285,6 +285,10 @@ def init_db(database_url: str | None = None) -> Engine:
     For SQLite file URLs, creates the parent directory automatically so the
     caller never needs to pre-create data/.
     """
+    # Register commodity-agent tables on Base before create_all (lazy import
+    # here avoids a circular import at module load).
+    import app.commodity_agents.storage  # noqa: F401
+
     url = database_url or get_settings().DATABASE_URL
     if url.startswith("sqlite:///") and not url.endswith(":memory:"):
         path = url[len("sqlite:///"):]
@@ -311,6 +315,9 @@ def _migrate(engine: Engine) -> None:
     """Apply additive schema changes not handled by create_all (new nullable columns)."""
     migrations = [
         "ALTER TABLE orders ADD COLUMN straddle_id VARCHAR(36)",
+        "ALTER TABLE commodity_agent_runs ADD COLUMN analytics_json TEXT",
+        "ALTER TABLE commodity_recommendations ADD COLUMN realized_move_pct FLOAT",
+        "ALTER TABLE commodity_recommendations ADD COLUMN outcome VARCHAR(16)",
     ]
     with engine.connect() as conn:
         for stmt in migrations:

@@ -1065,6 +1065,9 @@ from app.routes.admin_voice import router as _admin_voice_router  # noqa: E402
 app.include_router(_voice_router)
 app.include_router(_admin_voice_router)
 
+from app.commodity_agents.routes import router as _commodity_agents_router  # noqa: E402
+app.include_router(_commodity_agents_router)
+
 
 @app.exception_handler(RequestValidationError)
 async def _validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:

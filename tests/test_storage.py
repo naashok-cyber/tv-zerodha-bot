@@ -36,6 +36,10 @@ EXPECTED_TABLES = {
     "instruments",
     "webauthn_credentials",
     "web_sessions",
+    "commodity_agent_runs",
+    "commodity_recommendations",
+    "commodity_recommendation_decisions",
+    "commodity_trade_journal",
 }
 
 

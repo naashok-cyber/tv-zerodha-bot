@@ -12,3 +12,12 @@ data/
 *.enc
 .claude/
 details.txt
+# upstox research artifacts (tokens/cache — never commit)
+.env.upstox
+.upstox_token
+.upstox_instruments_cache.json
+
+# terraform local state
+terraform/.terraform/
+terraform/*.tfstate
+terraform/*.tfstate.backup

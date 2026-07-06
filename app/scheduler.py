@@ -390,6 +390,10 @@ def make_scheduler(
             misfire_grace_time=120,
         )
 
+    if session_factory is not None and settings.COMMODITY_AGENTS_ENABLED:
+        from app.commodity_agents.orchestrator import register_jobs as _register_ca_jobs
+        _register_ca_jobs(scheduler, settings, session_factory)
+
     if session_factory is not None:
         from app.window_straddle import (
             get_all_entry_jobs, get_all_exit_jobs,
