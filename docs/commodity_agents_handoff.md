@@ -137,12 +137,12 @@ checkmarks → recommendation card with two-step approve).
    FOMC hardcoded; the Sunday calendar-refresh job will correct forward dates
    once deployed, but a one-time manual check of rbi.org.in is cheap insurance.
 6. **Not built (deliberately deferred — candidate next enhancements)**:
-   - Dashboard "desk stats" card rendering /journal + /calibration (endpoints
-     exist; UI shows nothing for them yet — phone JSON is unreadable).
    - MAE/MFE per trade (needs tick hooks in `trailing.py`).
    - Strangle/iron-fly auto-execution (only straddle executes live).
    - Walk-forward splits in the backtest (no fitted params yet, so low value).
-   - Portfolio-greeks panel on the dashboard (endpoint exists).
+
+   (The Desk page at `/commodity-agents/desk` — greeks, journal, scorecard —
+   was built and browser-verified 2026-07-07, commit 6683306.)
 
 ## 5. Gotchas for the next model
 
@@ -179,6 +179,7 @@ python -m app.commodity_agents.backtest --csv-dir data/banknifty_futures --cost-
 # key endpoints (all need X-Admin-Auth-Token)
 GET  /commodity-agents/analyze            # UI
 GET  /commodity-agents/dashboard          # UI
+GET  /commodity-agents/desk               # UI: greeks + journal + scorecard
 POST /commodity-agents/run                # {"commodity": "GOLD"} or null=all
 GET  /commodity-agents/{t}/runs/latest    # live stage progress + rec + analytics
 GET  /commodity-agents/{t}/iv-history     # IV/RV/VRP series
