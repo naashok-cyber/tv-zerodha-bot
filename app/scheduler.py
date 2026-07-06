@@ -464,6 +464,26 @@ def make_scheduler(
     )
     log.info("[scheduler] MCX expiry snapshot scheduled at 22:25 IST (NATURALGAS/CRUDEOILM)")
 
+    if settings.NG_DELTA_HEDGE_ENABLED and session_factory is not None:
+        from app.delta_hedge import run_delta_hedge_job
+        scheduler.add_job(
+            run_delta_hedge_job,
+            trigger="cron",
+            day_of_week="mon-fri",
+            hour="9-23",
+            minute="2,7,12,17,22,27,32,37,42,47,52,57",
+            kwargs={"settings": settings, "session_factory": session_factory},
+            id="ng_delta_hedge",
+            misfire_grace_time=60,
+            max_instances=1,  # never overlap if a tick runs long
+        )
+        log.info(
+            "[scheduler] NG delta-hedge cron: every 5 min @ :02/:07/.../:57 IST, "
+            "Mon-Fri 09-23 (threshold=±%.0f mmBtu, limit_wait=%ds)",
+            settings.NG_DELTA_HEDGE_THRESHOLD,
+            settings.NG_DELTA_HEDGE_LIMIT_WAIT_SEC,
+        )
+
     if settings.SCHEDULED_STRADDLE_ENABLED and session_factory is not None:
         from app.scheduled_straddle import run_scheduled_straddle, squareoff_scheduled_straddles
 

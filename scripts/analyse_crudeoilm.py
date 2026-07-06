@@ -104,7 +104,7 @@ print(f"\nPrimary futures symbol: {primary_sym} ({sym_counts[primary_sym]} bars)
 # Use options from the most recent expiry with sufficient data
 opt_expiry_counts = opts.groupby("expiry").size()
 print(f"Options data by expiry:\n{opt_expiry_counts.to_string()}")
-primary_expiry = opt_expiry_counts.idxmax()  # expiry with most data
+primary_expiry = opt_expiry_counts.index[-1]  # latest expiry
 print(f"\nUsing options expiry: {primary_expiry}")
 
 opts_primary = opts[opts["expiry"].astype(str).str[:10] == str(primary_expiry)[:10]].copy()

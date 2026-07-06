@@ -228,6 +228,36 @@ class Settings(BaseSettings):
     ADX_PERIOD: int = 14
     ADX_CANDLE_INTERVAL: str = "10minute"     # Kite interval string for historical candles
 
+    # ── NATURALGAS delta hedge (5-min cron) ───────────────────────────────────
+    NG_DELTA_HEDGE_ENABLED: bool = False
+    NG_DELTA_HEDGE_THRESHOLD: float = 400.0   # mmBtu; sell more lots when |net δ| exceeds this
+    NG_DELTA_HEDGE_LIMIT_WAIT_SEC: int = 20   # cancel + MARKET escalation after this
+
+    # ── NATURALGAS half-exit (profit-lock; piggybacks on delta-hedge cron) ────
+    # Default True here (instead of in .env) so the running container picks it
+    # up via a docker compose restart, without needing a recreate. Re-rebuilds
+    # of the image will read .env normally.
+    NG_HALF_EXIT_ENABLED: bool = True
+    NG_HALF_EXIT_PNL_TRIGGER: float = 8000.0    # ₹ M2M-today threshold to fire
+    NG_HALF_EXIT_FLAG_PATH: str = "data/ng_half_exit_done.flag"  # delete to re-arm
+
+    # ── NG straddle-ladder (post half-exit trim) ──────────────────────────────
+    # After the half-exit fires, this ladder trims 1 ATM straddle (1 short CE +
+    # 1 short PE nearest F) each time today's m2m rises another
+    # NG_STRADDLE_LADDER_STEP above the m2m at half-exit fire time.
+    # State file records baseline and lots-closed count; delete to re-arm.
+    NG_STRADDLE_LADDER_ENABLED: bool = True
+    NG_STRADDLE_LADDER_STEP: float = 2000.0     # ₹ per ladder rung
+    NG_STRADDLE_LADDER_STATE_PATH: str = "data/ng_ladder_state.json"
+
+    # ── BANKNIFTY stop-loss / trailing (piggybacks on the same 5-min cron) ────
+    # Fires when today's m2m on all BANKNIFTY legs <= trigger.
+    # Trigger can be a loss limit (negative) OR a profit-lock floor (positive).
+    # Closes ALL currently-open BANKNIFTY shorts at LIMIT, escalating to MARKET.
+    BNF_STOP_LOSS_ENABLED: bool = True
+    BNF_STOP_LOSS_TRIGGER: float = 3000.0       # ₹ M2M today; closes when m2m <= this
+    BNF_STOP_LOSS_FLAG_PATH: str = "data/bnf_stop_loss_done.flag"  # delete to re-arm
+
     # ── Voice channel ──────────────────────────────────────────────────────────
     VOICE_AUTH_TOKEN: str = ""          # Required; 401 if empty or wrong
     ADMIN_AUTH_TOKEN: str = ""          # Required; 401 if empty or wrong
