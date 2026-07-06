@@ -1,0 +1,217 @@
+// ══════════════════════════════════════════════════════════════════════════════
+//  BN ITM-2 Pullback  |  Options Buying Signal  (15-min BANKNIFTY Futures)
+// ──────────────────────────────────────────────────────────────────────────────
+//  Logic:
+//    1. SuperTrend(10, 3.0) flips direction + ADX(14) >= 25
+//    2. Wait up to 6 bars (90 min) for price to pull back to EMA(20)
+//    3. Entry bar: wick touches EMA, candle closes back on the right side
+//       - ST flipped UP   → BUY 2-strike ITM CALL  (CE)
+//       - ST flipped DOWN → BUY 2-strike ITM PUT   (PE)
+//    4. SL  = entry close − 1.0×ATR  (CE) / + 1.0×ATR  (PE)  [in underlying]
+//       TP  = entry close + 2.0×ATR  (CE) / − 2.0×ATR  (PE)  [in underlying]
+//    5. Strike: ATM = nearest 100/300/500-pt strike to spot price
+//               ITM-2 CE = ATM − 2 strikes   |  ITM-2 PE = ATM + 2 strikes
+//
+//  Chart: BANKNIFTY Futures  |  Timeframe: 15-min
+// ══════════════════════════════════════════════════════════════════════════════
+
+//@version=5
+strategy(
+    title             = "BN ITM-2 Pullback | Buy Options Signal",
+    shorttitle        = "BN-ITM2-PB",
+    overlay           = true,
+    default_qty_type  = strategy.fixed,
+    default_qty_value = 1,
+    calc_on_every_tick = false
+)
+
+// ── Inputs ────────────────────────────────────────────────────────────────────
+grp_st  = "SuperTrend"
+grp_adx = "ADX Filter"
+grp_ent = "Entry"
+grp_rsk = "Risk"
+grp_ses = "Session"
+
+i_atr_p  = input.int   (10,    "ATR Period",              group=grp_st)
+i_st_m   = input.float (3.0,   "ST Multiplier",           group=grp_st,  step=0.1)
+i_adx_p  = input.int   (14,    "ADX Period",              group=grp_adx)
+i_adx_t  = input.float (25.0,  "ADX Threshold",           group=grp_adx, step=0.5)
+i_ema_l  = input.int   (20,    "EMA Length",              group=grp_ent)
+i_pb_win = input.int   (6,     "Pullback Window (bars)",  group=grp_ent, minval=1, maxval=15)
+i_sl_atr = input.float (1.0,   "SL × ATR",               group=grp_rsk, step=0.1)
+i_tp_atr = input.float (2.0,   "TP × ATR",               group=grp_rsk, step=0.1)
+// Block entries after 14:45 IST — avoids entering in last 45 min
+i_cutoff = input.session("0915-1445", "Entry Window (IST)", group=grp_ses)
+
+// ── Indicators ────────────────────────────────────────────────────────────────
+atr_val              = ta.atr(i_atr_p)
+[st_line, st_dir]    = ta.supertrend(i_st_m, i_atr_p)
+ema20                = ta.ema(close, i_ema_l)
+[dip, dim, adx_val]  = ta.dmi(i_adx_p, i_adx_p)
+
+// ── ST flip ───────────────────────────────────────────────────────────────────
+flip_up   = st_dir == -1 and st_dir[1] == 1   // downtrend → uptrend
+flip_down = st_dir ==  1 and st_dir[1] == -1  // uptrend → downtrend
+adx_ok    = adx_val >= i_adx_t
+in_window = not na(time(timeframe.period, i_cutoff))
+
+// ── Pending setup tracker ─────────────────────────────────────────────────────
+// Store ATR at the flip bar; countdown bars until pullback window expires
+var int   buy_bars   = 0
+var float buy_atr_v  = na
+var int   sell_bars  = 0
+var float sell_atr_v = na
+
+// Reset on new flip (only when flat)
+if flip_up and adx_ok and strategy.position_size == 0
+    buy_bars   := i_pb_win
+    buy_atr_v  := atr_val
+    sell_bars  := 0
+
+if flip_down and adx_ok and strategy.position_size == 0
+    sell_bars  := i_pb_win
+    sell_atr_v := atr_val
+    buy_bars   := 0
+
+// Clear pending when a new opposite flip happens even while in trade
+if flip_up   and strategy.position_size != 0
+    sell_bars := 0
+if flip_down and strategy.position_size != 0
+    buy_bars  := 0
+
+// Decrement countdown
+if buy_bars  > 0
+    buy_bars  -= 1
+if sell_bars > 0
+    sell_bars -= 1
+
+// ── Pullback entry conditions ─────────────────────────────────────────────────
+// BUY CE: wick pierces EMA, green candle closes above EMA
+buy_sig  = buy_bars  > 0
+         and low  <= ema20 and close > ema20
+         and close > open
+         and strategy.position_size == 0
+         and in_window
+
+// BUY PE: wick pierces EMA, red candle closes below EMA
+sell_sig = sell_bars > 0
+         and high >= ema20 and close < ema20
+         and close < open
+         and strategy.position_size == 0
+         and in_window
+
+// Capture ATR snapshot for SL/TP (from the flip bar, not entry bar)
+entry_buy_atr  = buy_atr_v
+entry_sell_atr = sell_atr_v
+
+// ── Strategy entries & exits ──────────────────────────────────────────────────
+if buy_sig
+    sl = close - i_sl_atr * entry_buy_atr
+    tp = close + i_tp_atr * entry_buy_atr
+    strategy.entry("BUY_CE", strategy.long,  comment="Buy ITM-2 CE")
+    strategy.exit ("X_CE",   "BUY_CE", stop=sl, limit=tp)
+    buy_bars := 0
+
+if sell_sig
+    sl = close + i_sl_atr * entry_sell_atr
+    tp = close - i_tp_atr * entry_sell_atr
+    strategy.entry("BUY_PE", strategy.short, comment="Buy ITM-2 PE")
+    strategy.exit ("X_PE",   "BUY_PE", stop=sl, limit=tp)
+    sell_bars := 0
+
+// ── Plots ─────────────────────────────────────────────────────────────────────
+// SuperTrend
+st_clr = st_dir == -1 ? color.new(color.green, 0) : color.new(color.red, 0)
+plot(st_line, "SuperTrend", color=st_clr, linewidth=2)
+
+// EMA
+plot(ema20, "EMA 20", color=color.new(color.blue, 20), linewidth=1)
+
+// ADX background: trending regime highlighted
+bgcolor(adx_ok ? color.new(color.gray, 92) : na, title="Trending Regime")
+
+// ST flip setup dots (small, semi-transparent)
+plotshape(flip_up   and adx_ok, "Setup BUY",  shape.circle, location.belowbar,
+          color.new(color.lime,   40), size=size.tiny, title="Flip UP Setup")
+plotshape(flip_down and adx_ok, "Setup SELL", shape.circle, location.abovebar,
+          color.new(color.orange, 40), size=size.tiny, title="Flip DOWN Setup")
+
+// Entry arrows
+plotshape(buy_sig,  "Buy CE Signal",  shape.triangleup,   location.belowbar,
+          color.green, size=size.normal, title="BUY CE Entry")
+plotshape(sell_sig, "Buy PE Signal",  shape.triangledown, location.abovebar,
+          color.red,   size=size.normal, title="BUY PE Entry")
+
+// ── Entry labels with SL / TP levels ─────────────────────────────────────────
+if buy_sig
+    sl_val = math.round(close - i_sl_atr * entry_buy_atr)
+    tp_val = math.round(close + i_tp_atr * entry_buy_atr)
+    label.new(
+        bar_index, low - atr_val * 0.8,
+        "BUY ITM-2 CE\nEntry : " + str.tostring(math.round(close)) +
+        "\nSL fut: " + str.tostring(sl_val) +
+        "\nTP fut: " + str.tostring(tp_val) +
+        "\nATR   : " + str.tostring(math.round(entry_buy_atr, 1)),
+        color      = color.new(color.green, 5),
+        textcolor  = color.white,
+        style      = label.style_label_up,
+        size       = size.small
+    )
+
+if sell_sig
+    sl_val = math.round(close + i_sl_atr * entry_sell_atr)
+    tp_val = math.round(close - i_tp_atr * entry_sell_atr)
+    label.new(
+        bar_index, high + atr_val * 0.8,
+        "BUY ITM-2 PE\nEntry : " + str.tostring(math.round(close)) +
+        "\nSL fut: " + str.tostring(sl_val) +
+        "\nTP fut: " + str.tostring(tp_val) +
+        "\nATR   : " + str.tostring(math.round(entry_sell_atr, 1)),
+        color      = color.new(color.red, 5),
+        textcolor  = color.white,
+        style      = label.style_label_down,
+        size       = size.small
+    )
+
+// ── ADX table (top-right corner) ─────────────────────────────────────────────
+var table adx_tbl = table.new(position.top_right, 2, 3, border_width=1)
+if barstate.islast
+    adx_clr = adx_val >= i_adx_t ? color.new(color.green, 20) : color.new(color.gray, 20)
+    table.cell(adx_tbl, 0, 0, "ADX",     text_color=color.white, bgcolor=color.new(color.navy, 10))
+    table.cell(adx_tbl, 1, 0, str.tostring(math.round(adx_val, 1)), text_color=color.white, bgcolor=adx_clr)
+    table.cell(adx_tbl, 0, 1, "ATR",     text_color=color.white, bgcolor=color.new(color.navy, 10))
+    table.cell(adx_tbl, 1, 1, str.tostring(math.round(atr_val, 0)), text_color=color.white, bgcolor=color.new(color.gray, 20))
+    table.cell(adx_tbl, 0, 2, "Regime",  text_color=color.white, bgcolor=color.new(color.navy, 10))
+    table.cell(adx_tbl, 1, 2, adx_val >= i_adx_t ? "TREND" : "RANGE",
+               text_color=color.white, bgcolor=adx_clr)
+
+// ── Alerts ────────────────────────────────────────────────────────────────────
+alertcondition(
+    buy_sig,
+    title   = "BN: Buy ITM-2 CE Signal",
+    message = "BANKNIFTY 15m | Pullback to EMA after ST flip UP (ADX>=25)\n"
+            + "Action : BUY 2-strike ITM CALL (CE)\n"
+            + "Fut @ {{close}} | SL if fut drops {{plot_0}} | TP if fut rises {{plot_1}}\n"
+            + "ATR = " + str.tostring(math.round(atr_val, 1))
+)
+
+alertcondition(
+    sell_sig,
+    title   = "BN: Buy ITM-2 PE Signal",
+    message = "BANKNIFTY 15m | Pullback to EMA after ST flip DOWN (ADX>=25)\n"
+            + "Action : BUY 2-strike ITM PUT (PE)\n"
+            + "Fut @ {{close}} | SL if fut rises | TP if fut falls\n"
+            + "ATR = " + str.tostring(math.round(atr_val, 1))
+)
+
+alertcondition(
+    flip_up and adx_ok,
+    title   = "BN: ST Flip UP — Watch for CE Pullback Entry",
+    message = "BANKNIFTY 15m | ST flipped to UPTREND, ADX>=25\nWaiting for EMA pullback (up to 6 bars) to Buy CE ITM-2"
+)
+
+alertcondition(
+    flip_down and adx_ok,
+    title   = "BN: ST Flip DOWN — Watch for PE Pullback Entry",
+    message = "BANKNIFTY 15m | ST flipped to DOWNTREND, ADX>=25\nWaiting for EMA pullback (up to 6 bars) to Buy PE ITM-2"
+)

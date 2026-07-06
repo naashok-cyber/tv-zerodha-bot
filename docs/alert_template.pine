@@ -47,46 +47,20 @@
 // =============================================================================
 
 
-// ── PASTE THESE DIRECTLY INTO TRADINGVIEW'S ALERT MESSAGE BOX ───────────────
+// ── STATIC TEMPLATES (paste into TradingView alert message box) ──────────────
 //
-// {{ticker}}    → TradingView fills in the bare symbol (NIFTY, CRUDEOIL, etc.)
-//                 — no exchange prefix, so it works for any chart without editing.
-//                 resolve_underlying() in symbol_mapper.py also handles the
-//                 "NSE:NIFTY" format if you use {{exchange}}:{{ticker}} instead.
+// NOTE: Static templates cannot embed Pine-computed variables (sl_price,
+// target_price). Use the Pine Script v5 dynamic alert() section below instead.
 //
-// {{close}}     → bar close price (bare number, no quotes — correct for JSON)
-// {{interval}}  → chart timeframe in minutes ("5", "15", "60", "D", etc.)
-// {{timenow}}   → current UTC time as Unix ms integer — used as idempotency key
-//                 (string field in the schema, so the quotes below are correct)
-// {{time}}      → bar-open UTC time; TradingView formats this as ISO-8601 with
-//                 timezone (e.g. 2024-04-28T07:15:00Z) which Pydantic accepts.
-//                 It is bar-open time, not wall-clock time; for wall-clock
-//                 accuracy use the Pine Script alert() approach at the bottom.
+// {{ticker}}    → bare symbol (NIFTY, CRUDEOIL, etc.)
+// {{close}}     → bar close price (bare number — correct for JSON)
+// {{interval}}  → chart timeframe ("5", "15", "60", "D", etc.)
+// {{timenow}}   → current UTC time as Unix ms integer (idempotency key)
+// {{time}}      → bar-open UTC time as ISO-8601 (e.g. 2024-04-28T07:15:00Z)
 
 
-// ── BUY (enter long: CE option for indices/stocks, near-month FUT for NATURALGAS) ──
-{
-    "symbol": "{{ticker}}",
-    "action": "BUY",
-    "price": {{close}},
-    "timeframe": "{{interval}}",
-    "alert_id": "{{timenow}}",
-    "timestamp": "{{time}}"
-}
-
-
-// ── SELL (enter short via PE option) ────────────────────────────────────────
-// {
-//     "symbol": "{{ticker}}",
-//     "action": "SELL",
-//     "price": {{close}},
-//     "timeframe": "{{interval}}",
-//     "alert_id": "{{timenow}}",
-//     "timestamp": "{{time}}"
-// }
-
-
-// ── EXIT (manual close of open position; bot cancels GTT and squares off) ───
+// ── EXIT (manual close; bot cancels GTT and squares off) ────────────────────
+// No sl_price / target_price needed for EXIT.
 // {
 //     "symbol": "{{ticker}}",
 //     "action": "EXIT",
@@ -98,8 +72,7 @@
 
 
 // ── TRAIL (bar-close trail check; premium field is REQUIRED) ─────────────────
-// Chart the option contract directly — {{close}} is the OPTION premium here,
-// not the underlying price.
+// Chart the option contract directly — {{close}} is the OPTION premium here.
 // {
 //     "symbol": "{{ticker}}",
 //     "action": "TRAIL",
@@ -112,21 +85,58 @@
 
 
 // =============================================================================
-// PINE SCRIPT v5 — Dynamic timestamp example
+// PINE SCRIPT v5 — Dynamic alert() with ATR-based sl_price and target_price
 // =============================================================================
-// To send a proper ISO-8601 UTC timestamp, add this to your strategy/indicator
-// and include the output in a plotchar or alert message via Pine's alertcondition:
+// Use this approach for BUY and SELL signals so that Pine-computed sl_price
+// and target_price are embedded as bare numbers in the JSON.
+//
+// sl_price / target_price rules:
+//   BUY : sl below entry (close - atr_mult * ATR), target above (2× risk)
+//   SELL: sl above entry (close + atr_mult * ATR), target below (2× risk)
+//   Keys are omitted entirely when ATR is na (first ~14 bars) — no null sent.
 //
 // //@version=5
 // strategy("My Strategy", overlay=true)
 //
+// // ── ATR-based SL / target ────────────────────────────────────────────────
+// atr_mult    = 1.5
+// atr_val     = ta.atr(14)
+// atr_risk    = atr_mult * atr_val          // distance for 1R
+//
+// // ── Signals (replace with your own conditions) ───────────────────────────
+// buy_signal  = ta.crossover(ta.ema(close, 9),  ta.ema(close, 21))
+// sell_signal = ta.crossunder(ta.ema(close, 9), ta.ema(close, 21))
+//
+// // ── Shared helpers ────────────────────────────────────────────────────────
 // iso_ts = str.format_time(timenow, "yyyy-MM-dd'T'HH:mm:ss'+00:00'", "UTC")
 //
-// buy_signal = ta.crossover(ta.ema(close, 9), ta.ema(close, 21))
-//
+// // ── BUY alert ─────────────────────────────────────────────────────────────
 // if buy_signal
-//     alert('{"symbol":"' + syminfo.ticker + '","action":"BUY","price":' +
-//           str.tostring(close) + ',"timeframe":"' + str.tostring(timeframe.period) +
-//           '","alert_id":"' + str.tostring(timenow) + '","timestamp":"' + iso_ts + '"}',
-//           alert.freq_once_per_bar_close)
+//     sl_price     = na(atr_val) ? float(na) : close - atr_risk
+//     target_price = na(atr_val) ? float(na) : close + 2 * atr_risk
+//     sl_str     = na(sl_price)     ? "" : ',"sl_price":'     + str.tostring(sl_price,     "#.##")
+//     target_str = na(target_price) ? "" : ',"target_price":' + str.tostring(target_price, "#.##")
+//     alert(
+//       '{"symbol":"'    + syminfo.ticker +
+//       '","action":"BUY","price":'        + str.tostring(close, "#.##") +
+//       sl_str + target_str +
+//       ',"timeframe":"' + str.tostring(timeframe.period) +
+//       '","alert_id":"' + str.tostring(timenow) +
+//       '","timestamp":"' + iso_ts + '"}',
+//       alert.freq_once_per_bar_close)
+//
+// // ── SELL alert ────────────────────────────────────────────────────────────
+// if sell_signal
+//     sl_price     = na(atr_val) ? float(na) : close + atr_risk
+//     target_price = na(atr_val) ? float(na) : close - 2 * atr_risk
+//     sl_str     = na(sl_price)     ? "" : ',"sl_price":'     + str.tostring(sl_price,     "#.##")
+//     target_str = na(target_price) ? "" : ',"target_price":' + str.tostring(target_price, "#.##")
+//     alert(
+//       '{"symbol":"'    + syminfo.ticker +
+//       '","action":"SELL","price":'       + str.tostring(close, "#.##") +
+//       sl_str + target_str +
+//       ',"timeframe":"' + str.tostring(timeframe.period) +
+//       '","alert_id":"' + str.tostring(timenow) +
+//       '","timestamp":"' + iso_ts + '"}',
+//       alert.freq_once_per_bar_close)
 // =============================================================================
