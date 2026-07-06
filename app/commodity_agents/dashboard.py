@@ -53,6 +53,7 @@ padding:5px;font-size:12px;margin-bottom:12px}
 <body>
 <h1>Commodity Agents
   <span><button onclick="location.href='/commodity-agents/analyze'">Analyze</button>
+  <button onclick="location.href='/commodity-agents/desk'">Desk</button>
   <button onclick="runNow()">Run now</button>
   <button onclick="setToken()">&#9881;</button></span></h1>
 <div class="paper">Decision-support mode — approvals are recorded; live execution is separately gated.</div>
@@ -181,7 +182,8 @@ details summary{cursor:pointer;color:var(--blue);font-size:13.5px;margin-top:8px
 </head>
 <body>
 <h1>Analyze a ticker
-  <span><button onclick="location.href='/commodity-agents/dashboard'">Dashboard</button></span></h1>
+  <span><button onclick="location.href='/commodity-agents/dashboard'">Dashboard</button>
+  <button onclick="location.href='/commodity-agents/desk'">Desk</button></span></h1>
 
 <div class="card">
   <div class="row" id="chips"></div>
@@ -370,6 +372,143 @@ box.innerHTML='<button class="confirm" onclick="decide('+id+',\\''+action+'\\')"
 action.toUpperCase()+'</button><button onclick="pendingConfirm=null;location.reload()">Cancel</button>'}
 renderChips();
 if(!tok())setTimeout(()=>{const t=prompt('Admin auth token:');if(t)localStorage.setItem('ca_token',t)},400);
+if('serviceWorker' in navigator)navigator.serviceWorker.register('/commodity-agents/sw.js');
+</script>
+</body></html>"""
+
+DESK_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#0d1117">
+<link rel="manifest" href="/commodity-agents/manifest.json">
+<title>Desk — Commodity Agents</title>
+<style>
+:root{--bg:#0d1117;--card:#161b22;--border:#30363d;--fg:#e6edf3;--dim:#8b949e;
+--green:#3fb950;--red:#f85149;--amber:#d29922;--blue:#58a6ff}
+*{box-sizing:border-box;margin:0}
+body{background:var(--bg);color:var(--fg);font:15px/1.45 -apple-system,Segoe UI,Roboto,sans-serif;
+padding:12px;padding-bottom:60px;max-width:760px;margin:0 auto}
+h1{font-size:19px;margin:6px 0 14px;display:flex;justify-content:space-between;align-items:center}
+h2{font-size:15px;margin:0 0 8px}
+.card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:14px;margin-bottom:12px}
+.dim{color:var(--dim);font-size:12.5px}
+button{background:#21262d;color:var(--fg);border:1px solid var(--border);border-radius:8px;
+padding:8px 14px;font-size:14px;cursor:pointer}
+table{width:100%;border-collapse:collapse;font-size:12.5px}
+td,th{padding:4px 6px;text-align:right;border-bottom:1px solid var(--border)}
+td:first-child,th:first-child{text-align:left}
+th{color:var(--dim);font-weight:500}
+.chip{display:inline-block;padding:2px 10px;border-radius:999px;font-size:12px;font-weight:600;
+background:#21262d}
+#toast{position:fixed;bottom:14px;left:50%;transform:translateX(-50%);background:#21262d;
+border:1px solid var(--border);padding:9px 16px;border-radius:10px;font-size:13.5px;z-index:20}
+.hidden{display:none}
+</style>
+</head>
+<body>
+<h1>Desk
+  <span><button onclick="location.href='/commodity-agents/dashboard'">Dashboard</button>
+  <button onclick="location.href='/commodity-agents/analyze'">Analyze</button>
+  <button onclick="loadAll()">&#8635;</button></span></h1>
+
+<div class="card"><h2>Open positions — live Greeks</h2><div id="greeks" class="dim">loading…</div></div>
+<div class="card"><h2>Trade journal &amp; expectancy</h2><div id="journal" class="dim">loading…</div></div>
+<div class="card"><h2>LLM scorecard</h2><div id="calib" class="dim">loading…</div></div>
+<div id="toast" class="hidden"></div>
+
+<script>
+const API='/commodity-agents';
+function tok(){return localStorage.getItem('ca_token')||''}
+function hdrs(){return {'X-Admin-Auth-Token':tok()}}
+function esc(s){return (s??'').toString().replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
+function toast(m){const t=document.getElementById('toast');t.textContent=m;
+t.classList.remove('hidden');setTimeout(()=>t.classList.add('hidden'),4000)}
+function inr(x){if(x==null)return '&#8212;';
+return '<span style="color:var(--'+(x>=0?'green':'red')+')">'+(x>=0?'+':'&#8722;')+
+'&#8377;'+Math.abs(Math.round(x)).toLocaleString('en-IN')+'</span>'}
+function num(x,d){return x==null?'&#8212;':Number(x).toFixed(d==null?1:d)}
+async function api(path){const r=await fetch(API+path,{headers:hdrs()});
+if(r.status===401){const t=prompt('Admin auth token:');if(t){localStorage.setItem('ca_token',t);return api(path)}throw new Error('401')}
+if(!r.ok){const d=await r.json().catch(()=>({detail:r.status}));throw new Error(d.detail||r.status)}
+return r.json()}
+
+async function loadGreeks(){
+const el=document.getElementById('greeks');
+let d;try{d=await api('/portfolio-greeks')}catch(e){
+el.innerHTML='<span class="dim">'+esc(e.message)+' &#8212; greeks need a live Kite session.</span>';return}
+if(!d.positions.length){el.innerHTML='<span class="dim">No open option positions.</span>';return}
+let h='<table><tr><th>Symbol</th><th>Side</th><th>Qty</th><th>LTP</th><th>&#916;</th><th>Vega</th><th>&#920;/day</th></tr>';
+for(const p of d.positions){
+h+='<tr><td>'+esc(p.tradingsymbol)+'</td><td>'+esc(p.side)+'</td><td>'+p.quantity+'</td><td>'+
+num(p.ltp,2)+'</td><td>'+num(p.delta,3)+'</td><td>'+num(p.vega)+'</td><td>'+num(p.theta_per_day)+'</td></tr>'}
+h+='</table>';
+const st=Object.entries(d.straddles||{});
+if(st.length){h+='<div style="margin-top:8px">'+st.map(([sid,g])=>{
+const bad=Math.abs(g.net_delta_per_lot)>=0.2;
+return '<span class="chip" style="color:var(--'+(bad?'red':'green')+')">'+esc(g.underlying)+
+' straddle &#916; '+(g.net_delta_per_lot>0?'+':'')+g.net_delta_per_lot+'/lot</span>'}).join(' ')+'</div>'}
+const t=d.totals||{};
+h+='<div class="dim" style="margin-top:8px">Book: &#916; '+num(t.net_delta_units)+' units &#183; vega '+
+num(t.net_vega)+' &#183; theta '+inr(t.net_theta_per_day)+'/day</div>';
+el.innerHTML=h}
+
+async function loadJournal(){
+const el=document.getElementById('journal');
+let d;try{d=await api('/journal')}catch(e){el.innerHTML='<span class="dim">'+esc(e.message)+'</span>';return}
+let h='';
+const exp=Object.entries(d.expectancy_by_regime||{});
+if(exp.length){
+h+='<table><tr><th>Regime</th><th>Trades</th><th>Win%</th><th>Mean P&amp;L</th><th>Total</th><th>Worst</th></tr>'+
+exp.map(([r,s])=>'<tr><td>'+esc(r)+'</td><td>'+s.trades+'</td><td>'+s.win_rate_pct+'%</td><td>'+
+inr(s.mean_pnl)+'</td><td>'+inr(s.total_pnl)+'</td><td>'+inr(s.worst)+'</td></tr>').join('')+'</table>'}
+else{h+='<div class="dim">No closed live trades yet &#8212; expectancy appears after the first exits.</div>'}
+if(d.entries.length){
+h+='<div style="margin-top:10px"><table><tr><th>When</th><th>Ticker</th><th>Mode</th><th>Regime</th>'+
+'<th>VRP</th><th>Conf</th><th>P&amp;L</th></tr>'+
+d.entries.slice(0,15).map(e=>{const c=e.entry_context||{};
+return '<tr><td>'+new Date(e.entered_at).toLocaleDateString('en-IN',{day:'numeric',month:'short'})+
+'</td><td>'+esc(e.commodity)+'</td><td>'+esc(e.mode)+'</td><td>'+esc(c.regime||'&#8212;')+'</td><td>'+
+(c.vrp_pts==null?'&#8212;':(c.vrp_pts>0?'+':'')+c.vrp_pts)+'</td><td>'+
+(c.judge_confidence==null?'&#8212;':Math.round(c.judge_confidence*100)+'%')+'</td><td>'+
+(e.realized_pnl==null?'<span class="dim">open</span>':inr(e.realized_pnl))+'</td></tr>'}).join('')+
+'</table></div>'}
+else{h+='<div class="dim" style="margin-top:6px">No approvals journaled yet.</div>'}
+el.innerHTML=h}
+
+async function loadCalib(){
+const el=document.getElementById('calib');
+let d;try{d=await api('/calibration')}catch(e){el.innerHTML='<span class="dim">'+esc(e.message)+'</span>';return}
+const j=d.judge||{};
+let h='';
+if(!j.actionable_recs&&!(d.no_trade&&(d.no_trade.avoided||d.no_trade.missed))){
+h='<div class="dim">No scored recommendations yet &#8212; outcomes are evaluated one session after each run.</div>';
+el.innerHTML=h;return}
+h+='<div>Judge: <b>'+(j.win_rate_pct==null?'&#8212;':j.win_rate_pct+'% win</b> over '+j.actionable_recs+
+' actionable calls')+'</div>';
+if(j.avg_confidence_on_wins!=null||j.avg_confidence_on_losses!=null){
+h+='<div class="dim">avg confidence on wins '+num(j.avg_confidence_on_wins,2)+' vs losses '+
+num(j.avg_confidence_on_losses,2)+' &#8212; wins should be higher for a calibrated judge</div>'}
+if(d.no_trade){h+='<div style="margin-top:6px">NO-TRADE calls: '+d.no_trade.avoided+
+' avoided real danger &#183; '+d.no_trade.missed+' missed a calm market</div>'}
+const rel=d.risk_flag_reliability||{};
+const rows=[];
+for(const agent of ['trend','event','vol']){
+for(const flag of ['low','medium','high']){
+const b=(rel[agent]||{})[flag];
+if(b)rows.push('<tr><td>'+agent+'</td><td>'+flag+'</td><td>'+b.n+'</td><td>'+b.danger_rate_pct+'%</td></tr>')}}
+if(rows.length){
+h+='<div style="margin-top:10px"><table><tr><th>Agent</th><th>Flag</th><th>N</th><th>Danger rate</th></tr>'+
+rows.join('')+'</table><div class="dim" style="margin-top:4px">A reliable agent: danger rate rises with the flag '+
+'(high-flag runs should see danger far more often than low-flag runs).</div></div>'}
+el.innerHTML=h}
+
+function loadAll(){loadGreeks();loadJournal();loadCalib()}
+loadAll();
+setInterval(loadAll,60000);
+if(!tok())setTimeout(()=>{const t=prompt('Admin auth token:');if(t){localStorage.setItem('ca_token',t);loadAll()}},400);
 if('serviceWorker' in navigator)navigator.serviceWorker.register('/commodity-agents/sw.js');
 </script>
 </body></html>"""

@@ -151,6 +151,13 @@ def analyze_page() -> str:
     return ANALYZE_HTML
 
 
+@router.get("/desk", response_class=HTMLResponse)
+def desk_page() -> str:
+    """Desk view: live portfolio Greeks, trade journal + expectancy, LLM scorecard."""
+    from app.commodity_agents.dashboard import DESK_HTML
+    return DESK_HTML
+
+
 @router.get("/manifest.json")
 def manifest() -> JSONResponse:
     from app.commodity_agents.dashboard import MANIFEST_JSON

@@ -642,3 +642,18 @@ class TestBriefing:
         assert "+1.00%" in text
         assert "VRP +6.4" in text
         assert "range-bound" in text
+
+
+class TestDeskPage:
+    def test_desk_page_served(self, settings_paper):
+        html = routes.desk_page()
+        assert "Desk" in html
+        assert "/portfolio-greeks" in html
+        assert "/journal" in html
+        assert "/calibration" in html
+        assert "X-Admin-Auth-Token" in html
+
+    def test_nav_links_wired(self, settings_paper):
+        from app.commodity_agents.dashboard import ANALYZE_HTML, DASHBOARD_HTML
+        assert "/commodity-agents/desk" in DASHBOARD_HTML
+        assert "/commodity-agents/desk" in ANALYZE_HTML
