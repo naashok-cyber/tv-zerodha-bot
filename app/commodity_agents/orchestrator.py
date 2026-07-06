@@ -23,6 +23,7 @@ from app.commodity_agents.models import (
     CORRELATION_GROUPS,
     HIGH_VOL_EXPANSION,
     INDEX_UNDERLYINGS,
+    TRENDING,
     exchange_for,
     group_for,
 )
@@ -267,6 +268,14 @@ def _run_stages(
     run.regime_json = json.dumps(snap.to_dict())
     session.commit()
 
+    # 4a. Regime-flip alert: if the market just changed character AGAINST an
+    # open short-premium position, the trader hears about it now — not at the
+    # stop. Deterministic, Telegram-only, never blocks the pipeline.
+    try:
+        _regime_flip_alert(session, settings, run, commodity, snap.label)
+    except Exception as exc:
+        log.warning("[commodity_agents] regime-flip alert failed: %s", exc)
+
     # 4b. Vol analytics: VRP, IV trend, expected move vs breakevens, stress.
     # _iv_history already includes this run's atm_iv (committed at stage 3),
     # oldest sample last after reversal — exactly what iv_trend expects.
@@ -339,6 +348,7 @@ def _run_stages(
                     est_loss = capped
             margin_required = _margin_required_basket(kite, commodity, ce, pe)
 
+    margin_available = _margin_available(kite, commodity)
     verdict = risk_guard.evaluate(
         risk_guard.RiskLimits(
             max_loss_per_lot=settings.COMMODITY_MAX_LOSS_PER_LOT,
@@ -354,7 +364,7 @@ def _run_stages(
             est_max_loss_per_lot=est_loss,
             daily_realized_pnl=_daily_realized_pnl(session, now),
             open_commodity_count=_open_commodity_count(session),
-            margin_available=_margin_available(kite, commodity),
+            margin_available=margin_available,
             margin_required=margin_required,
             blackout=blackout,
             open_group_shorts=_open_group_shorts(session, commodity),
@@ -376,8 +386,64 @@ def _run_stages(
         ) + str(judge_out.get("reasoning_summary", "")),
         dissent=judge_out.get("dissenting_views", []),
         risk_vetoed=vetoed, settings=settings,
+        suggested_lots=None if vetoed else _suggested_lots(
+            settings, est_loss, margin_required, margin_available),
     )
     run.status = "COMPLETED"
+
+
+def _regime_flip_alert(session: Any, settings: Any, run: AgentRun,
+                       commodity: str, new_label: str) -> None:
+    if new_label not in (TRENDING, HIGH_VOL_EXPANSION):
+        return
+    prev = (
+        session.query(AgentRun)
+        .filter(AgentRun.commodity == commodity,
+                AgentRun.id != run.id,
+                AgentRun.regime_json != None)  # noqa: E711
+        .order_by(AgentRun.started_at.desc())
+        .first()
+    )
+    if prev is None:
+        return
+    prev_label = (json.loads(prev.regime_json or "{}") or {}).get("label")
+    if prev_label == new_label or prev_label is None:
+        return
+    # only alert when there is actually a short option book to protect
+    from app.storage import Order
+    open_shorts = (
+        session.query(Position)
+        .join(Order, Position.order_id == Order.id)
+        .filter(Position.underlying == commodity,
+                Position.instrument_type.in_(["CE", "PE"]),
+                Order.transaction_type == "SELL")
+        .count()
+    )
+    if not open_shorts:
+        return
+    from app.commodity_agents.notify import send_telegram
+    send_telegram(settings, (
+        f"⚠️ <b>REGIME FLIP — {commodity}</b>\n"
+        f"{prev_label} → <b>{new_label}</b> with {open_shorts} open short option "
+        f"leg(s).\nThe short-premium thesis may no longer hold — review the "
+        f"position now instead of waiting for the stop."
+    ))
+    log.info("[commodity_agents] regime flip alert %s: %s -> %s",
+             commodity, prev_label, new_label)
+
+
+def _suggested_lots(settings: Any, est_loss_per_lot: float | None,
+                    margin_required: float | None,
+                    margin_available: float | None) -> int | None:
+    """Deterministic size hint: how many lots the daily loss budget and margin
+    actually support. 0 is a legitimate answer (worst case exceeds budget)."""
+    if not est_loss_per_lot or est_loss_per_lot <= 0:
+        return None
+    lots = int(settings.MAX_DAILY_LOSS_ABS // est_loss_per_lot)
+    if margin_required and margin_available and margin_required > 0:
+        margin_cap = settings.COMMODITY_MAX_MARGIN_UTIL_PCT / 100.0
+        lots = min(lots, int(margin_available * margin_cap // margin_required))
+    return max(0, min(lots, settings.COMMODITY_AGENT_MAX_LOTS))
 
 
 def _iron_fly_max_loss(cands: list, atm_ce: Any, atm_pe: Any) -> float | None:
@@ -413,7 +479,7 @@ def _persist_recommendation(
     session: Any, run: AgentRun, commodity: str, now: datetime,
     direction: str, strategy_type: str, strikes_syms: list,
     confidence: float | None, reasoning: str, dissent: list, risk_vetoed: bool,
-    settings: Any = None,
+    settings: Any = None, suggested_lots: int | None = None,
 ) -> None:
     rec = CommodityRecommendation(
         run_pk=run.id,
@@ -427,6 +493,7 @@ def _persist_recommendation(
         dissent_json=json.dumps(dissent),
         risk_vetoed=risk_vetoed,
         status="PROPOSED",
+        suggested_lots=suggested_lots,
     )
     session.add(rec)
     session.commit()
@@ -532,6 +599,12 @@ def register_jobs(scheduler: Any, settings: Any, session_factory: Any) -> None:
         calendar_refresh_job, trigger="cron", day_of_week="sun", hour=10, minute=0,
         args=[settings],
         id="commodity_agents_calendar_refresh", misfire_grace_time=3600,
+    )
+    from app.commodity_agents.weekly_report import weekly_report_job
+    scheduler.add_job(
+        weekly_report_job, trigger="cron", day_of_week="sun", hour=18, minute=0,
+        args=[session_factory, settings],
+        id="commodity_agents_weekly_report", misfire_grace_time=3600,
     )
     log.info("[commodity_agents] jobs registered: pipeline every %d min 09-23 IST, "
              "EIA off-cycle, delta watch, journal, calibration, briefing, "

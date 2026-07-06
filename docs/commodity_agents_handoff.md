@@ -96,6 +96,30 @@ checkmarks → recommendation card with two-step approve).
   straddle-only (iron fly → "place manually" note). Backtest: `--cost-pct` /
   `--slippage-pct` → `straddle_pnl_net_pct` + net column in `summarize_pnl`.
 
+### Wave 4 — trade-lifecycle layer (2026-07-07, unit-tested)
+- **Suggested lot size**: `orchestrator._suggested_lots` = floor(daily loss
+  budget / worst-case per lot), clamped by margin capacity and max lots; 0 is a
+  legitimate "don't take it" answer. Stored on `CommodityRecommendation.
+  suggested_lots`, shown on Analyze/Dashboard cards, and the two-step approve
+  now sends it as the actual lots.
+- **Regime-flip alert**: `orchestrator._regime_flip_alert` — when a run
+  reclassifies a market to trending/high-vol-expansion (vs the previous run)
+  AND open short option legs exist there, Telegram fires immediately.
+- **Roll suggestion**: delta-drift alerts now include the concrete ~30Δ strike
+  on the untested side with live premium (`portfolio._roll_suggestion`).
+- **Slippage + MAE/MFE**: trailing manager tracks per-position price extremes
+  (`Position.max_favorable_price/max_adverse_price`, flushed on GTT updates and
+  unregister); `journal.sync_closed_trades` back-fills `slippage_pct` (fill vs
+  analysis quote, premium-weighted), `mae_pct`, `mfe_pct`; shown on the Desk
+  journal table. NOTE: excursions only recorded while trailing is registered.
+- **Weekly report**: `weekly_report.py`, Sundays 18:00 IST — week's approvals,
+  slippage, MAE, expectancy by regime, judge calibration, IV percentile per
+  underlying.
+- **Desk margins line**: portfolio-greeks endpoint now returns account margins
+  (commodity + equity, net/utilised).
+- Migrations: 6 more additive ALTERs in `app/storage.py _migrate` (rec
+  suggested_lots; journal slippage/mae/mfe; positions excursion columns).
+
 ### Verified results worth remembering
 - BANKNIFTY 436-day CSV backtest with `--cost-pct 1.0 --slippage-pct 0.25`:
   range-bound +1.99% gross → **+0.50% net**; trending +0.83% gross →

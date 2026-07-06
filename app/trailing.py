@@ -35,6 +35,9 @@ class _TrailPos:
     kite_gtt_id: int | None
     tick_size: float = 0.01  # minimum price increment; rounds the trailed SL
     last_update: float = field(default_factory=time.monotonic)
+    # excursion extremes for MAE/MFE (flushed to Position on GTT update/unregister)
+    worst_price: float = 0.0     # most adverse LTP seen (init = fill price)
+    excursions_dirty: bool = False
 
 
 class TrailingSlManager:
@@ -88,6 +91,7 @@ class TrailingSlManager:
             gtt_db_id=gtt_db_id,
             kite_gtt_id=kite_gtt_id,
             tick_size=tick_size,
+            worst_price=fill_price,
         )
         with self._lock:
             self._positions[instrument_token] = pos
@@ -101,6 +105,7 @@ class TrailingSlManager:
         with self._lock:
             pos = self._positions.pop(instrument_token, None)
         if pos:
+            self._flush_excursions(pos)
             log.info("TrailingSL unregistered: %s (token %d)", pos.tradingsymbol, instrument_token)
 
     def unregister_by_symbol(self, tradingsymbol: str) -> None:
@@ -109,9 +114,32 @@ class TrailingSlManager:
                 (t for t, p in self._positions.items() if p.tradingsymbol == tradingsymbol),
                 None,
             )
-            if token is not None:
-                del self._positions[token]
-                log.info("TrailingSL unregistered: %s", tradingsymbol)
+            pos = self._positions.pop(token, None) if token is not None else None
+        if pos:
+            self._flush_excursions(pos)
+            log.info("TrailingSL unregistered: %s", tradingsymbol)
+
+    def _flush_excursions(self, pos: _TrailPos) -> None:
+        """Persist MAE/MFE extremes to the Position row. Best-effort — the
+        excursion record must never interfere with exits."""
+        if not pos.excursions_dirty:
+            return
+        try:
+            from app.storage import Position as DbPosition
+            with self._session_factory() as session:
+                db_pos = (
+                    session.query(DbPosition)
+                    .filter(DbPosition.gtt_id == pos.gtt_db_id)
+                    .first()
+                )
+                if db_pos is not None:
+                    db_pos.max_favorable_price = pos.best_price
+                    db_pos.max_adverse_price = pos.worst_price
+                    session.commit()
+                    pos.excursions_dirty = False
+        except Exception as exc:
+            log.warning("TrailingSL: excursion flush failed for %s: %s",
+                        pos.tradingsymbol, exc)
 
     # ── Tick processing ───────────────────────────────────────────────────────
 
@@ -129,6 +157,16 @@ class TrailingSlManager:
 
     def _evaluate(self, pos: _TrailPos, ltp: float) -> None:
         """Check if the trailing SL should be moved; spawn an update thread if so."""
+        # MAE tracking: adverse = higher premium for shorts, lower for longs.
+        # Two comparisons per tick; persisted opportunistically, never blocks.
+        if pos.entry_side == "BUY":
+            if ltp < pos.worst_price:
+                pos.worst_price = ltp
+                pos.excursions_dirty = True
+        elif ltp > pos.worst_price:
+            pos.worst_price = ltp
+            pos.excursions_dirty = True
+
         if pos.entry_side == "BUY":
             if ltp <= pos.best_price:
                 return
@@ -143,6 +181,7 @@ class TrailingSlManager:
             sl_improved = new_sl < pos.current_sl
 
         pos.best_price = new_best
+        pos.excursions_dirty = True
 
         if not sl_improved:
             return
@@ -243,6 +282,10 @@ class TrailingSlManager:
                     db_pos.current_sl = new_sl
                     db_pos.trail_active = True
                     db_pos.last_updated_at = now_dt
+                    # piggyback the excursion extremes on this write
+                    db_pos.max_favorable_price = pos.best_price
+                    db_pos.max_adverse_price = pos.worst_price
+                    pos.excursions_dirty = False
 
                 session.commit()
                 log.info(

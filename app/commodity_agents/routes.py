@@ -70,6 +70,7 @@ def _rec_to_dict(rec: CommodityRecommendation) -> dict:
         "dissenting_views": json.loads(rec.dissent_json or "[]"),
         "risk_vetoed": rec.risk_vetoed,
         "status": rec.status,
+        "suggested_lots": rec.suggested_lots,
     }
 
 
@@ -330,6 +331,9 @@ def journal(x_admin_auth_token: str | None = Header(default=None)) -> dict:
                 "realized_pnl": r.realized_pnl,
                 "closed_at": r.closed_at.isoformat() if r.closed_at else None,
                 "exit_reason": r.exit_reason,
+                "slippage_pct": r.slippage_pct,
+                "mae_pct": r.mae_pct,
+                "mfe_pct": r.mfe_pct,
             } for r in rows],
             "expectancy_by_regime": expectancy_stats(session),
         }

@@ -58,7 +58,8 @@ def compute_portfolio_greeks(session: Any, kite: Any, settings: Any,
         .all()
     )
     if not rows:
-        return {"positions": [], "straddles": {}, "totals": {}}
+        return {"positions": [], "straddles": {}, "totals": {},
+                "margins": _account_margins(kite)}
 
     # one quote round for all option legs
     keys = [f"{pos.exchange}:{pos.tradingsymbol}" for pos, _ in rows]
@@ -146,7 +147,20 @@ def compute_portfolio_greeks(session: Any, kite: Any, settings: Any,
             "net_vega": round(tot_vega, 1),
             "net_theta_per_day": round(tot_theta, 1),
         },
+        "margins": _account_margins(kite),
     }
+
+
+def _account_margins(kite: Any) -> dict | None:
+    try:
+        m = kite.margins()
+        return {
+            seg: {"net": round(float(m[seg]["net"])),
+                  "utilised": round(float((m[seg].get("utilised") or {}).get("debits") or 0.0))}
+            for seg in ("commodity", "equity") if seg in m
+        }
+    except Exception:
+        return None
 
 
 def check_delta_drift(session_factory: Any, settings: Any) -> None:
@@ -175,12 +189,42 @@ def check_delta_drift(session_factory: Any, settings: Any) -> None:
         _last_alert[sid] = now_mono
         tested = "CALL" if net > 0 else "PUT"
         other = "put" if net > 0 else "call"
+        roll = _roll_suggestion(session_factory, kite, grp["underlying"],
+                                other, grp["legs"])
         from app.commodity_agents.notify import send_telegram
         send_telegram(settings, (
             f"⚠️ <b>{grp['underlying']}</b> straddle delta drift: net "
             f"{net:+.2f}/lot (threshold ±{threshold:.2f})\n"
             f"{tested} side is being tested. Consider rolling the {other} leg "
             f"toward ATM to re-centre, or exiting — do not wait for the stop.\n"
-            f"Legs: {', '.join(grp['legs'])}"
+            + (roll + "\n" if roll else "")
+            + f"Legs: {', '.join(grp['legs'])}"
         ))
         log.info("[portfolio] delta drift alert %s net=%+.2f", grp["underlying"], net)
+
+
+def _roll_suggestion(session_factory: Any, kite: Any, underlying: str,
+                     side: str, current_legs: list[str]) -> str | None:
+    """Concrete adjustment: the ~30-delta strike on the untested side to roll
+    into, with its live premium. Best-effort — None on any failure."""
+    try:
+        from app.commodity_agents import strikes as strikes_mod
+        from app.commodity_agents.orchestrator import _underlying_price
+        from app.config import IST as _IST
+        want = "PE" if side == "put" else "CE"
+        now = datetime.now(_IST)
+        with session_factory() as session:
+            price = _underlying_price(kite, session, underlying, now)
+            if not price:
+                return None
+            cands = strikes_mod.build_strike_candidates(
+                session, kite.quote, underlying, price, now=now,
+                target_deltas=(0.30,))
+        cand = next((c for c in cands if c.instrument_type == want), None)
+        if cand is None or cand.tradingsymbol in current_legs:
+            return None
+        return (f"Suggested roll: move the {side} to <b>{cand.tradingsymbol}</b> "
+                f"(~{abs(cand.delta or 0.30):.2f}Δ, ₹{cand.ltp:.2f})")
+    except Exception as exc:
+        log.debug("[portfolio] roll suggestion unavailable: %s", exc)
+        return None

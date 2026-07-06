@@ -159,6 +159,10 @@ class Position(Base):
     lot_size: Mapped[int] = mapped_column(Integer, nullable=False)
     opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     last_updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # Excursion extremes seen by the trailing manager while registered
+    # (MAE/MFE inputs; None when trailing never saw a tick for this position).
+    max_favorable_price: Mapped[float | None] = mapped_column(Float)
+    max_adverse_price: Mapped[float | None] = mapped_column(Float)
 
     order: Mapped[Order] = relationship("Order", back_populates="position")
     gtt: Mapped[Gtt | None] = relationship("Gtt", back_populates="position")
@@ -318,6 +322,12 @@ def _migrate(engine: Engine) -> None:
         "ALTER TABLE commodity_agent_runs ADD COLUMN analytics_json TEXT",
         "ALTER TABLE commodity_recommendations ADD COLUMN realized_move_pct FLOAT",
         "ALTER TABLE commodity_recommendations ADD COLUMN outcome VARCHAR(16)",
+        "ALTER TABLE commodity_recommendations ADD COLUMN suggested_lots INTEGER",
+        "ALTER TABLE commodity_trade_journal ADD COLUMN slippage_pct FLOAT",
+        "ALTER TABLE commodity_trade_journal ADD COLUMN mae_pct FLOAT",
+        "ALTER TABLE commodity_trade_journal ADD COLUMN mfe_pct FLOAT",
+        "ALTER TABLE positions ADD COLUMN max_favorable_price FLOAT",
+        "ALTER TABLE positions ADD COLUMN max_adverse_price FLOAT",
     ]
     with engine.connect() as conn:
         for stmt in migrations:

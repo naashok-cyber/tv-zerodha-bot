@@ -50,8 +50,9 @@ def record_entry(session: Any, rec: Any, run: AgentRun, mode: str,
 
 
 def sync_closed_trades(session_factory: Any) -> int:
-    """Back-fill realized P&L on live journal rows whose legs have all closed.
-    Returns the number of rows updated. Safe to run any time."""
+    """Back-fill realized P&L, slippage, and MAE/MFE on live journal rows whose
+    legs have all closed. Returns the number of rows updated. Safe to run any time."""
+    from app.commodity_agents.storage import CommodityRecommendation
     from app.storage import ClosedTrade, Order, Position
 
     updated = 0
@@ -67,7 +68,7 @@ def sync_closed_trades(session_factory: Any) -> int:
             orders = session.query(Order).filter(Order.alert_id == row.alert_id).all()
             if not orders:
                 continue
-            closed: list[ClosedTrade] = []
+            legs: list[tuple[Any, Any, Any]] = []      # (order, position, closed_trade)
             for order in orders:
                 pos = session.query(Position).filter(Position.order_id == order.id).first()
                 if pos is None:
@@ -76,17 +77,67 @@ def sync_closed_trades(session_factory: Any) -> int:
                       .filter(ClosedTrade.position_id == pos.id).first())
                 if ct is None:
                     break
-                closed.append(ct)
+                legs.append((order, pos, ct))
             else:
-                if closed:
-                    row.realized_pnl = sum(c.pnl for c in closed)
-                    row.closed_at = max(c.closed_at for c in closed)
-                    row.exit_reason = closed[0].exit_reason
+                if legs:
+                    row.realized_pnl = sum(ct.pnl for _, _, ct in legs)
+                    row.closed_at = max(ct.closed_at for _, _, ct in legs)
+                    row.exit_reason = legs[0][2].exit_reason
+                    row.slippage_pct = _entry_slippage_pct(session, row, legs)
+                    row.mae_pct, row.mfe_pct = _excursions_pct(legs)
                     updated += 1
         if updated:
             session.commit()
             log.info("[journal] synced %d closed trade(s)", updated)
     return updated
+
+
+def _entry_slippage_pct(session: Any, row: CommodityTradeJournal,
+                        legs: list) -> float | None:
+    """Fill price vs the analysis-time quote, premium-weighted across legs.
+    Negative = you got a worse price than the recommendation assumed."""
+    from app.commodity_agents.storage import CommodityRecommendation
+    rec = session.get(CommodityRecommendation, row.recommendation_id)
+    run = session.get(AgentRun, rec.run_pk) if rec else None
+    if run is None or not run.strikes_json:
+        return None
+    quotes = {c["tradingsymbol"]: c["ltp"]
+              for c in json.loads(run.strikes_json) if c.get("ltp")}
+    num = 0.0
+    den = 0.0
+    for order, _, _ in legs:
+        quote = quotes.get(order.tradingsymbol)
+        fill = order.fill_price
+        if not quote or not fill:
+            continue
+        # short: filling below the quoted premium is adverse; long: above is
+        sign = 1.0 if order.transaction_type == "SELL" else -1.0
+        num += sign * (fill - quote) / quote * 100.0 * quote
+        den += quote
+    return round(num / den, 3) if den else None
+
+
+def _excursions_pct(legs: list) -> tuple[float | None, float | None]:
+    """Worst adverse / best favorable per-leg excursion as % of entry premium.
+    Per-leg extremes are not simultaneous — this bounds, not reconstructs, the
+    combined path. None until the trailing manager has recorded extremes."""
+    mae = None
+    mfe = None
+    for order, pos, _ in legs:
+        entry = pos.entry_premium
+        if not entry:
+            continue
+        short = order.transaction_type == "SELL"
+        if pos.max_adverse_price is not None:
+            adverse = ((pos.max_adverse_price - entry) if short
+                       else (entry - pos.max_adverse_price)) / entry * 100.0
+            mae = max(mae, adverse) if mae is not None else adverse
+        if pos.max_favorable_price is not None:
+            favorable = ((entry - pos.max_favorable_price) if short
+                         else (pos.max_favorable_price - entry)) / entry * 100.0
+            mfe = max(mfe, favorable) if mfe is not None else favorable
+    return (round(mae, 2) if mae is not None else None,
+            round(mfe, 2) if mfe is not None else None)
 
 
 def expectancy_stats(session: Any) -> dict:

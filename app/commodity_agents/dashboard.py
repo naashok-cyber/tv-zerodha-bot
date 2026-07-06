@@ -63,7 +63,7 @@ padding:5px;font-size:12px;margin-bottom:12px}
 <div id="toast" class="hidden"></div>
 <script>
 const API='/commodity-agents';
-let pendingConfirm=null;
+let pendingConfirm=null,recLots={};
 function tok(){return localStorage.getItem('ca_token')||''}
 function setToken(){const t=prompt('Admin auth token:',tok());if(t!==null){localStorage.setItem('ca_token',t);load()}}
 function hdrs(){return {'X-Admin-Auth-Token':tok(),'Content-Type':'application/json'}}
@@ -85,6 +85,7 @@ for(const [com,rec] of Object.entries(d.recommendations)){
 const card=document.createElement('div');card.className='card';
 if(!rec){card.innerHTML='<div class="row"><b>'+com+'</b>'+badge(null)+'</div>';el.appendChild(card);continue}
 const conf=rec.confidence!=null?Math.round(rec.confidence*100)+'%':'—';
+recLots[rec.id]=rec.suggested_lots||1;
 let actions='';
 if(rec.status==='PROPOSED'&&!rec.risk_vetoed&&rec.direction!=='NO_TRADE'){
 actions='<div class="row" style="margin-top:10px" id="act-'+rec.id+'">'+
@@ -92,7 +93,8 @@ actions='<div class="row" style="margin-top:10px" id="act-'+rec.id+'">'+
 '<button class="reject" onclick="decide('+rec.id+',\\'reject\\')">Reject</button></div>'}
 else if(rec.status!=='PROPOSED'){actions='<div class="dim" style="margin-top:8px">'+rec.status+'</div>'}
 card.innerHTML='<div class="row"><b>'+com+'</b>'+badge(rec)+'</div>'+
-'<div class="dim">'+esc(rec.created_at.replace('T',' ').slice(0,16))+' · '+esc(rec.strategy_type)+' · conf '+conf+'</div>'+
+'<div class="dim">'+esc(rec.created_at.replace('T',' ').slice(0,16))+' · '+esc(rec.strategy_type)+' · conf '+conf+
+(rec.suggested_lots!=null?' · size '+rec.suggested_lots+' lot'+(rec.suggested_lots===1?'':'s'):'')+'</div>'+
 '<div style="margin:7px 0 3px">'+esc((rec.reasoning_summary||'').slice(0,220))+'</div>'+
 (rec.strikes.length?'<div class="dim">Strikes: '+esc(rec.strikes.join(', '))+'</div>':'')+
 '<div class="row" style="margin-top:8px"><button onclick="drill(\\''+rec.run_id+'\\')">Reasoning</button>'+
@@ -103,12 +105,13 @@ async function decide(id,action){
 const box=document.getElementById('act-'+id);
 if(pendingConfirm&&pendingConfirm.id===id&&pendingConfirm.action===action){
 const r=await api('/decision',{method:'POST',body:JSON.stringify(
-{recommendation_id:id,action:action,confirm_token:pendingConfirm.token})});
+{recommendation_id:id,action:action,confirm_token:pendingConfirm.token,lots:recLots[id]||1})});
 pendingConfirm=null;toast(action.toUpperCase()+' recorded — '+r.status);load();return}
 const r=await api('/decision',{method:'POST',body:JSON.stringify({recommendation_id:id,action:action})});
 pendingConfirm={id:id,action:action,token:r.confirm_token};
 box.innerHTML='<button class="confirm" onclick="decide('+id+',\\''+action+'\\')">TAP AGAIN to confirm '+
-action.toUpperCase()+'</button><button onclick="pendingConfirm=null;load()">Cancel</button>';
+action.toUpperCase()+' ('+(recLots[id]||1)+' lot'+((recLots[id]||1)===1?'':'s')+')'+
+'</button><button onclick="pendingConfirm=null;load()">Cancel</button>';
 setTimeout(()=>{if(pendingConfirm&&pendingConfirm.id===id){pendingConfirm=null;load()}},r.expires_in_seconds*1000)}
 async function drill(runId){const d=await api('/runs/'+runId);
 openSheet('<h3>Reasoning trail — '+esc(d.commodity)+'</h3><div class="dim">'+esc(d.status)+
@@ -205,7 +208,7 @@ const API='/commodity-agents';
 const TICKERS=['NIFTY','BANKNIFTY','NATURALGAS','CRUDEOIL','GOLD','SILVER'];
 const ALIASES={NG:'NATURALGAS',NATGAS:'NATURALGAS',CRUDE:'CRUDEOIL',OIL:'CRUDEOIL',
 BN:'BANKNIFTY',BNF:'BANKNIFTY',NF:'NIFTY',AU:'GOLD',AG:'SILVER'};
-let sel=null,poller=null,pendingConfirm=null,runStartedAt=null;
+let sel=null,poller=null,pendingConfirm=null,runStartedAt=null,recLots={};
 function tok(){return localStorage.getItem('ca_token')||''}
 function hdrs(){return {'X-Admin-Auth-Token':tok(),'Content-Type':'application/json'}}
 function toast(m){const t=document.getElementById('toast');t.textContent=m;
@@ -262,6 +265,7 @@ esc(run.error||'unknown error')+'</div></div>';return}
 const rec=run.recommendation;
 if(!rec){el.innerHTML='<div class="card dim">Run finished but produced no recommendation.</div>';return}
 const conf=rec.confidence!=null?Math.round(rec.confidence*100)+'%':'—';
+recLots[rec.id]=rec.suggested_lots||1;
 let dissent=(rec.dissenting_views||[]).map(v=>'<li>'+esc(v)+'</li>').join('');
 let actions='';
 if(rec.status==='PROPOSED'&&!rec.risk_vetoed&&rec.direction!=='NO_TRADE'){
@@ -272,6 +276,10 @@ el.innerHTML='<div class="card">'+
 '<div class="row" style="justify-content:space-between"><b style="font-size:17px">'+esc(rec.commodity)+'</b>'+badge(rec)+'</div>'+
 '<div class="dim" style="margin-top:4px">'+esc(rec.strategy_type)+' · confidence '+conf+
 ' · '+(run.status==='SKIPPED_REGIME'?'regime-gated (LLM round skipped)':'full debate')+'</div>'+
+(rec.suggested_lots!=null?'<div style="margin-top:6px">Suggested size: <b>'+rec.suggested_lots+
+' lot'+(rec.suggested_lots===1?'':'s')+'</b><span class="dim"> — from daily loss budget, '+
+'worst-case per lot, and margin</span>'+(rec.suggested_lots===0?
+' <b style="color:var(--amber)">(worst case exceeds budget — skip or reduce)</b>':'')+'</div>':'')+
 (rec.strikes&&rec.strikes.length?'<div style="margin-top:8px"><b>Strikes:</b> '+esc(rec.strikes.join(', '))+'</div>':'')+
 '<div style="margin-top:8px">'+esc(rec.reasoning_summary||'')+'</div>'+
 (run.analytics?renderAnalytics(run.analytics):'')+
@@ -363,13 +371,14 @@ async function decide(id,action){
 const box=document.getElementById('act-'+id);
 if(pendingConfirm&&pendingConfirm.id===id&&pendingConfirm.action===action){
 const r=await api('/decision',{method:'POST',body:JSON.stringify(
-{recommendation_id:id,action:action,confirm_token:pendingConfirm.token})});
+{recommendation_id:id,action:action,confirm_token:pendingConfirm.token,lots:recLots[id]||1})});
 pendingConfirm=null;toast(action.toUpperCase()+' recorded — '+r.status);
 box.innerHTML='<div class="dim">'+r.status+' · '+esc(r.note||'')+'</div>';return}
 const r=await api('/decision',{method:'POST',body:JSON.stringify({recommendation_id:id,action:action})});
 pendingConfirm={id:id,action:action,token:r.confirm_token};
 box.innerHTML='<button class="confirm" onclick="decide('+id+',\\''+action+'\\')">TAP AGAIN to confirm '+
-action.toUpperCase()+'</button><button onclick="pendingConfirm=null;location.reload()">Cancel</button>'}
+action.toUpperCase()+' ('+(recLots[id]||1)+' lot'+((recLots[id]||1)===1?'':'s')+')'+
+'</button><button onclick="pendingConfirm=null;location.reload()">Cancel</button>'}
 renderChips();
 if(!tok())setTimeout(()=>{const t=prompt('Admin auth token:');if(t)localStorage.setItem('ca_token',t)},400);
 if('serviceWorker' in navigator)navigator.serviceWorker.register('/commodity-agents/sw.js');
@@ -453,6 +462,9 @@ return '<span class="chip" style="color:var(--'+(bad?'red':'green')+')">'+esc(g.
 const t=d.totals||{};
 h+='<div class="dim" style="margin-top:8px">Book: &#916; '+num(t.net_delta_units)+' units &#183; vega '+
 num(t.net_vega)+' &#183; theta '+inr(t.net_theta_per_day)+'/day</div>';
+if(d.margins){h+='<div class="dim" style="margin-top:4px">Margin: '+
+Object.entries(d.margins).map(([seg,m])=>seg+' &#8377;'+m.net.toLocaleString('en-IN')+
+' free / &#8377;'+m.utilised.toLocaleString('en-IN')+' used').join(' &#183; ')+'</div>'}
 el.innerHTML=h}
 
 async function loadJournal(){
@@ -467,12 +479,14 @@ inr(s.mean_pnl)+'</td><td>'+inr(s.total_pnl)+'</td><td>'+inr(s.worst)+'</td></tr
 else{h+='<div class="dim">No closed live trades yet &#8212; expectancy appears after the first exits.</div>'}
 if(d.entries.length){
 h+='<div style="margin-top:10px"><table><tr><th>When</th><th>Ticker</th><th>Mode</th><th>Regime</th>'+
-'<th>VRP</th><th>Conf</th><th>P&amp;L</th></tr>'+
+'<th>VRP</th><th>Conf</th><th>Slip</th><th>MAE</th><th>P&amp;L</th></tr>'+
 d.entries.slice(0,15).map(e=>{const c=e.entry_context||{};
 return '<tr><td>'+new Date(e.entered_at).toLocaleDateString('en-IN',{day:'numeric',month:'short'})+
 '</td><td>'+esc(e.commodity)+'</td><td>'+esc(e.mode)+'</td><td>'+esc(c.regime||'&#8212;')+'</td><td>'+
 (c.vrp_pts==null?'&#8212;':(c.vrp_pts>0?'+':'')+c.vrp_pts)+'</td><td>'+
 (c.judge_confidence==null?'&#8212;':Math.round(c.judge_confidence*100)+'%')+'</td><td>'+
+(e.slippage_pct==null?'&#8212;':(e.slippage_pct>0?'+':'')+e.slippage_pct.toFixed(1)+'%')+'</td><td>'+
+(e.mae_pct==null?'&#8212;':e.mae_pct.toFixed(0)+'%')+'</td><td>'+
 (e.realized_pnl==null?'<span class="dim">open</span>':inr(e.realized_pnl))+'</td></tr>'}).join('')+
 '</table></div>'}
 else{h+='<div class="dim" style="margin-top:6px">No approvals journaled yet.</div>'}

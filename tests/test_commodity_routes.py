@@ -657,3 +657,194 @@ class TestDeskPage:
         from app.commodity_agents.dashboard import ANALYZE_HTML, DASHBOARD_HTML
         assert "/commodity-agents/desk" in DASHBOARD_HTML
         assert "/commodity-agents/desk" in ANALYZE_HTML
+
+
+# ── wave 4: sizing, regime flip, slippage/MAE, weekly report ─────────────────
+
+class TestSuggestedLots:
+    def test_budget_and_margin_clamps(self, settings_paper):
+        from app.commodity_agents.orchestrator import _suggested_lots
+        s = settings_paper.model_copy(update={
+            "MAX_DAILY_LOSS_ABS": 30000.0, "COMMODITY_AGENT_MAX_LOTS": 5,
+            "COMMODITY_MAX_MARGIN_UTIL_PCT": 60.0})
+        # budget allows 3 lots (30000/9000), margin allows 2 (0.6*400000/110000)
+        assert _suggested_lots(s, 9000.0, 110000.0, 400000.0) == 2
+        # no margin info -> budget only
+        assert _suggested_lots(s, 9000.0, None, None) == 3
+        # worst case above budget -> honest zero
+        assert _suggested_lots(s, 50000.0, None, None) == 0
+        # cap by max lots
+        assert _suggested_lots(s, 1000.0, None, None) == 5
+        assert _suggested_lots(s, None, None, None) is None
+
+    def test_suggested_lots_persisted_and_served(self, db_factory, settings_paper):
+        now = datetime.now(IST)
+        with db_factory() as s:
+            run = AgentRun(run_id="sl-1", commodity="GOLD", started_at=now,
+                           status="COMPLETED")
+            s.add(run)
+            s.commit()
+            s.add(CommodityRecommendation(
+                run_pk=run.id, commodity="GOLD", created_at=now, direction="SELL",
+                strategy_type="short_straddle", strikes_json="[]", confidence=0.8,
+                reasoning_summary="t", dissent_json="[]", risk_vetoed=False,
+                status="PROPOSED", suggested_lots=3))
+            s.commit()
+        out = routes.latest_recommendations(x_admin_auth_token=TOKEN)
+        assert out["recommendations"]["GOLD"]["suggested_lots"] == 3
+
+    def test_ui_prefills_lots(self):
+        from app.commodity_agents.dashboard import ANALYZE_HTML, DASHBOARD_HTML
+        for html in (ANALYZE_HTML, DASHBOARD_HTML):
+            assert "recLots" in html
+            assert "suggested_lots" in html
+
+
+class TestRegimeFlipAlert:
+    def _seed_prev_run_and_short(self, factory, label="range-bound"):
+        now = datetime.now(IST)
+        with factory() as s:
+            s.add(AgentRun(run_id="rf-prev", commodity="GOLD",
+                           started_at=now - timedelta(minutes=30), status="COMPLETED",
+                           regime_json=json.dumps({"label": label})))
+            o = _mk_order(s, 1, "GOLD26JUL72000CE")
+            _mk_position(s, o, itype="CE")
+            s.commit()
+
+    def test_flip_with_open_shorts_alerts(self, db_factory, settings_paper):
+        from app.commodity_agents.orchestrator import _regime_flip_alert
+        self._seed_prev_run_and_short(db_factory)
+        with db_factory() as s:
+            cur = AgentRun(run_id="rf-cur", commodity="GOLD",
+                           started_at=datetime.now(IST), status="RUNNING",
+                           regime_json=json.dumps({"label": "trending"}))
+            s.add(cur)
+            s.commit()
+            with patch("app.commodity_agents.notify.send_telegram") as tg:
+                _regime_flip_alert(s, settings_paper, cur, "GOLD", "trending")
+                assert tg.called
+                assert "REGIME FLIP" in tg.call_args[0][1]
+
+    def test_no_alert_without_positions(self, db_factory, settings_paper):
+        from app.commodity_agents.orchestrator import _regime_flip_alert
+        now = datetime.now(IST)
+        with db_factory() as s:
+            s.add(AgentRun(run_id="rf-p2", commodity="SILVER",
+                           started_at=now - timedelta(minutes=30), status="COMPLETED",
+                           regime_json=json.dumps({"label": "range-bound"})))
+            cur = AgentRun(run_id="rf-c2", commodity="SILVER", started_at=now,
+                           status="RUNNING")
+            s.add(cur)
+            s.commit()
+            with patch("app.commodity_agents.notify.send_telegram") as tg:
+                _regime_flip_alert(s, settings_paper, cur, "SILVER", "trending")
+                assert not tg.called
+
+    def test_no_alert_on_benign_label(self, db_factory, settings_paper):
+        from app.commodity_agents.orchestrator import _regime_flip_alert
+        with db_factory() as s:
+            cur = AgentRun(run_id="rf-c3", commodity="GOLD",
+                           started_at=datetime.now(IST), status="RUNNING")
+            s.add(cur)
+            s.commit()
+            with patch("app.commodity_agents.notify.send_telegram") as tg:
+                _regime_flip_alert(s, settings_paper, cur, "GOLD", "range-bound")
+                assert not tg.called
+
+
+class TestSlippageAndExcursions:
+    def test_sync_computes_slippage_and_mae(self, db_factory, settings_paper):
+        from app.commodity_agents.journal import sync_closed_trades
+        now = datetime.now(IST)
+        with db_factory() as s:
+            run = AgentRun(
+                run_id="slip-run", commodity="GOLD", started_at=now,
+                status="COMPLETED",
+                strikes_json=json.dumps([
+                    {"tradingsymbol": "GOLD26JUL72000CE", "ltp": 800.0},
+                    {"tradingsymbol": "GOLD26JUL72000PE", "ltp": 800.0}]))
+            s.add(run)
+            s.commit()
+            rec = CommodityRecommendation(
+                run_pk=run.id, commodity="GOLD", created_at=now, direction="SELL",
+                strategy_type="short_straddle", strikes_json="[]", confidence=0.8,
+                reasoning_summary="t", dissent_json="[]", risk_vetoed=False,
+                status="APPROVED")
+            s.add(rec)
+            s.commit()
+            s.add(CommodityTradeJournal(
+                recommendation_id=rec.id, commodity="GOLD", mode="live",
+                alert_id=555, entered_at=now, entry_context_json="{}", lots=1))
+            for sym, itype, fill, worst, best in (
+                    ("GOLD26JUL72000CE", "CE", 792.0, 1050.0, 700.0),
+                    ("GOLD26JUL72000PE", "PE", 796.0, 900.0, 500.0)):
+                o = _mk_order(s, 555, sym)
+                o.fill_price = fill
+                p = _mk_position(s, o, itype=itype, entry=fill)
+                p.max_adverse_price = worst
+                p.max_favorable_price = best
+                s.add(ClosedTrade(position_id=p.id, exchange="MCX",
+                                  tradingsymbol=sym, entry_premium=fill,
+                                  exit_premium=fill * 0.5, pnl=3000.0,
+                                  exit_reason="TARGET_HIT", opened_at=now,
+                                  closed_at=now))
+            s.commit()
+        assert sync_closed_trades(db_factory) == 1
+        with db_factory() as s:
+            row = s.query(CommodityTradeJournal).one()
+            # SELL fills below quote: (792-800)/800 and (796-800)/800, weighted -> -0.75%
+            assert row.slippage_pct == pytest.approx(-0.75, abs=0.01)
+            # CE leg: worst 1050 vs entry 792 -> +32.6% MAE (worst leg)
+            assert row.mae_pct == pytest.approx(32.6, abs=0.2)
+            # PE leg best 500 vs entry 796 -> 37.2% MFE
+            assert row.mfe_pct == pytest.approx(37.2, abs=0.2)
+
+    def test_trailing_tracks_excursions(self):
+        from unittest.mock import MagicMock as MM
+        from app.trailing import TrailingSlManager
+        mgr = TrailingSlManager(session_factory=MM(), kite_fetcher=MM())
+        mgr.register(tradingsymbol="X", instrument_token=1, exchange="MCX",
+                     entry_side="SELL", sl_pct=0.5, qty=1, product="NRML",
+                     target_price=400.0, initial_sl=1200.0, fill_price=800.0,
+                     gtt_db_id=1, kite_gtt_id=None, tick_size=0.05)
+        pos = mgr._positions[1]
+        mgr.on_ticks([{"instrument_token": 1, "last_price": 950.0}])   # adverse
+        mgr.on_ticks([{"instrument_token": 1, "last_price": 700.0}])   # favorable
+        mgr.on_ticks([{"instrument_token": 1, "last_price": 900.0}])   # neither extreme
+        assert pos.worst_price == 950.0
+        assert pos.best_price == 700.0
+        assert pos.excursions_dirty
+
+
+class TestWeeklyReport:
+    def test_report_composes_sections(self, db_factory, settings_paper):
+        from app.commodity_agents.weekly_report import build_weekly_report
+        now = datetime.now(IST)
+        settings = settings_paper.model_copy(
+            update={"COMMODITY_AGENTS_COMMODITIES": ["GOLD"]})
+        with db_factory() as s:
+            run = AgentRun(run_id="wr-1", commodity="GOLD", started_at=now,
+                           status="COMPLETED",
+                           regime_json=json.dumps({"label": "range-bound",
+                                                   "atm_iv": 0.32,
+                                                   "iv_percentile": 74.0}))
+            s.add(run)
+            s.commit()
+            rec = CommodityRecommendation(
+                run_pk=run.id, commodity="GOLD", created_at=now, direction="SELL",
+                strategy_type="short_straddle", strikes_json="[]", confidence=0.8,
+                reasoning_summary="t", dissent_json="[]", risk_vetoed=False,
+                status="APPROVED")
+            s.add(rec)
+            s.commit()
+            s.add(CommodityTradeJournal(
+                recommendation_id=rec.id, commodity="GOLD", mode="live",
+                alert_id=None, entered_at=now - timedelta(days=2),
+                entry_context_json=json.dumps({"regime": "range-bound"}),
+                lots=1, realized_pnl=5200.0, slippage_pct=-0.4, mae_pct=28.0))
+            s.commit()
+            text = build_weekly_report(s, settings, now=now)
+        assert "Weekly desk review" in text
+        assert "range-bound" in text
+        assert "slippage" in text.lower()
+        assert "pctile 74" in text

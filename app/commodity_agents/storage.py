@@ -62,6 +62,9 @@ class CommodityRecommendation(Base):
     risk_vetoed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="PROPOSED")
     # PROPOSED / APPROVED / REJECTED
+    # Deterministic sizing hint: floor(daily loss budget / worst-case per lot),
+    # clamped by margin capacity and COMMODITY_AGENT_MAX_LOTS.
+    suggested_lots: Mapped[int | None] = mapped_column(Integer)
     # Calibration (filled ~1 session later by calibration.evaluate_pending):
     realized_move_pct: Mapped[float | None] = mapped_column(Float)
     outcome: Mapped[str | None] = mapped_column(String(16))
@@ -94,6 +97,10 @@ class CommodityTradeJournal(Base):
     realized_pnl: Mapped[float | None] = mapped_column(Float)
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     exit_reason: Mapped[str | None] = mapped_column(String(48))
+    # Execution quality + excursion stats, back-filled with realized_pnl:
+    slippage_pct: Mapped[float | None] = mapped_column(Float)   # fill vs analysis quote, premium-weighted; negative = worse
+    mae_pct: Mapped[float | None] = mapped_column(Float)        # worst per-leg adverse excursion, % of entry premium
+    mfe_pct: Mapped[float | None] = mapped_column(Float)        # best per-leg favorable excursion, % of entry premium
 
 
 class RecommendationDecision(Base):
