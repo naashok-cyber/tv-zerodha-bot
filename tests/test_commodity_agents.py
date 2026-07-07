@@ -825,3 +825,29 @@ class TestJsonReplyParsing:
         from app.commodity_agents.llm_client import _parse_json_reply
         with pytest.raises(_json.JSONDecodeError):
             _parse_json_reply('```json\n{"stance": "cut off mid')
+
+    def test_unparseable_reply_retried_with_strict_instruction(self):
+        from types import SimpleNamespace
+        from app.commodity_agents.llm_client import LlmClient
+        bad = SimpleNamespace(stop_reason="end_turn",
+                              content=[SimpleNamespace(type="text",
+                                                       text='```json\n{"stance": "cut off mid')])
+        good = SimpleNamespace(stop_reason="end_turn",
+                               content=[SimpleNamespace(type="text",
+                                                        text='{"risk_flag": "medium"}')])
+        llm = LlmClient(api_key="k", role_models={"event": "m"})
+        llm._client, calls = self._client_returning([bad, good])
+        assert llm.run("event", "sys", "ctx") == {"risk_flag": "medium"}
+        assert len(calls) == 2
+        assert "CRITICAL OUTPUT RULE" in calls[1]["system"]
+
+    def _client_returning(self, responses):
+        from types import SimpleNamespace
+        calls = []
+
+        class FakeMessages:
+            def create(self, **kw):
+                calls.append(kw)
+                return responses[len(calls) - 1]
+
+        return SimpleNamespace(messages=FakeMessages()), calls

@@ -70,9 +70,30 @@ class LlmClient:
         return self._client
 
     _MAX_TURNS = 5      # pause_turn continuation cap (web-search rounds)
+    _RETRY_SUFFIX = (
+        "\n\nCRITICAL OUTPUT RULE: your previous reply could not be parsed. "
+        "Return ONLY the JSON object — no markdown fences, no prose before or "
+        "after — and keep every string value under 200 characters."
+    )
 
     def run(self, role: str, system: str, user: str) -> dict:
-        """Call the role's model, parse its JSON reply. Raises LlmError on failure."""
+        """Call the role's model, parse its JSON reply. One automatic retry
+        with a stricter output instruction when the reply cannot be parsed
+        (long web-search answers occasionally overrun or wrap the JSON).
+        Raises LlmError on final failure."""
+        try:
+            return self._run_once(role, system, user)
+        except LlmError as first_exc:
+            if "API call failed" in str(first_exc):
+                raise                       # transport errors: retrying is caller's call
+            log.warning("[llm] %s reply unparseable, retrying once: %s",
+                        role, str(first_exc)[:150])
+            try:
+                return self._run_once(role, system + self._RETRY_SUFFIX, user)
+            except LlmError:
+                raise first_exc              # report the original, richer error
+
+    def _run_once(self, role: str, system: str, user: str) -> dict:
         model = self._role_models.get(role)
         if not model:
             raise LlmError(f"no model configured for role {role!r}")
