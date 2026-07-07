@@ -54,6 +54,8 @@ class LlmClient:
             self._client = anthropic.Anthropic(api_key=self._api_key)
         return self._client
 
+    _MAX_TURNS = 5      # pause_turn continuation cap (web-search rounds)
+
     def run(self, role: str, system: str, user: str) -> dict:
         """Call the role's model, parse its JSON reply. Raises LlmError on failure."""
         model = self._role_models.get(role)
@@ -64,7 +66,6 @@ class LlmClient:
             "model": model,
             "max_tokens": self._max_tokens,
             "system": system,
-            "messages": [{"role": "user", "content": user}],
         }
         # Event/gap-risk agent gets web search so it can catch breaking news
         # (geopolitical shocks, cold snaps) that no static calendar contains.
@@ -75,8 +76,18 @@ class LlmClient:
                 "max_uses": 2,
             }]
 
+        # Server-side tools (web search) can pause mid-turn: the API returns
+        # stop_reason="pause_turn" with only tool blocks and expects the
+        # partial content echoed back as an assistant message to continue.
+        # Without this loop those responses have no text block at all.
+        messages: list[dict] = [{"role": "user", "content": user}]
+        msg = None
         try:
-            msg = self._get_client().messages.create(**kwargs)
+            for _ in range(self._MAX_TURNS):
+                msg = self._get_client().messages.create(messages=messages, **kwargs)
+                if getattr(msg, "stop_reason", None) != "pause_turn":
+                    break
+                messages.append({"role": "assistant", "content": msg.content})
         except Exception as exc:
             raise LlmError(f"API call failed for role {role}: {exc}") from exc
 
@@ -84,7 +95,8 @@ class LlmClient:
         # search results / intermediate text when tools are used)
         text_blocks = [b.text for b in msg.content if getattr(b, "type", "") == "text"]
         if not text_blocks:
-            raise LlmError(f"no text content in response for role {role}")
+            raise LlmError(f"no text content in response for role {role} "
+                           f"(stop_reason={getattr(msg, 'stop_reason', None)})")
         try:
             return json.loads(_strip_fences(text_blocks[-1]))
         except json.JSONDecodeError as exc:

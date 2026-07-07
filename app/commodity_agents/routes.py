@@ -107,6 +107,7 @@ def latest_recommendations(
 ) -> dict:
     _require_admin(x_admin_auth_token, zb_session)
     out = {}
+    runs = {}
     with _session() as session:
         for commodity in COMMODITIES:
             rec = (
@@ -116,7 +117,18 @@ def latest_recommendations(
                 .first()
             )
             out[commodity] = _rec_to_dict(rec) if rec else None
-    return {"recommendations": out}
+            run = (
+                session.query(AgentRun)
+                .filter(AgentRun.commodity == commodity)
+                .order_by(AgentRun.started_at.desc())
+                .first()
+            )
+            runs[commodity] = ({
+                "status": run.status,
+                "started_at": run.started_at.isoformat(),
+                "error": (run.error or "")[:200] or None,
+            } if run else None)
+    return {"recommendations": out, "last_runs": runs}
 
 
 @router.get("/{commodity}/history")

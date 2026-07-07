@@ -764,3 +764,43 @@ class TestCalendarRefresh:
         assert any(e.name == "OPEC+ meeting" for e in evs)
         gold = events_mod.upcoming_events("GOLD", now, horizon_hours=400)
         assert any(e.name == "manual CPI" for e in gold)
+
+
+class TestLlmPauseTurn:
+    def _client_returning(self, responses):
+        from types import SimpleNamespace
+        calls = []
+
+        class FakeMessages:
+            def create(self, **kw):
+                calls.append(kw)
+                return responses[len(calls) - 1]
+
+        return SimpleNamespace(messages=FakeMessages()), calls
+
+    def test_pause_turn_is_continued(self):
+        from types import SimpleNamespace
+        from app.commodity_agents.llm_client import LlmClient
+        paused = SimpleNamespace(
+            stop_reason="pause_turn",
+            content=[SimpleNamespace(type="server_tool_use")])
+        final = SimpleNamespace(
+            stop_reason="end_turn",
+            content=[SimpleNamespace(type="text", text='{"risk_flag": "low"}')])
+        llm = LlmClient(api_key="k", role_models={"event": "m"})
+        llm._client, calls = self._client_returning([paused, final])
+        out = llm.run("event", "sys", "ctx")
+        assert out == {"risk_flag": "low"}
+        assert len(calls) == 2
+        # continuation echoes the paused content back as an assistant turn
+        assert calls[1]["messages"][1]["role"] == "assistant"
+
+    def test_no_text_after_max_turns_raises(self):
+        from types import SimpleNamespace
+        from app.commodity_agents.llm_client import LlmClient, LlmError
+        paused = SimpleNamespace(stop_reason="pause_turn",
+                                 content=[SimpleNamespace(type="server_tool_use")])
+        llm = LlmClient(api_key="k", role_models={"event": "m"})
+        llm._client, _ = self._client_returning([paused] * 5)
+        with pytest.raises(LlmError, match="no text content"):
+            llm.run("event", "sys", "ctx")

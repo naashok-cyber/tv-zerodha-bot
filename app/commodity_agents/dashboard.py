@@ -84,7 +84,16 @@ async function load(){
 try{const d=await api('/recommendations');const el=document.getElementById('cards');el.innerHTML='';
 for(const [com,rec] of Object.entries(d.recommendations)){
 const card=document.createElement('div');card.className='card';
-if(!rec){card.innerHTML='<div class="row"><b>'+com+'</b>'+badge(null)+'</div>';el.appendChild(card);continue}
+if(!rec){
+const lr=(d.last_runs||{})[com];
+let why='No pipeline run yet — next cycle fires within 30 min during market hours.';
+if(lr){const at=lr.started_at.replace('T',' ').slice(5,16);
+if(lr.status==='FAILED')why='Last run '+at+' <b style="color:var(--red)">FAILED</b>: '+esc(lr.error||'unknown');
+else if(lr.status==='RUNNING')why='Run in progress (started '+at+')…';
+else why='Last run '+at+' finished ('+esc(lr.status)+') without a recommendation.'}
+card.innerHTML='<div class="row"><b>'+com+'</b>'+badge(null)+'</div>'+
+'<div class="dim" style="margin-top:6px">'+why+'</div>';
+el.appendChild(card);continue}
 const conf=rec.confidence!=null?Math.round(rec.confidence*100)+'%':'—';
 recLots[rec.id]=rec.suggested_lots||1;
 let actions='';
