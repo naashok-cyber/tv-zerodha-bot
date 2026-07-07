@@ -1,9 +1,11 @@
 """Dashboard HTML/PWA assets, served by routes.py.
 
-Single-file mobile-first page: the shell is unauthenticated, all data calls
-carry X-Admin-Auth-Token (entered once, kept in localStorage). Installable on
-iOS via the manifest + apple-touch meta tags; approve/reject is the two-step
-token flow, surfaced as an explicit second CONFIRM tap.
+Single-file mobile-first pages. Auth is the same httponly zb_session cookie
+as /control: pages redirect to /login when there is no valid session, data
+calls send the cookie automatically, and no credential is ever stored in the
+browser (the old localStorage admin-token scheme is removed; the header path
+remains server-side for programmatic API use only). Installable on iOS via
+the manifest; approve/reject is the two-step CONFIRM-tap flow.
 """
 from __future__ import annotations
 
@@ -55,7 +57,7 @@ padding:5px;font-size:12px;margin-bottom:12px}
   <span><button onclick="location.href='/commodity-agents/analyze'">Analyze</button>
   <button onclick="location.href='/commodity-agents/desk'">Desk</button>
   <button onclick="runNow()">Run now</button>
-  <button onclick="setToken()">&#9881;</button></span></h1>
+  <button onclick="location.href='/auth/logout'" title="Sign out">&#8618;</button></span></h1>
 <div class="paper">Decision-support mode — approvals are recorded; live execution is separately gated.</div>
 <div id="cards"><div class="card dim">Loading…</div></div>
 <div id="sheet" class="overlay hidden" onclick="if(event.target===this)closeSheet()">
@@ -64,13 +66,12 @@ padding:5px;font-size:12px;margin-bottom:12px}
 <script>
 const API='/commodity-agents';
 let pendingConfirm=null,recLots={};
-function tok(){return localStorage.getItem('ca_token')||''}
-function setToken(){const t=prompt('Admin auth token:',tok());if(t!==null){localStorage.setItem('ca_token',t);load()}}
-function hdrs(){return {'X-Admin-Auth-Token':tok(),'Content-Type':'application/json'}}
+localStorage.removeItem('ca_token'); // legacy token storage — now cookie-session auth
+function hdrs(){return {'Content-Type':'application/json'}}
 function toast(m){const t=document.getElementById('toast');t.textContent=m;t.classList.remove('hidden');
 setTimeout(()=>t.classList.add('hidden'),3500)}
 async function api(path,opts){const r=await fetch(API+path,Object.assign({headers:hdrs()},opts||{}));
-if(r.status===401){toast('Unauthorized — set token via ⚙');throw new Error('401')}
+if(r.status===401){location.href='/login?next='+encodeURIComponent(location.pathname);throw new Error('401')}
 if(!r.ok){const d=await r.json().catch(()=>({detail:r.status}));toast(d.detail||('HTTP '+r.status));throw new Error(r.status)}
 return r.json()}
 function badge(rec){if(!rec)return '<span class="badge b-none">no data</span>';
@@ -128,7 +129,6 @@ toast('Pipeline started for all commodities');setTimeout(load,20000)}
 function openSheet(html){document.getElementById('sheetBody').innerHTML=html;
 document.getElementById('sheet').classList.remove('hidden')}
 function closeSheet(){document.getElementById('sheet').classList.add('hidden')}
-if(!tok())setTimeout(setToken,400);
 load();setInterval(load,60000);
 if('serviceWorker' in navigator)navigator.serviceWorker.register('/commodity-agents/sw.js');
 </script>
@@ -209,13 +209,13 @@ const TICKERS=['NIFTY','BANKNIFTY','NATURALGAS','CRUDEOIL','GOLD','SILVER'];
 const ALIASES={NG:'NATURALGAS',NATGAS:'NATURALGAS',CRUDE:'CRUDEOIL',OIL:'CRUDEOIL',
 BN:'BANKNIFTY',BNF:'BANKNIFTY',NF:'NIFTY',AU:'GOLD',AG:'SILVER'};
 let sel=null,poller=null,pendingConfirm=null,runStartedAt=null,recLots={};
-function tok(){return localStorage.getItem('ca_token')||''}
-function hdrs(){return {'X-Admin-Auth-Token':tok(),'Content-Type':'application/json'}}
+localStorage.removeItem('ca_token'); // legacy token storage — now cookie-session auth
+function hdrs(){return {'Content-Type':'application/json'}}
 function toast(m){const t=document.getElementById('toast');t.textContent=m;
 t.classList.remove('hidden');setTimeout(()=>t.classList.add('hidden'),4000)}
 function esc(s){return (s??'').toString().replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
 async function api(path,opts){const r=await fetch(API+path,Object.assign({headers:hdrs()},opts||{}));
-if(r.status===401){const t=prompt('Admin auth token:');if(t)localStorage.setItem('ca_token',t);throw new Error('401')}
+if(r.status===401){location.href='/login?next='+encodeURIComponent(location.pathname);throw new Error('401')}
 if(!r.ok){const d=await r.json().catch(()=>({detail:r.status}));toast(d.detail||('HTTP '+r.status));throw new Error(r.status)}
 return r.json()}
 function renderChips(){const c=document.getElementById('chips');
@@ -380,7 +380,6 @@ box.innerHTML='<button class="confirm" onclick="decide('+id+',\\''+action+'\\')"
 action.toUpperCase()+' ('+(recLots[id]||1)+' lot'+((recLots[id]||1)===1?'':'s')+')'+
 '</button><button onclick="pendingConfirm=null;location.reload()">Cancel</button>'}
 renderChips();
-if(!tok())setTimeout(()=>{const t=prompt('Admin auth token:');if(t)localStorage.setItem('ca_token',t)},400);
 if('serviceWorker' in navigator)navigator.serviceWorker.register('/commodity-agents/sw.js');
 </script>
 </body></html>"""
@@ -430,8 +429,7 @@ border:1px solid var(--border);padding:9px 16px;border-radius:10px;font-size:13.
 
 <script>
 const API='/commodity-agents';
-function tok(){return localStorage.getItem('ca_token')||''}
-function hdrs(){return {'X-Admin-Auth-Token':tok()}}
+localStorage.removeItem('ca_token'); // legacy token storage — now cookie-session auth
 function esc(s){return (s??'').toString().replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
 function toast(m){const t=document.getElementById('toast');t.textContent=m;
 t.classList.remove('hidden');setTimeout(()=>t.classList.add('hidden'),4000)}
@@ -439,8 +437,8 @@ function inr(x){if(x==null)return '&#8212;';
 return '<span style="color:var(--'+(x>=0?'green':'red')+')">'+(x>=0?'+':'&#8722;')+
 '&#8377;'+Math.abs(Math.round(x)).toLocaleString('en-IN')+'</span>'}
 function num(x,d){return x==null?'&#8212;':Number(x).toFixed(d==null?1:d)}
-async function api(path){const r=await fetch(API+path,{headers:hdrs()});
-if(r.status===401){const t=prompt('Admin auth token:');if(t){localStorage.setItem('ca_token',t);return api(path)}throw new Error('401')}
+async function api(path){const r=await fetch(API+path);
+if(r.status===401){location.href='/login?next='+encodeURIComponent(location.pathname);throw new Error('401')}
 if(!r.ok){const d=await r.json().catch(()=>({detail:r.status}));throw new Error(d.detail||r.status)}
 return r.json()}
 
@@ -522,7 +520,6 @@ el.innerHTML=h}
 function loadAll(){loadGreeks();loadJournal();loadCalib()}
 loadAll();
 setInterval(loadAll,60000);
-if(!tok())setTimeout(()=>{const t=prompt('Admin auth token:');if(t){localStorage.setItem('ca_token',t);loadAll()}},400);
 if('serviceWorker' in navigator)navigator.serviceWorker.register('/commodity-agents/sw.js');
 </script>
 </body></html>"""

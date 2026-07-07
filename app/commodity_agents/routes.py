@@ -18,8 +18,8 @@ import threading
 import time
 from datetime import datetime
 
-from fastapi import APIRouter, BackgroundTasks, Header, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi import APIRouter, BackgroundTasks, Cookie, Header, HTTPException
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from pydantic import BaseModel
 
 from app.commodity_agents.models import COMMODITIES
@@ -43,11 +43,37 @@ _last_manual_run: dict[str, float] = {}              # per-commodity cooldown
 _lock = threading.Lock()
 
 
-def _require_admin(x_admin_auth_token: str | None) -> None:
+def _session_ok(session_token: str | None) -> bool:
+    """Browser auth path: the httponly zb_session cookie issued by /login.
+    The credential lives server-side (WebSession table); the browser only
+    holds an opaque, expiring session id that JavaScript cannot read."""
+    # isinstance guard: direct (non-FastAPI) calls pass the Cookie() default
+    # marker object instead of a resolved string
+    if not isinstance(session_token, str) or not session_token \
+            or app_storage._factory is None:
+        return False
+    from app.webauthn_routes import _valid_session
+    with app_storage._factory() as db:
+        return _valid_session(session_token, db)
+
+
+def _require_admin(x_admin_auth_token: str | None,
+                   session_token: str | None = None) -> None:
+    if _session_ok(session_token):
+        return
+    # header path kept for programmatic/API use (curl, scripts, tests)
     expected = get_settings().ADMIN_AUTH_TOKEN
     if not expected or not x_admin_auth_token or \
             not hmac.compare_digest(expected, x_admin_auth_token):
         raise HTTPException(status_code=401, detail="unauthorized")
+
+
+def _page_gate(session_token: str | None, next_path: str) -> RedirectResponse | None:
+    """Redirect UI pages to the sign-in form unless a valid session exists.
+    When the DB factory is not up yet the shell is served; data calls still 401."""
+    if app_storage._factory is None or _session_ok(session_token):
+        return None
+    return RedirectResponse(f"/login?next={next_path}", status_code=303)
 
 
 def _session():
@@ -75,8 +101,11 @@ def _rec_to_dict(rec: CommodityRecommendation) -> dict:
 
 
 @router.get("/recommendations")
-def latest_recommendations(x_admin_auth_token: str | None = Header(default=None)) -> dict:
-    _require_admin(x_admin_auth_token)
+def latest_recommendations(
+    x_admin_auth_token: str | None = Header(default=None),
+    zb_session: str | None = Cookie(default=None),
+) -> dict:
+    _require_admin(x_admin_auth_token, zb_session)
     out = {}
     with _session() as session:
         for commodity in COMMODITIES:
@@ -95,8 +124,9 @@ def history(
     commodity: str,
     limit: int = 50,
     x_admin_auth_token: str | None = Header(default=None),
+    zb_session: str | None = Cookie(default=None),
 ) -> dict:
-    _require_admin(x_admin_auth_token)
+    _require_admin(x_admin_auth_token, zb_session)
     commodity = commodity.upper()
     if commodity not in COMMODITIES:
         raise HTTPException(status_code=404, detail=f"unknown commodity {commodity}")
@@ -112,9 +142,13 @@ def history(
 
 
 @router.get("/runs/{run_id}")
-def run_detail(run_id: str, x_admin_auth_token: str | None = Header(default=None)) -> dict:
+def run_detail(
+    run_id: str,
+    x_admin_auth_token: str | None = Header(default=None),
+    zb_session: str | None = Cookie(default=None),
+) -> dict:
     """Full reasoning trail for one pipeline run — the drill-down view."""
-    _require_admin(x_admin_auth_token)
+    _require_admin(x_admin_auth_token, zb_session)
     with _session() as session:
         run = session.query(AgentRun).filter(AgentRun.run_id == run_id).first()
         if run is None:
@@ -141,20 +175,26 @@ def run_detail(run_id: str, x_admin_auth_token: str | None = Header(default=None
 # ── Dashboard / PWA assets (unauthenticated shell; data calls carry token) ──
 
 @router.get("/dashboard", response_class=HTMLResponse)
-def dashboard_page() -> str:
+def dashboard_page(zb_session: str | None = Cookie(default=None)):
+    if (redirect := _page_gate(zb_session, "/commodity-agents/dashboard")):
+        return redirect
     from app.commodity_agents.dashboard import DASHBOARD_HTML
     return DASHBOARD_HTML
 
 
 @router.get("/analyze", response_class=HTMLResponse)
-def analyze_page() -> str:
+def analyze_page(zb_session: str | None = Cookie(default=None)):
+    if (redirect := _page_gate(zb_session, "/commodity-agents/analyze")):
+        return redirect
     from app.commodity_agents.dashboard import ANALYZE_HTML
     return ANALYZE_HTML
 
 
 @router.get("/desk", response_class=HTMLResponse)
-def desk_page() -> str:
+def desk_page(zb_session: str | None = Cookie(default=None)):
     """Desk view: live portfolio Greeks, trade journal + expectancy, LLM scorecard."""
+    if (redirect := _page_gate(zb_session, "/commodity-agents/desk")):
+        return redirect
     from app.commodity_agents.dashboard import DESK_HTML
     return DESK_HTML
 
@@ -180,8 +220,9 @@ def trigger_run(
     body: RunRequest,
     background: BackgroundTasks,
     x_admin_auth_token: str | None = Header(default=None),
+    zb_session: str | None = Cookie(default=None),
 ) -> dict:
-    _require_admin(x_admin_auth_token)
+    _require_admin(x_admin_auth_token, zb_session)
     commodity = body.commodity.upper() if body.commodity else "ALL"
     if commodity != "ALL" and commodity not in COMMODITIES:
         raise HTTPException(status_code=404, detail=f"unknown commodity {commodity}")
@@ -224,10 +265,11 @@ _STAGES = [
 def latest_run(
     commodity: str,
     x_admin_auth_token: str | None = Header(default=None),
+    zb_session: str | None = Cookie(default=None),
 ) -> dict:
     """Most recent pipeline run for a ticker, with per-stage completion —
     polled by the Analyze page while a run is in flight."""
-    _require_admin(x_admin_auth_token)
+    _require_admin(x_admin_auth_token, zb_session)
     commodity = commodity.upper()
     if commodity not in COMMODITIES:
         raise HTTPException(status_code=404, detail=f"unknown commodity {commodity}")
@@ -266,10 +308,11 @@ def iv_history(
     commodity: str,
     limit: int = 200,
     x_admin_auth_token: str | None = Header(default=None),
+    zb_session: str | None = Cookie(default=None),
 ) -> dict:
     """ATM IV + realized vol time series across pipeline runs — powers the
     IV-over-time chart on the Analyze page."""
-    _require_admin(x_admin_auth_token)
+    _require_admin(x_admin_auth_token, zb_session)
     commodity = commodity.upper()
     if commodity not in COMMODITIES:
         raise HTTPException(status_code=404, detail=f"unknown commodity {commodity}")
@@ -305,10 +348,13 @@ def iv_history(
 
 
 @router.get("/journal")
-def journal(x_admin_auth_token: str | None = Header(default=None)) -> dict:
+def journal(
+    x_admin_auth_token: str | None = Header(default=None),
+    zb_session: str | None = Cookie(default=None),
+) -> dict:
     """Desk journal: every approved trade with its frozen entry context,
     plus expectancy stats grouped by regime."""
-    _require_admin(x_admin_auth_token)
+    _require_admin(x_admin_auth_token, zb_session)
     from app.commodity_agents.journal import expectancy_stats, sync_closed_trades
     sync_closed_trades(app_storage._factory)     # opportunistic back-fill
     from app.commodity_agents.storage import CommodityTradeJournal
@@ -340,18 +386,24 @@ def journal(x_admin_auth_token: str | None = Header(default=None)) -> dict:
 
 
 @router.get("/calibration")
-def calibration(x_admin_auth_token: str | None = Header(default=None)) -> dict:
+def calibration(
+    x_admin_auth_token: str | None = Header(default=None),
+    zb_session: str | None = Cookie(default=None),
+) -> dict:
     """LLM scorecard: judge hit rate and per-agent risk-flag reliability."""
-    _require_admin(x_admin_auth_token)
+    _require_admin(x_admin_auth_token, zb_session)
     from app.commodity_agents.calibration import calibration_stats
     with _session() as session:
         return calibration_stats(session)
 
 
 @router.get("/portfolio-greeks")
-def portfolio_greeks(x_admin_auth_token: str | None = Header(default=None)) -> dict:
+def portfolio_greeks(
+    x_admin_auth_token: str | None = Header(default=None),
+    zb_session: str | None = Cookie(default=None),
+) -> dict:
     """Live delta/vega/theta per open option position + per-straddle net delta."""
-    _require_admin(x_admin_auth_token)
+    _require_admin(x_admin_auth_token, zb_session)
     from app.commodity_agents.portfolio import compute_portfolio_greeks
     from app.kite_session import get_session_manager
     try:
@@ -375,8 +427,9 @@ def decide(
     body: DecisionRequest,
     background: BackgroundTasks,
     x_admin_auth_token: str | None = Header(default=None),
+    zb_session: str | None = Cookie(default=None),
 ) -> dict:
-    _require_admin(x_admin_auth_token)
+    _require_admin(x_admin_auth_token, zb_session)
     action = body.action.lower()
     if action not in ("approve", "reject"):
         raise HTTPException(status_code=422, detail="action must be approve or reject")

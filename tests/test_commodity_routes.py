@@ -137,7 +137,8 @@ class TestDashboardAssets:
     def test_dashboard_html(self):
         html = routes.dashboard_page()
         assert "Commodity Agents" in html
-        assert "X-Admin-Auth-Token" in html          # data calls carry the token
+        assert "X-Admin-Auth-Token" not in html      # no credential in the browser
+        assert "/login?next=" in html                # 401 → session sign-in
         assert "TAP AGAIN to confirm" in html        # two-step UI present
 
     def test_manifest(self):
@@ -651,12 +652,64 @@ class TestDeskPage:
         assert "/portfolio-greeks" in html
         assert "/journal" in html
         assert "/calibration" in html
-        assert "X-Admin-Auth-Token" in html
+        assert "X-Admin-Auth-Token" not in html      # cookie-session auth only
 
     def test_nav_links_wired(self, settings_paper):
         from app.commodity_agents.dashboard import ANALYZE_HTML, DASHBOARD_HTML
         assert "/commodity-agents/desk" in DASHBOARD_HTML
         assert "/commodity-agents/desk" in ANALYZE_HTML
+
+
+# ── cookie-session auth (no credential in the browser) ──────────────────────
+
+class TestSessionAuth:
+    def _mk_session(self, factory, hours=1) -> str:
+        import secrets as _secrets
+        from datetime import timezone as _tz
+        from app.storage import WebSession
+        token = _secrets.token_hex(32)
+        with factory() as s:
+            s.add(WebSession(token=token,
+                             created_at=datetime.now(_tz.utc),
+                             expires_at=datetime.now(_tz.utc) + timedelta(hours=hours)))
+            s.commit()
+        return token
+
+    def test_valid_session_cookie_authorizes(self, db_factory, settings_paper):
+        token = self._mk_session(db_factory)
+        out = routes.latest_recommendations(x_admin_auth_token=None, zb_session=token)
+        assert "recommendations" in out
+
+    def test_expired_session_rejected(self, db_factory, settings_paper):
+        token = self._mk_session(db_factory, hours=-1)
+        with pytest.raises(HTTPException) as e:
+            routes.latest_recommendations(x_admin_auth_token=None, zb_session=token)
+        assert e.value.status_code == 401
+
+    def test_header_token_still_works_for_api(self, db_factory, settings_paper):
+        out = routes.latest_recommendations(x_admin_auth_token=TOKEN, zb_session=None)
+        assert "recommendations" in out
+
+    def test_pages_redirect_to_login_without_session(self, db_factory, settings_paper):
+        from fastapi.responses import RedirectResponse
+        for page, path in ((routes.dashboard_page, "dashboard"),
+                           (routes.analyze_page, "analyze"),
+                           (routes.desk_page, "desk")):
+            resp = page(zb_session=None)
+            assert isinstance(resp, RedirectResponse)
+            assert f"/login?next=/commodity-agents/{path}" in resp.headers["location"]
+
+    def test_pages_served_with_valid_session(self, db_factory, settings_paper):
+        token = self._mk_session(db_factory)
+        html = routes.dashboard_page(zb_session=token)
+        assert isinstance(html, str) and "Commodity Agents" in html
+
+    def test_no_localstorage_credential_in_any_page(self, settings_paper):
+        from app.commodity_agents.dashboard import ANALYZE_HTML, DASHBOARD_HTML, DESK_HTML
+        for html in (DASHBOARD_HTML, ANALYZE_HTML, DESK_HTML):
+            assert "setItem('ca_token'" not in html
+            assert "X-Admin-Auth-Token" not in html
+            assert "/login?next=" in html
 
 
 # ── wave 4: sizing, regime flip, slippage/MAE, weekly report ─────────────────
