@@ -389,6 +389,9 @@ box.innerHTML='<button class="confirm" onclick="decide('+id+',\\''+action+'\\')"
 action.toUpperCase()+' ('+(recLots[id]||1)+' lot'+((recLots[id]||1)===1?'':'s')+')'+
 '</button><button onclick="pendingConfirm=null;location.reload()">Cancel</button>'}
 renderChips();
+// deep link: /analyze?t=GOLD preselects the ticker (from Desk drift chips)
+const _q=(new URLSearchParams(location.search).get('t')||'').toUpperCase();
+if(TICKERS.includes(ALIASES[_q]||_q))pick(ALIASES[_q]||_q);
 if('serviceWorker' in navigator)navigator.serviceWorker.register('/commodity-agents/sw.js');
 </script>
 </body></html>"""
@@ -429,10 +432,15 @@ border:1px solid var(--border);padding:9px 16px;border-radius:10px;font-size:13.
 <h1>Desk
   <span><button onclick="location.href='/commodity-agents/dashboard'">Dashboard</button>
   <button onclick="location.href='/commodity-agents/analyze'">Analyze</button>
-  <button onclick="loadAll()">&#8635;</button></span></h1>
+  <button onclick="loadAll()">&#8635;</button>
+  <button onclick="location.href='/auth/logout'" title="Sign out">&#8618;</button></span></h1>
+<div class="dim" id="upd" style="margin:-8px 0 10px"></div>
 
 <div class="card"><h2>Open positions — live Greeks</h2><div id="greeks" class="dim">loading…</div></div>
-<div class="card"><h2>Trade journal &amp; expectancy</h2><div id="journal" class="dim">loading…</div></div>
+<div class="card"><h2 style="display:flex;justify-content:space-between;align-items:center">
+Trade journal &amp; expectancy
+<button style="font-size:12px;padding:4px 10px" onclick="exportJournal()">Export CSV</button></h2>
+<div id="journal" class="dim">loading…</div></div>
 <div class="card"><h2>LLM scorecard</h2><div id="calib" class="dim">loading…</div></div>
 <div id="toast" class="hidden"></div>
 
@@ -464,8 +472,10 @@ h+='</table>';
 const st=Object.entries(d.straddles||{});
 if(st.length){h+='<div style="margin-top:8px">'+st.map(([sid,g])=>{
 const bad=Math.abs(g.net_delta_per_lot)>=0.2;
-return '<span class="chip" style="color:var(--'+(bad?'red':'green')+')">'+esc(g.underlying)+
-' straddle &#916; '+(g.net_delta_per_lot>0?'+':'')+g.net_delta_per_lot+'/lot</span>'}).join(' ')+'</div>'}
+return '<span class="chip" style="cursor:pointer;color:var(--'+(bad?'red':'green')+')" '+
+'title="Analyze '+esc(g.underlying)+'" onclick="location.href=\\'/commodity-agents/analyze?t='+
+esc(g.underlying)+'\\'">'+esc(g.underlying)+
+' straddle &#916; '+(g.net_delta_per_lot>0?'+':'')+g.net_delta_per_lot+'/lot &#8250;</span>'}).join(' ')+'</div>'}
 const t=d.totals||{};
 h+='<div class="dim" style="margin-top:8px">Book: &#916; '+num(t.net_delta_units)+' units &#183; vega '+
 num(t.net_vega)+' &#183; theta '+inr(t.net_theta_per_day)+'/day</div>';
@@ -526,7 +536,24 @@ rows.join('')+'</table><div class="dim" style="margin-top:4px">A reliable agent:
 '(high-flag runs should see danger far more often than low-flag runs).</div></div>'}
 el.innerHTML=h}
 
-function loadAll(){loadGreeks();loadJournal();loadCalib()}
+async function exportJournal(){
+let d;try{d=await api('/journal')}catch(e){return}
+const cols=['entered_at','commodity','mode','lots','realized_pnl','exit_reason',
+'slippage_pct','mae_pct','mfe_pct'];
+const ctxCols=['regime','vrp_pts','iv_trend','edge_ratio','judge_confidence'];
+const q=v=>v==null?'':(/[",\\n]/.test(String(v))?'"'+String(v).replace(/"/g,'""')+'"':String(v));
+const lines=[cols.concat(ctxCols).join(',')];
+for(const e of d.entries){const c=e.entry_context||{};
+lines.push(cols.map(k=>q(e[k])).concat(ctxCols.map(k=>q(c[k]))).join(','))}
+const blob=new Blob([lines.join('\\n')],{type:'text/csv'});
+const a=document.createElement('a');a.href=URL.createObjectURL(blob);
+a.download='trade_journal_'+new Date().toISOString().slice(0,10)+'.csv';
+a.click();URL.revokeObjectURL(a.href);
+toast('Journal exported — '+d.entries.length+' rows')}
+function loadAll(){loadGreeks();loadJournal();loadCalib();
+const u=document.getElementById('upd');
+if(u)u.textContent='Updated '+new Date().toLocaleTimeString('en-IN',
+{hour:'2-digit',minute:'2-digit',second:'2-digit'})+' · auto-refreshes every 60s'}
 loadAll();
 setInterval(loadAll,60000);
 if('serviceWorker' in navigator)navigator.serviceWorker.register('/commodity-agents/sw.js');

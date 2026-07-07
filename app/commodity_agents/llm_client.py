@@ -32,13 +32,28 @@ def _strip_fences(raw: str) -> str:
     return raw.strip()
 
 
+def _parse_json_reply(raw: str) -> dict:
+    """Parse a model reply that should be one JSON object. Tolerates code
+    fences, leading/trailing prose, and picks out the outermost {...} span.
+    Raises json.JSONDecodeError when nothing parseable is found."""
+    cleaned = _strip_fences(raw)
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        start = cleaned.find("{")
+        end = cleaned.rfind("}")
+        if start >= 0 and end > start:
+            return json.loads(cleaned[start:end + 1])
+        raise
+
+
 class LlmClient:
     def __init__(
         self,
         api_key: str,
         role_models: dict[str, str],
         enable_web_search: bool = True,
-        max_tokens: int = 1500,
+        max_tokens: int = 3000,     # web-search replies got truncated at 1500
     ) -> None:
         if not api_key:
             raise LlmError("ANTHROPIC_API_KEY is empty")
@@ -98,7 +113,7 @@ class LlmClient:
             raise LlmError(f"no text content in response for role {role} "
                            f"(stop_reason={getattr(msg, 'stop_reason', None)})")
         try:
-            return json.loads(_strip_fences(text_blocks[-1]))
+            return _parse_json_reply(text_blocks[-1])
         except json.JSONDecodeError as exc:
             raise LlmError(
                 f"non-JSON reply for role {role}: {text_blocks[-1][:300]!r}"

@@ -804,3 +804,24 @@ class TestLlmPauseTurn:
         llm._client, _ = self._client_returning([paused] * 5)
         with pytest.raises(LlmError, match="no text content"):
             llm.run("event", "sys", "ctx")
+
+
+class TestJsonReplyParsing:
+    def test_prose_around_json(self):
+        from app.commodity_agents.llm_client import _parse_json_reply
+        raw = 'Based on my search:\n{"risk_flag": "high", "confidence": 0.7}\nHope this helps.'
+        assert _parse_json_reply(raw)["risk_flag"] == "high"
+
+    def test_fenced_json(self):
+        from app.commodity_agents.llm_client import _parse_json_reply
+        assert _parse_json_reply('```json\n{"a": 1}\n```') == {"a": 1}
+
+    def test_fence_missing_close_but_complete_object(self):
+        from app.commodity_agents.llm_client import _parse_json_reply
+        assert _parse_json_reply('```json\n{"a": 1}') == {"a": 1}
+
+    def test_truly_truncated_still_raises(self):
+        import json as _json
+        from app.commodity_agents.llm_client import _parse_json_reply
+        with pytest.raises(_json.JSONDecodeError):
+            _parse_json_reply('```json\n{"stance": "cut off mid')

@@ -901,3 +901,29 @@ class TestWeeklyReport:
         assert "range-bound" in text
         assert "slippage" in text.lower()
         assert "pctile 74" in text
+
+
+class TestDeskEnhancements:
+    def test_desk_has_logout_export_and_stamp(self, settings_paper):
+        from app.commodity_agents.dashboard import DESK_HTML
+        assert "/auth/logout" in DESK_HTML
+        assert "exportJournal" in DESK_HTML
+        assert "Export CSV" in DESK_HTML
+        assert 'id="upd"' in DESK_HTML            # freshness stamp
+        assert "/commodity-agents/analyze?t=" in DESK_HTML   # drift chip deep link
+
+    def test_analyze_reads_ticker_param(self, settings_paper):
+        from app.commodity_agents.dashboard import ANALYZE_HTML
+        assert "URLSearchParams" in ANALYZE_HTML
+
+    def test_recommendations_include_last_runs(self, db_factory, settings_paper):
+        now = datetime.now(IST)
+        with db_factory() as s:
+            s.add(AgentRun(run_id="lr-f", commodity="CRUDEOIL", started_at=now,
+                           status="FAILED", error="no text content for role event"))
+            s.commit()
+        out = routes.latest_recommendations(x_admin_auth_token=TOKEN)
+        lr = out["last_runs"]["CRUDEOIL"]
+        assert lr["status"] == "FAILED"
+        assert "no text content" in lr["error"]
+        assert out["last_runs"]["GOLD"] is None
