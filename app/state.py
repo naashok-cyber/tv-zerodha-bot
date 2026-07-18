@@ -30,6 +30,7 @@ _ENTRY_WINDOW_END_OVERRIDE: Optional[str] = None    # "HH:MM"
 _NO_ENTRY_ON_EXPIRY_DAY_OVERRIDE: Optional[bool] = None
 _TRAILING_SL_ENABLED: bool = True
 _WINDOW_STRADDLE_ENABLED: bool = False
+_NG_HEDGE_ENABLED_OVERRIDE: Optional[bool] = None  # None = use .env NG_DELTA_HEDGE_ENABLED
 _MAX_TRADES_PER_DAY_OVERRIDE: Optional[int] = None
 _MAX_OPEN_POSITIONS_OVERRIDE: Optional[int] = None
 _CAPITAL_PER_TRADE_OVERRIDE: Optional[float] = None
@@ -56,6 +57,7 @@ def _save_overrides() -> None:
         "no_entry_on_expiry_day": _NO_ENTRY_ON_EXPIRY_DAY_OVERRIDE,
         "trailing_sl_enabled": _TRAILING_SL_ENABLED,
         "window_straddle_enabled": _WINDOW_STRADDLE_ENABLED,
+        "ng_hedge_enabled": _NG_HEDGE_ENABLED_OVERRIDE,
         "max_trades_per_day": _MAX_TRADES_PER_DAY_OVERRIDE,
         "max_open_positions": _MAX_OPEN_POSITIONS_OVERRIDE,
         "capital_per_trade": _CAPITAL_PER_TRADE_OVERRIDE,
@@ -80,6 +82,7 @@ def load_overrides_from_disk() -> None:
     global _TRAILING_SL_ENABLED, _WINDOW_STRADDLE_ENABLED, _MAX_TRADES_PER_DAY_OVERRIDE
     global _MAX_OPEN_POSITIONS_OVERRIDE, _CAPITAL_PER_TRADE_OVERRIDE
     global _CONSECUTIVE_LOSSES_LIMIT_OVERRIDE, _ADX_THRESHOLD_OVERRIDE
+    global _NG_HEDGE_ENABLED_OVERRIDE
 
     if not os.path.exists(_OVERRIDES_PATH):
         return
@@ -119,6 +122,8 @@ def load_overrides_from_disk() -> None:
             _TRAILING_SL_ENABLED = data["trailing_sl_enabled"]
         if "window_straddle_enabled" in data:
             _WINDOW_STRADDLE_ENABLED = data["window_straddle_enabled"]
+        if "ng_hedge_enabled" in data:
+            _NG_HEDGE_ENABLED_OVERRIDE = data["ng_hedge_enabled"]
         if "max_trades_per_day" in data:
             _MAX_TRADES_PER_DAY_OVERRIDE = data["max_trades_per_day"]
         if "max_open_positions" in data:
@@ -380,6 +385,30 @@ def toggle_window_straddle() -> bool:
         return _WINDOW_STRADDLE_ENABLED
 
 
+# ── NG delta-hedge cron (also gates half-exit / BNF stop-loss / straddle ladder,
+#    since those all run inside the same tick — see app/delta_hedge.py) ────────
+
+def is_ng_hedge_enabled(env_default: bool) -> bool:
+    with _lock:
+        return _NG_HEDGE_ENABLED_OVERRIDE if _NG_HEDGE_ENABLED_OVERRIDE is not None else env_default
+
+
+def set_ng_hedge_enabled(value: bool) -> None:
+    global _NG_HEDGE_ENABLED_OVERRIDE
+    with _lock:
+        _NG_HEDGE_ENABLED_OVERRIDE = value
+        _save_overrides()
+
+
+def toggle_ng_hedge_enabled(env_default: bool) -> bool:
+    global _NG_HEDGE_ENABLED_OVERRIDE
+    with _lock:
+        current = _NG_HEDGE_ENABLED_OVERRIDE if _NG_HEDGE_ENABLED_OVERRIDE is not None else env_default
+        _NG_HEDGE_ENABLED_OVERRIDE = not current
+        _save_overrides()
+        return _NG_HEDGE_ENABLED_OVERRIDE
+
+
 # ── Additional risk overrides ─────────────────────────────────────────────────
 
 def get_max_trades_per_day(env_default: int) -> int:
@@ -459,6 +488,7 @@ def get_all_overrides() -> dict:
             "no_entry_on_expiry_day": _NO_ENTRY_ON_EXPIRY_DAY_OVERRIDE,
             "trailing_sl_enabled": _TRAILING_SL_ENABLED,
             "window_straddle_enabled": _WINDOW_STRADDLE_ENABLED,
+            "ng_hedge_enabled": _NG_HEDGE_ENABLED_OVERRIDE,
             "max_trades_per_day": _MAX_TRADES_PER_DAY_OVERRIDE,
             "max_open_positions": _MAX_OPEN_POSITIONS_OVERRIDE,
             "capital_per_trade": _CAPITAL_PER_TRADE_OVERRIDE,

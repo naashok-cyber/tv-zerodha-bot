@@ -490,7 +490,8 @@ def run_delta_hedge_job(settings: Any, session_factory: Any) -> None:
     from app.kite_session import get_session_manager
     from app.storage import ClosedTrade, Instrument, Position
 
-    if not settings.NG_DELTA_HEDGE_ENABLED:
+    if not state.is_ng_hedge_enabled(settings.NG_DELTA_HEDGE_ENABLED):
+        log.info("%s disabled via /control — skipping", _LOG_PREFIX)
         return
     if state.is_emergency_stop():
         log.info("%s emergency stop — skipping", _LOG_PREFIX)
