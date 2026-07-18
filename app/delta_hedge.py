@@ -1,6 +1,6 @@
 """NATURALGAS delta-hedge cron job.
 
-Fires every 5 min during MCX hours. On each tick:
+Fires every 1 min during MCX hours. On each tick:
   1. Pull live MCX positions for NATURALGAS option legs
   2. Compute net portfolio delta (Black-76) using front-month futures as F
   3. If |net δ| > NG_DELTA_HEDGE_THRESHOLD mmBtu, SELL more lots on the
@@ -32,6 +32,84 @@ _BNF_SL_PREFIX = "[bnf_sl]"
 _UNDERLYING = "NATURALGAS"
 _BNF_UNDERLYING = "BANKNIFTY"
 
+# Pre-hedge: fire early when order-book imbalance signals continued drift.
+# Activates when |δ| > 60% of threshold AND imbalance confirms direction.
+_PRE_HEDGE_DELTA_PCT         = 0.60   # 60% of threshold → check imbalance
+_PRE_HEDGE_IMBALANCE_THRESH  = 0.50   # |imbalance| > 0.50 → lower eff. threshold
+
+# ATM corridor: when the nearest existing hedge leg is >N pts from current
+# futures price, open a fresh ATM position instead of adding to the OTM leg.
+# OTM legs at delta~0.15 need 3× more lots to move the same delta as ATM~0.50.
+_ATM_CORRIDOR_PTS = 10.0
+
+# Delta efficiency: even within the corridor, if the nearest existing leg has
+# |δ| < this threshold, open a fresh ATM position instead. At δ<0.40 the option
+# is too OTM — ATM (~0.50) achieves the same hedge in fewer lots with more theta.
+_MIN_HEDGE_DELTA = 0.40
+
+# ADX-based dynamic hedge threshold.
+# In a range-bound session (ADX < 20) the delta oscillates naturally and hedging
+# every ±350 mmBtu whipsaws the book. Widen the band to let theta do the work.
+_ADX_PERIOD          = 14
+_ADX_CANDLE_INTERVAL = "10minute"
+_ADX_CHOPPY_MAX      = 20.0    # ADX < 20  → choppy/range-bound → wide band
+_ADX_TREND_MIN       = 25.0    # ADX > 25  → trending            → tight band
+_ADX_BAND_CHOPPY     = 700.0   # mmBtu (= ₹700/₹1 NG move) when choppy
+_ADX_BAND_MILD       = 500.0   # mmBtu when mild trend (ADX 20–25)
+_ADX_BAND_TREND      = 350.0   # mmBtu when trending
+
+
+def _adx_threshold(
+    kite: Any, futures_inst: Any, fallback: float
+) -> tuple[float, float | None, str]:
+    """Compute ADX on 10-min NG futures candles and return (threshold_mmBtu, adx, regime).
+
+    ADX < 20  → CHOPPY   → ±700 mmBtu band (fewer trades in range-bound market)
+    ADX 20–25 → MILD     → ±500 mmBtu band
+    ADX > 25  → TRENDING → ±350 mmBtu band (hedge promptly in strong moves)
+
+    Falls back to (fallback, None, "FALLBACK") on any API or compute error.
+    """
+    from datetime import timedelta
+
+    from app.adx import compute_adx
+    from app.config import IST as _IST
+
+    n_candles = _ADX_PERIOD * 3 + 5
+    now = datetime.now(_IST)
+    from_dt = now - timedelta(minutes=n_candles * 10 + 60)
+    try:
+        raw = kite.historical_data(
+            futures_inst.instrument_token, from_dt, now, _ADX_CANDLE_INTERVAL
+        )
+    except Exception as exc:
+        log.warning(
+            "%s ADX: historical_data failed: %s — using fallback threshold %.0f",
+            _LOG_PREFIX, exc, fallback,
+        )
+        return fallback, None, "FALLBACK"
+
+    adx = compute_adx(raw, period=_ADX_PERIOD)
+    if adx is None:
+        log.warning(
+            "%s ADX: insufficient candles (got %d) — using fallback threshold %.0f",
+            _LOG_PREFIX, len(raw) if raw else 0, fallback,
+        )
+        return fallback, None, "FALLBACK"
+
+    if adx < _ADX_CHOPPY_MAX:
+        band, regime = _ADX_BAND_CHOPPY, "CHOPPY"
+    elif adx < _ADX_TREND_MIN:
+        band, regime = _ADX_BAND_MILD, "MILD"
+    else:
+        band, regime = _ADX_BAND_TREND, "TRENDING"
+
+    log.info(
+        "%s ADX(14, 10min)=%.1f → %s → threshold=±%.0f mmBtu",
+        _LOG_PREFIX, adx, regime, band,
+    )
+    return band, adx, regime
+
 
 def _telegram_notify(settings: Any, text: str) -> None:
     """Best-effort Telegram send. No-op if creds missing."""
@@ -46,6 +124,47 @@ def _telegram_notify(settings: Any, text: str) -> None:
         )
     except Exception as exc:
         log.warning("%s telegram notify failed: %s", _LOG_PREFIX, exc)
+
+
+_IMBALANCE_TOP5_WEIGHT  = 0.60   # weight for top-5 depth imbalance (immediate pressure)
+_IMBALANCE_FULL_WEIGHT  = 0.40   # weight for full order-book imbalance (structural sentiment)
+
+
+def _get_futures_imbalance(kite: Any, fut_full: str) -> float | None:
+    """Combined bid-ask imbalance: 60% top-5 depth + 40% full order book.
+    Top-5 captures immediate price pressure; full book captures structural sentiment.
+    Returns None on API error or zero total quantity."""
+    try:
+        q = kite.quote([fut_full]).get(fut_full, {})
+
+        # Top-5 depth imbalance
+        depth   = q.get("depth") or {}
+        buys    = depth.get("buy")  or []
+        sells   = depth.get("sell") or []
+        t5_bid  = sum(b.get("quantity", 0) for b in buys)
+        t5_ask  = sum(s.get("quantity", 0) for s in sells)
+        t5_total = t5_bid + t5_ask
+        t5_imb   = (t5_bid - t5_ask) / t5_total if t5_total > 0 else 0.0
+
+        # Full order-book imbalance (buy_quantity / sell_quantity from Kite)
+        fb_bid   = int(q.get("buy_quantity")  or 0)
+        fb_ask   = int(q.get("sell_quantity") or 0)
+        fb_total = fb_bid + fb_ask
+        fb_imb   = (fb_bid - fb_ask) / fb_total if fb_total > 0 else 0.0
+
+        if t5_total == 0 and fb_total == 0:
+            return None
+
+        combined = _IMBALANCE_TOP5_WEIGHT * t5_imb + _IMBALANCE_FULL_WEIGHT * fb_imb
+        log.info(
+            "%s imbalance: top5=%+.3f (bid=%d ask=%d) "
+            "full=%+.3f (bid=%d ask=%d) → combined=%+.3f",
+            _LOG_PREFIX, t5_imb, t5_bid, t5_ask, fb_imb, fb_bid, fb_ask, combined,
+        )
+        return combined
+    except Exception as exc:
+        log.warning("%s imbalance fetch failed: %s", _LOG_PREFIX, exc)
+        return None
 
 
 def _is_insufficient_funds(exc: BaseException) -> bool:
@@ -161,6 +280,33 @@ def _pick_atm_strike(session: Any, expiry: Any, opt_type: str, F: float) -> Any:
     if not candidates:
         return None
     return min(candidates, key=lambda inst: abs(float(inst.strike or 0) - F))
+
+
+def _pick_itm_strike(session: Any, expiry: Any, opt_type: str, F: float) -> Any:
+    """Return Instrument for the nearest ITM strike for opt_type at futures price F.
+    ITM CE: nearest strike strictly below F (CE goes ITM when F > strike).
+    ITM PE: nearest strike strictly above F (PE goes ITM when F < strike).
+    Returns None if no ITM candidate found in the instruments table."""
+    from app.storage import Instrument
+    candidates = (
+        session.query(Instrument)
+        .filter(
+            Instrument.name == _UNDERLYING,
+            Instrument.instrument_type == opt_type,
+            Instrument.exchange == "MCX",
+            Instrument.expiry == expiry,
+        )
+        .all()
+    )
+    if not candidates:
+        return None
+    if opt_type == "CE":
+        itm = [c for c in candidates if float(c.strike or 0) < F]
+    else:
+        itm = [c for c in candidates if float(c.strike or 0) > F]
+    if not itm:
+        return None
+    return min(itm, key=lambda c: abs(float(c.strike or 0) - F))
 
 
 def _maybe_half_exit(settings: Any, session: Any, kite: Any, positions: list) -> bool:
@@ -622,10 +768,13 @@ def run_delta_hedge_job(settings: Any, session_factory: Any) -> None:
             log.warning("%s no leg deltas computed — skipping", _LOG_PREFIX)
             return
 
-        threshold = float(settings.NG_DELTA_HEDGE_THRESHOLD)
+        threshold, _adx_val, _adx_regime = _adx_threshold(
+            kite, futures, float(settings.NG_DELTA_HEDGE_THRESHOLD)
+        )
         log.info(
-            "%s F=%.2f T=%.4fy net δ=%+.0f mmBtu (threshold=±%.0f)",
+            "%s F=%.2f T=%.4fy net δ=%+.0f mmBtu (threshold=±%.0f ADX=%s regime=%s)",
             _LOG_PREFIX, F, T, total_delta, threshold,
+            f"{_adx_val:.1f}" if _adx_val is not None else "n/a", _adx_regime,
         )
 
         # Profit-lock check: if unrealised >= NG_HALF_EXIT_PNL_TRIGGER, halve
@@ -642,7 +791,40 @@ def run_delta_hedge_job(settings: Any, session_factory: Any) -> None:
         # Straddle ladder runs after half-exit has fired. One rung per tick.
         _maybe_straddle_ladder(settings, session, kite, positions)
 
-        if abs(total_delta) <= threshold:
+        # Pre-hedge: if δ is already 60%+ of threshold AND order-book imbalance
+        # confirms the drift will continue, lower the effective threshold so we
+        # act now rather than waiting for a full breach.
+        effective_threshold = threshold
+        if abs(total_delta) > _PRE_HEDGE_DELTA_PCT * threshold:
+            imbalance = _get_futures_imbalance(kite, fut_full)
+            if imbalance is not None:
+                # Long δ → need to sell CE: bad if bids dominating (price rising)
+                # Short δ → need to sell PE: bad if asks dominating (price falling)
+                bad_direction = (
+                    (total_delta > 0 and imbalance > _PRE_HEDGE_IMBALANCE_THRESH) or
+                    (total_delta < 0 and imbalance < -_PRE_HEDGE_IMBALANCE_THRESH)
+                )
+                if bad_direction:
+                    effective_threshold = _PRE_HEDGE_DELTA_PCT * threshold
+                    log.info(
+                        "%s [PRE-HEDGE] imbalance=%+.3f signals continued drift — "
+                        "eff.threshold %.0f→%.0f mmBtu (δ=%+.0f)",
+                        _LOG_PREFIX, imbalance, threshold, effective_threshold, total_delta,
+                    )
+                    _telegram_notify(
+                        settings,
+                        f"NG δ pre-hedge triggered\n"
+                        f"  imbalance: {imbalance:+.3f} ({'bid-heavy↑' if imbalance>0 else 'ask-heavy↓'})\n"
+                        f"  net δ: {total_delta:+.0f} mmBtu ({abs(total_delta)/threshold*100:.0f}% of threshold)\n"
+                        f"  acting early at eff.threshold={effective_threshold:.0f}",
+                    )
+                else:
+                    log.info(
+                        "%s [PRE-HEDGE] imbalance=%+.3f — no directional bias, holding (δ=%+.0f)",
+                        _LOG_PREFIX, imbalance, total_delta,
+                    )
+
+        if abs(total_delta) <= effective_threshold:
             return
 
         # Pick deficit side: positive δ → sell CE; negative δ → sell PE
@@ -652,9 +834,145 @@ def run_delta_hedge_job(settings: Any, session_factory: Any) -> None:
             log.warning("%s no existing %s legs to add to — skipping (|δ|=%.0f)",
                         _LOG_PREFIX, side, abs(total_delta))
             return
-        # Nearest-ATM (smallest |strike − F|)
+        # Nearest-ATM existing leg (smallest |strike − F|)
         candidates.sort(key=lambda x: abs(float(x[1].strike) - F))
         chosen_sym, chosen_inst, _, chosen_delta_unit, _ = candidates[0]
+        chosen_strike_dist = abs(float(chosen_inst.strike) - F)
+
+        # ITM tilt: prefer an ITM strike to leave residual delta aligned with trend.
+        # PE hedge fires when NG is rising (delta too negative) → ITM PE (strike > F)
+        #   → higher δ per lot → 1 lot sell overshoots neutral → residual positive Δ ✓
+        # CE hedge fires when NG is falling (delta too positive) → ITM CE (strike < F)
+        #   → higher δ per lot → 1 lot sell overshoots neutral → residual negative Δ ✓
+        # Only applies when nearest existing leg is OTM; skip if already ITM.
+        _hedge_switch_note = ""
+        existing_is_itm = (
+            (side == "PE" and float(chosen_inst.strike or 0) > F) or
+            (side == "CE" and float(chosen_inst.strike or 0) < F)
+        )
+        _corridor_switched = existing_is_itm  # treat existing ITM as already optimal
+
+        if not existing_is_itm:
+            itm_inst = _pick_itm_strike(session, opt_expiry, side, F)
+            if itm_inst is not None:
+                try:
+                    itm_ltp = float(
+                        kite.ltp([f"MCX:{itm_inst.tradingsymbol}"])
+                        .get(f"MCX:{itm_inst.tradingsymbol}", {})
+                        .get("last_price") or 0
+                    )
+                except Exception as exc:
+                    log.warning("%s [ITM-TILT] LTP fetch for %s failed: %s",
+                                _LOG_PREFIX, itm_inst.tradingsymbol, exc)
+                    itm_ltp = 0.0
+                if itm_ltp > 0:
+                    itm_res = compute_delta(itm_inst, itm_ltp, F, T)
+                    if itm_res.delta is not None:
+                        itm_dist = abs(float(itm_inst.strike or 0) - F)
+                        log.info(
+                            "%s [ITM-TILT] existing %s is OTM → switching to ITM %s "
+                            "(strike=%.0f, %.1f pts %s F, δ_unit=%+.4f)",
+                            _LOG_PREFIX, chosen_sym, itm_inst.tradingsymbol,
+                            float(itm_inst.strike or 0), itm_dist,
+                            "above" if side == "PE" else "below", itm_res.delta,
+                        )
+                        chosen_sym = itm_inst.tradingsymbol
+                        chosen_inst = itm_inst
+                        chosen_delta_unit = itm_res.delta
+                        chosen_strike_dist = itm_dist
+                        _corridor_switched = True
+                        _hedge_switch_note = (
+                            f"\n  [ITM-tilt] {chosen_sym} "
+                            f"({'above' if side=='PE' else 'below'} F by {itm_dist:.1f}pts)"
+                        )
+                    else:
+                        log.warning("%s [ITM-TILT] delta failed for %s — using existing %s",
+                                    _LOG_PREFIX, itm_inst.tradingsymbol, chosen_sym)
+                else:
+                    log.warning("%s [ITM-TILT] no LTP for %s — using existing %s",
+                                _LOG_PREFIX, itm_inst.tradingsymbol, chosen_sym)
+            else:
+                log.debug("%s [ITM-TILT] no ITM %s instrument found — using existing %s",
+                          _LOG_PREFIX, side, chosen_sym)
+
+        # ATM corridor check: if the nearest existing leg is >_ATM_CORRIDOR_PTS
+        # from F, open a fresh ATM position instead of piling onto the OTM leg.
+        if not _corridor_switched and chosen_strike_dist > _ATM_CORRIDOR_PTS:
+            atm_inst = _pick_atm_strike(session, opt_expiry, side, F)
+            if atm_inst is not None and atm_inst.tradingsymbol != chosen_sym:
+                atm_dist = abs(float(atm_inst.strike) - F)
+                try:
+                    atm_ltp_resp = kite.ltp([f"MCX:{atm_inst.tradingsymbol}"])
+                    atm_ltp = float(
+                        atm_ltp_resp.get(f"MCX:{atm_inst.tradingsymbol}", {}).get("last_price") or 0
+                    )
+                except Exception as exc:
+                    atm_ltp = 0.0
+                    log.warning("%s [CORRIDOR] LTP fetch for %s failed: %s",
+                                _LOG_PREFIX, atm_inst.tradingsymbol, exc)
+                if atm_ltp > 0:
+                    atm_res = compute_delta(atm_inst, atm_ltp, F, T)
+                    if atm_res.delta is not None:
+                        log.info(
+                            "%s [CORRIDOR] nearest existing %s is %.1f pts from F=%.2f "
+                            "(>%.0f corridor) → switching to fresh ATM %s (%.1f pts away, δ_unit=%+.4f)",
+                            _LOG_PREFIX, chosen_sym, chosen_strike_dist, F,
+                            _ATM_CORRIDOR_PTS, atm_inst.tradingsymbol, atm_dist, atm_res.delta,
+                        )
+                        chosen_sym = atm_inst.tradingsymbol
+                        chosen_inst = atm_inst
+                        chosen_delta_unit = atm_res.delta
+                        _corridor_switched = True
+                    else:
+                        log.warning("%s [CORRIDOR] delta failed for ATM %s — using existing %s",
+                                    _LOG_PREFIX, atm_inst.tradingsymbol, chosen_sym)
+                else:
+                    log.warning("%s [CORRIDOR] no LTP for ATM %s — using existing %s",
+                                _LOG_PREFIX, atm_inst.tradingsymbol, chosen_sym)
+            else:
+                log.debug("%s [CORRIDOR] ATM query returned same strike or None — using %s",
+                          _LOG_PREFIX, chosen_sym)
+        else:
+            log.debug("%s [CORRIDOR] nearest existing %s is %.1f pts from F — within corridor",
+                      _LOG_PREFIX, chosen_sym, chosen_strike_dist)
+
+        # Delta-efficiency check: even within the corridor, if the chosen leg's
+        # |δ| < _MIN_HEDGE_DELTA it's too OTM — switch to fresh ATM for better
+        # delta-per-lot and theta. Skipped if corridor already switched target.
+        if not _corridor_switched and abs(chosen_delta_unit) < _MIN_HEDGE_DELTA:
+            atm_inst = _pick_atm_strike(session, opt_expiry, side, F)
+            if atm_inst is not None and atm_inst.tradingsymbol != chosen_sym:
+                try:
+                    atm_ltp_resp = kite.ltp([f"MCX:{atm_inst.tradingsymbol}"])
+                    atm_ltp = float(
+                        atm_ltp_resp.get(f"MCX:{atm_inst.tradingsymbol}", {}).get("last_price") or 0
+                    )
+                except Exception as exc:
+                    atm_ltp = 0.0
+                    log.warning("%s [DELTA-EFF] LTP fetch for %s failed: %s",
+                                _LOG_PREFIX, atm_inst.tradingsymbol, exc)
+                if atm_ltp > 0:
+                    atm_res = compute_delta(atm_inst, atm_ltp, F, T)
+                    if atm_res.delta is not None:
+                        log.info(
+                            "%s [DELTA-EFF] existing %s δ=%+.4f < %.2f threshold "
+                            "→ switching to fresh ATM %s (δ=%+.4f)",
+                            _LOG_PREFIX, chosen_sym, chosen_delta_unit, _MIN_HEDGE_DELTA,
+                            atm_inst.tradingsymbol, atm_res.delta,
+                        )
+                        chosen_sym = atm_inst.tradingsymbol
+                        chosen_inst = atm_inst
+                        chosen_delta_unit = atm_res.delta
+                        _corridor_switched = True  # reuse flag for telegram note
+                    else:
+                        log.warning("%s [DELTA-EFF] delta failed for ATM %s — using existing %s",
+                                    _LOG_PREFIX, atm_inst.tradingsymbol, chosen_sym)
+                else:
+                    log.warning("%s [DELTA-EFF] no LTP for ATM %s — using existing %s",
+                                _LOG_PREFIX, atm_inst.tradingsymbol, chosen_sym)
+            else:
+                log.debug("%s [DELTA-EFF] ATM same as existing or None — keeping %s",
+                          _LOG_PREFIX, chosen_sym)
 
         # Lot sizing: 1 lot if |δ| ≤ 2×threshold, else 2
         lots = 1 if abs(total_delta) <= 2.0 * threshold else 2
@@ -688,7 +1006,96 @@ def run_delta_hedge_job(settings: Any, session_factory: Any) -> None:
         final_qty = qty
         final_added = added_delta
 
-        # Fallback 1: BUY opposite-type option (cheap — only premium, no margin lock).
+        # Fallback 1a: roll deep-OTM same-type leg → fresh ATM sell.
+        # Close 1 lot of the deepest OTM leg (|δ| < 0.25) to free margin,
+        # then SELL ATM same-type for credit + better delta efficiency.
+        # If ATM sell fails after the close, fall through to Fallback 1b.
+        # Skip within 7 days of expiry — ATM theta too low to justify the roll.
+        if mode == "INSUFFICIENT_FUNDS" and T > 7.0 / 365:
+            deep_otm = sorted(
+                [x for x in per_leg if x[0].endswith(side) and abs(x[3]) < 0.25 and x[2] < 0],
+                key=lambda x: abs(x[3]),  # furthest OTM first (lowest |delta|)
+            )
+            if deep_otm:
+                otm_sym, otm_inst, _, otm_delta_unit, _ = deep_otm[0]
+                log.info(
+                    "%s [ROLL] margin blocked; closing deep OTM %s "
+                    "(δ_unit=%+.4f, dist=%.1f pts) to free margin",
+                    _LOG_PREFIX, otm_sym, otm_delta_unit, abs(float(otm_inst.strike) - F),
+                )
+                close_oid, close_mode = _limit_then_market(
+                    kite, otm_inst, "BUY", otm_inst.lot_size, settings
+                )
+                if close_oid is not None:
+                    # Update Position row for the closed OTM leg
+                    otm_pos = (
+                        session.query(Position)
+                        .outerjoin(ClosedTrade, Position.id == ClosedTrade.position_id)
+                        .filter(
+                            Position.tradingsymbol == otm_sym,
+                            Position.exchange == "MCX",
+                            ClosedTrade.id == None,  # noqa: E711
+                        )
+                        .first()
+                    )
+                    if otm_pos is not None:
+                        otm_pos.quantity = otm_pos.quantity + otm_inst.lot_size
+                        otm_pos.last_updated_at = now
+                        session.commit()
+                        log.info("%s [ROLL] OTM Position.id=%d qty→%d",
+                                 _LOG_PREFIX, otm_pos.id, otm_pos.quantity)
+                    # Now sell ATM same-type
+                    atm_inst = _pick_atm_strike(session, opt_expiry, side, F)
+                    if atm_inst is not None:
+                        try:
+                            atm_ltp_val = float(
+                                kite.ltp([f"MCX:{atm_inst.tradingsymbol}"])
+                                .get(f"MCX:{atm_inst.tradingsymbol}", {})
+                                .get("last_price") or 0
+                            )
+                        except Exception as exc:
+                            log.warning("%s [ROLL] LTP for %s failed: %s",
+                                        _LOG_PREFIX, atm_inst.tradingsymbol, exc)
+                            atm_ltp_val = 0.0
+                        atm_delta_unit = None
+                        if atm_ltp_val > 0:
+                            atm_res = compute_delta(atm_inst, atm_ltp_val, F, T)
+                            atm_delta_unit = atm_res.delta
+                        roll_qty = lots * atm_inst.lot_size
+                        roll_oid, roll_mode = _limit_then_market(
+                            kite, atm_inst, "SELL", roll_qty, settings
+                        )
+                        if roll_oid is not None:
+                            roll_added = -roll_qty * (atm_delta_unit or chosen_delta_unit) * lot_mult
+                            roll_projected = total_delta + roll_added
+                            log.info(
+                                "%s [ROLL] success: closed %s + sold %s "
+                                "(δ_unit=%+.4f, added=%+.0f, proj δ=%+.0f)",
+                                _LOG_PREFIX, otm_sym, atm_inst.tradingsymbol,
+                                atm_delta_unit or chosen_delta_unit, roll_added, roll_projected,
+                            )
+                            oid = roll_oid
+                            mode = roll_mode
+                            action_desc = f"ROLL {otm_sym}→SELL {lots}lot {atm_inst.tradingsymbol}"
+                            final_inst = atm_inst
+                            final_side = "SELL"
+                            final_qty = roll_qty
+                            final_added = roll_added
+                            projected_delta = roll_projected
+                        else:
+                            log.warning(
+                                "%s [ROLL] ATM sell %s failed (%s) — falling through to BUY opposite",
+                                _LOG_PREFIX, atm_inst.tradingsymbol, roll_mode,
+                            )
+                    else:
+                        log.warning("%s [ROLL] no ATM instrument — falling through to BUY opposite",
+                                    _LOG_PREFIX)
+                else:
+                    log.warning("%s [ROLL] OTM close %s failed (%s) — falling through to BUY opposite",
+                                _LOG_PREFIX, otm_sym, close_mode)
+
+        # Fallback 1b: BUY opposite-type option (cheap — only premium, no margin lock).
+        # Fires when: no deep-OTM leg exists, roll close failed, or ATM sell failed.
         # Positive δ over threshold → need negative δ → BUY PE.
         # Negative δ over threshold → need positive δ → BUY CE.
         if mode == "INSUFFICIENT_FUNDS":
@@ -806,10 +1213,12 @@ def run_delta_hedge_job(settings: Any, session_factory: Any) -> None:
                 _LOG_PREFIX, final_inst.tradingsymbol, final_qty, final_side,
             )
 
+        _adx_str = f"ADX={_adx_val:.1f} ({_adx_regime})" if _adx_val is not None else f"regime={_adx_regime}"
         _telegram_notify(
             settings,
-            f"NG δ-hedge: {action_desc} ({mode})\n"
+            f"NG δ-hedge: {action_desc} ({mode}){_hedge_switch_note}\n"
             f"  net δ before: {total_delta:+.0f} mmBtu\n"
             f"  net δ after (est): {projected_delta:+.0f} mmBtu\n"
+            f"  threshold: ±{threshold:.0f} mmBtu [{_adx_str}]\n"
             f"  order_id: {oid}",
         )

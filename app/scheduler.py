@@ -508,10 +508,10 @@ def make_scheduler(
             trigger="cron",
             day_of_week="mon-fri",
             hour="9-23",
-            minute="2,7,12,17,22,27,32,37,42,47,52,57",
+            minute="*",
             kwargs={"settings": settings, "session_factory": session_factory},
             id="ng_delta_hedge",
-            misfire_grace_time=60,
+            misfire_grace_time=30,
             max_instances=1,  # never overlap if a tick runs long
         )
         scheduler.add_job(
@@ -527,7 +527,7 @@ def make_scheduler(
         )
         log.info("[scheduler] P&L snapshot cron: every 5 min, Mon-Fri 09-23 IST")
         log.info(
-            "[scheduler] NG delta-hedge cron: every 5 min @ :02/:07/.../:57 IST, "
+            "[scheduler] NG delta-hedge cron: every 1 min IST, "
             "Mon-Fri 09-23 (threshold=±%.0f mmBtu, limit_wait=%ds, enabled=%s via .env default, "
             "live-controllable at /control)",
             settings.NG_DELTA_HEDGE_THRESHOLD,
