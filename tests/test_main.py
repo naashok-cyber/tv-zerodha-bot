@@ -261,6 +261,9 @@ def test_control_page_renders_dashboard_sections(client) -> None:
     assert "id='eq-chart'" in html
     assert "class='hm'" in html
     assert "window.__snaps=" in html
+    # straddle defense: card + toggle + annunciator pill
+    assert "Straddle Defense" in html
+    assert "/control/straddle-defense/toggle" in html
 
 
 def test_control_summary_endpoint_shape(client) -> None:

@@ -526,6 +526,28 @@ def make_scheduler(
             max_instances=1,
         )
         log.info("[scheduler] P&L snapshot cron: every 5 min, Mon-Fri 09-23 IST")
+        # Always registered; the job checks state.is_straddle_defense_enabled()
+        # each tick so it can be started/stopped live from /control.
+        from app.straddle_defense import straddle_defense_job
+        scheduler.add_job(
+            straddle_defense_job,
+            trigger="cron",
+            day_of_week="mon-fri",
+            hour="9-23",
+            minute="*",
+            kwargs={"settings": settings, "session_factory": session_factory},
+            id="straddle_defense",
+            misfire_grace_time=30,
+            max_instances=1,
+        )
+        log.info(
+            "[scheduler] straddle-defense monitor: every 1 min, Mon-Fri 09-23 IST "
+            "(alert-only; trigger=₹%.0f drawdown + %d rising IV samples, enabled=%s "
+            "via .env default, live-controllable at /control)",
+            settings.STRADDLE_DEFENSE_DRAWDOWN_TRIGGER,
+            settings.STRADDLE_DEFENSE_IV_SAMPLES,
+            settings.STRADDLE_DEFENSE_ENABLED,
+        )
         log.info(
             "[scheduler] NG delta-hedge cron: every 1 min IST, "
             "Mon-Fri 09-23 (threshold=±%.0f mmBtu, limit_wait=%ds, enabled=%s via .env default, "

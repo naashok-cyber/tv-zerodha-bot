@@ -191,6 +191,22 @@ class ClosedTrade(Base):
     position: Mapped[Position] = relationship("Position", back_populates="closed_trade")
 
 
+class IvSnapshot(Base):
+    """Per-minute straddle MTM + mean leg IV — written by straddle_defense_job.
+
+    The IV series is the expansion-confirmation signal (rising for N samples);
+    MTM feeds the drawdown-from-peak trigger and the /control defense card."""
+
+    __tablename__ = "iv_snapshots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    underlying: Mapped[str] = mapped_column(String(32), nullable=False)
+    straddle_key: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    mtm: Mapped[float | None] = mapped_column(Float)
+    iv_pct: Mapped[float | None] = mapped_column(Float)
+
+
 class PnlSnapshot(Base):
     """Intraday P&L sample — written every 5 min by the scheduler during market
     hours to power the /control Today-card sparkline."""

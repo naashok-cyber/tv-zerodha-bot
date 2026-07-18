@@ -144,12 +144,24 @@ def compute_portfolio_greeks(session: Any, kite: Any, settings: Any,
                 if sid:
                     grp = straddles.setdefault(sid, {
                         "underlying": pos.underlying, "legs": [],
-                        "net_delta_per_lot": 0.0,
+                        "net_delta_per_lot": 0.0, "mtm": 0.0,
+                        "_ivs": [], "_sides": [],
                     })
                     grp["legs"].append(pos.tradingsymbol)
                     grp["net_delta_per_lot"] = round(
                         grp["net_delta_per_lot"] + sign * g.delta, 3)
+                    if pnl is not None:
+                        grp["mtm"] = round(grp["mtm"] + pnl)
+                    if g.iv:
+                        grp["_ivs"].append(g.iv)
+                    grp["_sides"].append(order.transaction_type)
         out_rows.append(entry)
+
+    for grp in straddles.values():
+        ivs = grp.pop("_ivs", [])
+        sides = grp.pop("_sides", [])
+        grp["iv_mean_pct"] = round(sum(ivs) / len(ivs) * 100.0, 2) if ivs else None
+        grp["short"] = bool(sides) and all(s == "SELL" for s in sides)
 
     return {
         "positions": out_rows,

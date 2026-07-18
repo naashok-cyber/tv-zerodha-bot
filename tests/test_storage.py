@@ -41,6 +41,7 @@ EXPECTED_TABLES = {
     "commodity_recommendation_decisions",
     "commodity_trade_journal",
     "pnl_snapshots",
+    "iv_snapshots",
 }
 
 

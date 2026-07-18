@@ -3228,6 +3228,9 @@ def _todays_schedule(settings: Settings) -> tuple[str, str]:
                 add(exit_hhmm, f"{und} window straddle exit", ws_on)
     add(settings.EXPIRY_DAY_SQUAREOFF_TIME, "Expiry-day squareoff", True, "expiry days only")
     add(settings.NSE_SQUAREOFF_TIME, "NSE EOD squareoff")
+    if settings.STRADDLE_DEFENSE_PREHEDGE_TIME:
+        add(settings.STRADDLE_DEFENSE_PREHEDGE_TIME, "Straddle-defense pre-hedge window",
+            state.is_straddle_defense_enabled(settings.STRADDLE_DEFENSE_ENABLED), "reminder")
     sched_on = settings.SCHEDULED_STRADDLE_ENABLED
     add(settings.NG_STRADDLE_TIME,
         f"NATURALGAS straddle &times;{settings.NG_STRADDLE_QTY}", sched_on,
@@ -3547,6 +3550,8 @@ async def control_page(
         return (f"<span class='pill {'pg' if on else 'pm'}'><span class='sdot'></span>"
                 f"{label} {'ON' if on else 'OFF'}</span>")
 
+    sd_enabled = state.is_straddle_defense_enabled(settings.STRADDLE_DEFENSE_ENABLED)
+
     strip_html = (
         "<div class='strip'>"
         + f"<span class='pill {paper_pill}'><span class='sdot'></span>{paper_label}</span>"
@@ -3555,10 +3560,54 @@ async def control_page(
         + spill("Trailing", eff_trailing)
         + spill("Window straddle", ws_enabled)
         + spill("NG hedge", hedge_enabled)
+        + spill("Defense", sd_enabled)
         + spill("Sched. straddle", settings.SCHEDULED_STRADDLE_ENABLED)
         + spill("Voice", voice_on)
         + (f"<span class='pill pa'><span class='sdot'></span>{n_ovr} overrides</span>" if n_ovr else "")
         + "</div>"
+    )
+
+    # ── straddle defense card ────────────────────────────────────────────────
+    sd_trigger = settings.STRADDLE_DEFENSE_DRAWDOWN_TRIGGER
+    sd_rows: list = []
+    if sd_enabled:
+        try:
+            from app.straddle_defense import current_status as _sd_status
+            sd_rows = _sd_status(session, settings)
+        except Exception as exc:
+            log.warning("straddle-defense status unavailable: %s", exc)
+    if not sd_enabled:
+        sd_body = ("<div style='padding:13px 16px;font-size:.78em;color:#8E8E93'>"
+                   "Monitor stopped &mdash; start it under Background Jobs.</div>")
+    elif not sd_rows:
+        sd_body = ("<div style='padding:13px 16px;font-size:.78em;color:#8E8E93'>"
+                   "Watching &mdash; no short straddles tracked today yet.</div>")
+    else:
+        sd_parts = []
+        for r in sd_rows:
+            dd = r["drawdown"] or 0.0
+            sd_pct = min(dd / sd_trigger * 100, 100) if sd_trigger else 0
+            sd_bar, sd_vc = _bar(sd_pct)
+            iv_txt = f"{r['iv_pct']:.1f}%" if r["iv_pct"] is not None else "&mdash;"
+            arrow = " &#9650; rising" if r["iv_rising"] else ""
+            upd = r["at"].astimezone(IST).strftime("%H:%M") if r["at"].tzinfo else r["at"].strftime("%H:%M")
+            sd_parts.append(
+                f"<div class='mr'><div class='ml'>{r['underlying']}</div>"
+                f"<div class='mw'><div class='mb {sd_bar}' style='width:{sd_pct:.0f}%'></div></div>"
+                f"<div class='mv {sd_vc}'>&minus;&#8377;{dd:,.0f}&thinsp;/&thinsp;&#8377;{sd_trigger:,.0f}</div></div>"
+                f"<div style='padding:0 16px 9px;font-size:.7em;color:#8E8E93'>"
+                f"MTM {inr(r['mtm']) if r['mtm'] is not None else '&mdash;'}"
+                f" &middot; peak {inr(r['peak']) if r['peak'] is not None else '&mdash;'}"
+                f" &middot; IV {iv_txt}{arrow}"
+                f" &middot; alerts {r['alerts']}/{settings.STRADDLE_DEFENSE_MAX_ALERTS_PER_DAY}"
+                f" &middot; {upd}</div>"
+            )
+        sd_body = "".join(sd_parts)
+    sd_card = (
+        "<div class='card'><div class='ct'>Straddle Defense"
+        "<span style='margin-left:auto;text-transform:none;letter-spacing:0;color:#8E8E93'>"
+        "drawdown vs trigger &middot; alert-only</span></div>"
+        + sd_body + "</div>"
     )
 
     body = (
@@ -3604,6 +3653,8 @@ async def control_page(
         + f"<span id='next-job' style='margin-left:auto;text-transform:none;letter-spacing:0;"
         + f"color:#0040DD'>{('next: ' + next_label) if next_label else ''}</span>"
         + "</div>" + rail_html + "</div>"
+
+        + sd_card
 
         # commodity intelligence — filled by _CONTROL_LIVE_JS
         + "<div class='card'><div class='ct'>Commodity Intelligence"
@@ -3653,6 +3704,10 @@ async def control_page(
         + "<span style='font-size:.70em;color:#8E8E93'>&ensp;5-min cron &middot; incl. half-exit, BNF SL, straddle ladder</span></div>"
         + "<form method='post' action='/control/ng-hedge/toggle' style='margin:0'>"
         + f"<button class='btn {hedge_cls}' type='submit'>{hedge_lbl}</button></form></div>"
+        + f"<div class='mdr'><div class='mdl'>Straddle Defense&ensp;<span class='pill {'pg' if sd_enabled else 'pr'}'>{'RUNNING' if sd_enabled else 'STOPPED'}</span>"
+        + "<span style='font-size:.70em;color:#8E8E93'>&ensp;1-min monitor &middot; alert-only &middot; drawdown+IV trigger</span></div>"
+        + "<form method='post' action='/control/straddle-defense/toggle' style='margin:0'>"
+        + f"<button class='btn {'br2' if sd_enabled else 'bg2'}' type='submit'>{'Stop' if sd_enabled else 'Start'}</button></form></div>"
         + "</div>"
 
         # risk params — collapsible drawer; summary shows effective values
@@ -3833,6 +3888,26 @@ async def toggle_ng_hedge(
         )
     except Exception as exc:
         log.warning("NG delta-hedge toggle: telegram notify failed: %s", exc)
+    return Response(status_code=302, headers={"Location": "/control"})
+
+
+@app.post("/control/straddle-defense/toggle")
+async def toggle_straddle_defense(
+    _: None = Depends(_auth_guard),
+    settings: Settings = Depends(get_current_settings),
+) -> Response:
+    from app.commodity_agents.notify import send_telegram
+
+    new_val = state.toggle_straddle_defense_enabled(settings.STRADDLE_DEFENSE_ENABLED)
+    log.warning("straddle-defense monitor toggled to %s via /control", new_val)
+    try:
+        send_telegram(
+            settings,
+            f"\U0001f6e1 Straddle Defense monitor {'STARTED' if new_val else 'STOPPED'} via /control "
+            f"(alert-only)",
+        )
+    except Exception as exc:
+        log.warning("straddle-defense toggle: telegram notify failed: %s", exc)
     return Response(status_code=302, headers={"Location": "/control"})
 
 

@@ -224,6 +224,14 @@ class Settings(BaseSettings):
     NG_STRADDLE_ADX_THRESHOLD: float = 25.0   # skip if ADX >= this
     STRADDLE_SQUAREOFF_TIME: str = "23:20"    # HH:MM IST
 
+    # ── Straddle defense (Phase 1: monitor + Telegram alerts, NO execution) ──
+    STRADDLE_DEFENSE_ENABLED: bool = False           # live-toggleable at /control
+    STRADDLE_DEFENSE_DRAWDOWN_TRIGGER: float = 5000.0  # ₹ drawdown from peak straddle MTM
+    STRADDLE_DEFENSE_IV_SAMPLES: int = 3             # consecutive rising IV deltas to confirm expansion
+    STRADDLE_DEFENSE_MAX_ALERTS_PER_DAY: int = 2     # per straddle; hysteresis
+    STRADDLE_DEFENSE_REARM_MINUTES: int = 20         # quiet period after an alert
+    STRADDLE_DEFENSE_PREHEDGE_TIME: str = "17:45"    # daily pre-hedge reminder (IST; "" disables)
+
     # ── ADX (for scheduled straddle gate) ─────────────────────────────────────
     ADX_PERIOD: int = 14
     ADX_CANDLE_INTERVAL: str = "10minute"     # Kite interval string for historical candles
