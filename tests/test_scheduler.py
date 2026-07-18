@@ -378,3 +378,66 @@ class TestSessionInvalidGate:
             order = session.query(Order).filter_by(alert_id=alert_id).first()
         assert order is not None
         assert order.dry_run is True
+
+
+# ── pnl_snapshot_job ──────────────────────────────────────────────────────────
+
+class TestPnlSnapshotJob:
+    def test_records_realized_with_null_mtm_when_no_kite(self):
+        """Snapshot rows are written even without a Kite session: realised P&L
+        from today's ClosedTrade rows, open_mtm null."""
+        from datetime import timedelta
+        from app.scheduler import pnl_snapshot_job
+        from app.storage import ClosedTrade, PnlSnapshot, Position, Order, Alert
+
+        engine = create_engine(
+            "sqlite:///:memory:",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        Base.metadata.create_all(engine)
+        factory = sessionmaker(bind=engine, expire_on_commit=False)
+
+        now = datetime.now(IST)
+        with factory() as session:
+            alert = Alert(
+                received_at=now, strategy_id="t", tv_ticker="NIFTY",
+                tv_exchange="NSE", action="BUY", product="NRML",
+                idempotency_key="snap-test-1", raw_payload="{}",
+            )
+            session.add(alert)
+            session.flush()
+            order = Order(
+                alert_id=alert.id, variety="regular", exchange="NFO",
+                tradingsymbol="NIFTY25JUL24800PE", transaction_type="SELL",
+                order_type="MARKET", product="NRML", quantity=75,
+                status="COMPLETE", placed_at=now, updated_at=now,
+            )
+            session.add(order)
+            session.flush()
+            pos = Position(
+                order_id=order.id, exchange="NFO",
+                tradingsymbol="NIFTY25JUL24800PE", underlying="NIFTY",
+                instrument_type="PE", quantity=75, entry_premium=100.0,
+                current_sl=115.0, lot_size=75, opened_at=now,
+                last_updated_at=now,
+            )
+            session.add(pos)
+            session.flush()
+            session.add(ClosedTrade(
+                position_id=pos.id, exchange="NFO",
+                tradingsymbol="NIFTY25JUL24800PE", entry_premium=100.0,
+                exit_premium=80.0, pnl=1500.0, exit_reason="TARGET_HIT",
+                opened_at=now - timedelta(hours=2), closed_at=now,
+            ))
+            session.commit()
+
+        with patch("app.scheduler.get_session_manager",
+                   side_effect=RuntimeError("no kite")):
+            pnl_snapshot_job(factory, _s())
+
+        with factory() as session:
+            rows = session.query(PnlSnapshot).all()
+        assert len(rows) == 1
+        assert rows[0].realized == 1500.0
+        assert rows[0].open_mtm is None

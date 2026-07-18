@@ -229,6 +229,57 @@ def test_dashboard_returns_200(client) -> None:
     assert "Recent Alerts" in resp.text
 
 
+def test_control_page_renders_dashboard_sections(client) -> None:
+    """Phase-1 /control layout: annunciator strip, Today hero, live-positions
+    card, schedule rail, collapsible risk-params drawer, positions JS."""
+    c, _ = client
+    with patch("app.main.get_session_manager") as mock_factory:
+        mock_factory.return_value.get_token_info.return_value = {
+            "is_valid": False, "age_hours": None, "reason": "no token",
+        }
+        resp = c.get("/control")
+    assert resp.status_code == 200
+    html = resp.text
+    assert "class='strip'" in html            # annunciator strip
+    assert "hero-pnl" in html                 # Today P&L hero
+    assert "Open Positions" in html
+    assert "id='pos-wrap'" in html
+    assert "Today's Schedule" in html
+    assert "class='rail'" in html
+    assert "<details class='cfgd card'>" in html
+    assert "/commodity-agents/portfolio-greeks" in html  # live-greeks fetch
+    # merged nav links to the commodity-agents pages
+    assert "/commodity-agents/dashboard" in html
+    assert "/commodity-agents/desk" in html
+    # phase 2: commodity cards, activity feed, live summary poll (no meta refresh)
+    assert "id='ca-grid'" in html
+    assert "id='feed'" in html
+    assert "/api/control/summary" in html
+    assert "http-equiv='refresh'" not in html
+    # phase 3: performance tiles, equity chart, heatmap, sparkline seed
+    assert "Performance &mdash; 90 days" in html
+    assert "id='eq-chart'" in html
+    assert "class='hm'" in html
+    assert "window.__snaps=" in html
+
+
+def test_control_summary_endpoint_shape(client) -> None:
+    c, _ = client
+    with patch("app.main.get_session_manager") as mock_factory:
+        mock_factory.return_value.get_token_info.return_value = {
+            "is_valid": True, "age_hours": 2.0, "reason": "",
+        }
+        resp = c.get("/api/control/summary")
+    assert resp.status_code == 200
+    body = resp.json()
+    for key in ("realized", "today_loss", "max_loss", "trades_today", "max_trades",
+                "open_positions", "max_positions", "consec_losses", "consec_limit",
+                "paper", "emergency_stop", "trade_mode", "session_valid", "next_label"):
+        assert key in body
+    assert body["session_valid"] is True
+    assert body["paper"] is True
+
+
 def test_health_returns_ok(client) -> None:
     c, _ = client
     resp = c.get("/health")

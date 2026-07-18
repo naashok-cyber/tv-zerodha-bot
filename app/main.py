@@ -34,7 +34,7 @@ from app.kite_session import get_session_manager
 from app.orders import cancel_gtt, modify_gtt, place_entry, place_gtt_oco, square_off
 from app.scheduler import daily_session_check, get_last_checked_at, make_scheduler, refresh_instruments_job
 from app.storage import (
-    Alert, AppError, ClosedTrade, Gtt, Instrument, Order, Position,
+    Alert, AppError, ClosedTrade, Gtt, Instrument, Order, PnlSnapshot, Position,
     WebSession, _register_factory, init_db,
 )
 from app.strike_selector import NoValidStrikeError, select_strike
@@ -78,6 +78,13 @@ def _realised_loss_today(session: Any) -> float:
         .all()
     )
     return abs(sum(r[0] for r in rows))
+
+
+def _realised_pnl_today(session: Any) -> float:
+    """Net realised P&L (signed ₹) from ClosedTrade rows closed today IST."""
+    today_start = datetime.now(IST).replace(hour=0, minute=0, second=0, microsecond=0)
+    rows = session.query(ClosedTrade.pnl).filter(ClosedTrade.closed_at >= today_start).all()
+    return float(sum(r[0] for r in rows if r[0] is not None))
 
 
 def _open_position_count(session: Any) -> int:
@@ -2199,7 +2206,387 @@ _CSS = (
     "tr:last-child td{border-bottom:none}"
     "tbody tr:hover td{background:#F9F9FB}"
     ".tc{text-align:center}.tr{text-align:right}"
+
+    # ── Annunciator strip (system-state pills) ────────────────────────────────
+    ".strip{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:14px}"
+    ".strip .pill{gap:5px}"
+    ".sdot{width:6px;height:6px;border-radius:50%;background:currentColor;flex-shrink:0}"
+
+    # ── Today hero (P&L) ──────────────────────────────────────────────────────
+    ".hero-pnl{font-size:2.1em;font-weight:700;letter-spacing:-.02em;"
+    "font-variant-numeric:tabular-nums;padding:12px 16px 2px}"
+    ".hero-sub{display:flex;gap:14px;flex-wrap:wrap;padding:4px 16px 14px;"
+    "font-size:.76em;color:#636366}"
+    ".hero-sub b{font-weight:600;font-variant-numeric:tabular-nums}"
+
+    # ── Schedule rail ─────────────────────────────────────────────────────────
+    ".rail{list-style:none}"
+    ".rail li{display:flex;gap:10px;align-items:baseline;padding:8px 16px;"
+    "font-size:.8em;border-bottom:.5px solid rgba(0,0,0,.05)}"
+    ".rail li:last-child{border-bottom:none}"
+    ".rail .rt{color:#8E8E93;width:46px;flex-shrink:0;font-weight:600;font-variant-numeric:tabular-nums}"
+    ".rail .re{flex:1;color:#3A3A3C;font-weight:500}"
+    ".rail .rs{font-size:.9em;color:#8E8E93;white-space:nowrap}"
+    ".r-done .re,.r-done .rt{color:#AEAEB2}"
+    ".r-done .rs{color:#248A3D}"
+    ".r-next{background:rgba(0,122,255,.07)}"
+    ".r-next .rt,.r-next .re,.r-next .rs{color:#0040DD}"
+    ".r-off .re,.r-off .rt{color:#C7C7CC}"
+
+    # ── Config drawer ─────────────────────────────────────────────────────────
+    "details.cfgd summary{list-style:none;cursor:pointer}"
+    "details.cfgd summary::-webkit-details-marker{display:none}"
+    "details.cfgd summary .ct::after{content:'\\25B8';margin-left:auto;color:#8E8E93;"
+    "transition:transform .2s}"
+    "details.cfgd[open] summary .ct::after{transform:rotate(90deg)}"
+    ".cfg-sum{padding:10px 16px 12px;font-size:.76em;color:#636366;line-height:1.6}"
+    ".cfg-sum b{color:#1C1C1E;font-weight:600}"
+    "details.cfgd[open] .cfg-sum{display:none}"
+
+    # ── Activity feed ─────────────────────────────────────────────────────────
+    ".fchips{display:flex;gap:6px;flex-wrap:wrap;padding:10px 16px 4px}"
+    ".fchip{font-size:.7em;font-weight:600;border-radius:20px;padding:3px 11px;"
+    "cursor:pointer;background:#F2F2F7;color:#636366;border:none}"
+    ".fchip.on{background:#007AFF;color:#fff}"
+    ".feed{list-style:none;padding:6px 0 8px}"
+    ".feed li{display:flex;gap:9px;align-items:baseline;padding:7px 16px;"
+    "font-size:.78em;border-bottom:.5px solid rgba(0,0,0,.05)}"
+    ".feed li:last-child{border-bottom:none}"
+    ".feed .ft{color:#8E8E93;width:74px;flex-shrink:0;font-variant-numeric:tabular-nums}"
+    ".ftag{flex-shrink:0;font-size:.82em;font-weight:700;letter-spacing:.04em;"
+    "border-radius:5px;padding:1px 7px;width:48px;text-align:center}"
+    ".ft-alert{background:rgba(255,149,0,.12);color:#C93400}"
+    ".ft-order{background:rgba(0,122,255,.1);color:#0040DD}"
+    ".ft-gtt{background:rgba(88,86,214,.1);color:#3634A3}"
+    ".ft-exit{background:rgba(52,199,89,.12);color:#248A3D}"
+    ".ft-err{background:rgba(255,59,48,.12);color:#D70015}"
+    ".feed .fe{flex:1;color:#3A3A3C;overflow-wrap:anywhere}"
+    ".fdim{color:#8E8E93}"
+
+    # ── Commodity intelligence cards ──────────────────────────────────────────
+    ".cagrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));"
+    "gap:10px;padding:12px 16px 16px}"
+    ".cacard{background:#F9F9FB;border:.5px solid rgba(0,0,0,.06);border-radius:10px;padding:11px 12px}"
+    ".cacard .cah{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px}"
+    ".cacard .cah b{font-size:.84em}"
+    ".cakv{display:grid;grid-template-columns:1fr auto;gap:2px 10px;font-size:.72em;color:#8E8E93}"
+    ".cakv span:nth-child(even){color:#3A3A3C;text-align:right;font-variant-numeric:tabular-nums;font-weight:600}"
+    ".cabtns{display:flex;gap:6px;margin-top:9px;flex-wrap:wrap}"
+    ".cabtns .btn{padding:5px 11px;font-size:.72em}"
+
+    # ── Performance ───────────────────────────────────────────────────────────
+    ".tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(115px,1fr));"
+    "gap:8px;padding:12px 16px 6px}"
+    ".tile{background:#F2F2F7;border-radius:10px;padding:9px 12px}"
+    ".tile .tv2{font-size:1.02em;font-weight:700;font-variant-numeric:tabular-nums}"
+    ".tile .tl2{font-size:.62em;color:#8E8E93;text-transform:uppercase;"
+    "letter-spacing:.06em;margin-top:2px;font-weight:600}"
+    ".hmwrap{padding:2px 16px 16px}"
+    ".hmlbl{font-size:.66em;color:#8E8E93;font-weight:600;text-transform:uppercase;"
+    "letter-spacing:.06em;margin:8px 0 6px}"
+    ".hm{display:grid;grid-template-columns:repeat(6,26px);gap:4px}"
+    ".hm div{width:26px;height:26px;border-radius:5px;background:#F2F2F7}"
 )
+
+# ── /control live script ──────────────────────────────────────────────────────
+# One inline library for the control page: live positions + hero MTM (30s),
+# summary poll → meters/pills/next-job (30s), schedule-rail re-marking,
+# commodity intelligence cards with inline approve/reject (5 min), intraday
+# sparkline + equity curve, and activity-feed filters.
+# The page seeds window.__realized/__estop/__paper/__mode/__snaps/__perf first.
+_CONTROL_LIVE_JS = r"""
+<script>
+(function(){
+'use strict';
+function $(i){return document.getElementById(i)}
+var MTM=null;
+function updateHero(){
+var nEl=$('hero-net');if(!nEl)return;
+var net=window.__realized+(MTM==null?0:MTM);
+nEl.innerHTML=inr(net);
+nEl.className='hero-pnl '+(net>0?'ok':(net<0?'bd':''))}
+function inr(x){if(x==null)return '—';
+var s=x>0?'+':(x<0?'−':'');
+return s+'₹'+Math.abs(Math.round(x)).toLocaleString('en-IN')}
+function num(x,d){return x==null?'—':Number(x).toFixed(d==null?1:d)}
+function esc(s){return (s==null?'':String(s)).replace(/[&<>"]/g,function(c){
+return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]})}
+function loadPositions(){
+fetch('/commodity-agents/portfolio-greeks').then(function(r){
+if(r.status===503)throw new Error('No Kite session — live greeks unavailable');
+if(!r.ok)throw new Error('Live positions unavailable (HTTP '+r.status+')');
+return r.json()}).then(function(d){
+var w=document.getElementById('pos-wrap');if(!w)return;
+if(!d.positions.length){
+w.innerHTML='<div style="padding:13px 16px;font-size:.78em;color:#8E8E93">No open option positions.</div>';
+}else{
+var h='<table><thead><tr><th>Symbol</th><th>Side</th><th class="tr">Qty</th>'+
+'<th class="tr">Entry</th><th class="tr">LTP</th><th class="tr">P&amp;L</th>'+
+'<th class="tr">SL</th><th class="tr">Δ</th><th class="tr">Θ/day</th></tr></thead><tbody>';
+d.positions.forEach(function(p){
+var pc=p.pnl==null?'':(p.pnl>=0?' ok':' bd');
+h+='<tr><td>'+esc(p.tradingsymbol)+'</td><td>'+esc(p.side)+'</td>'+
+'<td class="tr">'+p.quantity+'</td><td class="tr">'+num(p.entry_price,2)+'</td>'+
+'<td class="tr">'+num(p.ltp,2)+'</td>'+
+'<td class="tr'+pc+'" style="font-weight:600">'+inr(p.pnl)+'</td>'+
+'<td class="tr">'+num(p.sl,2)+'</td><td class="tr">'+num(p.delta,3)+'</td>'+
+'<td class="tr">'+inr(p.theta_per_day)+'</td></tr>'});
+h+='</tbody></table>';
+var chips=Object.keys(d.straddles||{}).map(function(k){
+var g=d.straddles[k];var bad=Math.abs(g.net_delta_per_lot)>=0.2;
+return '<span class="pill '+(bad?'pr':'pg')+'">'+esc(g.underlying)+
+' straddle Δ '+(g.net_delta_per_lot>0?'+':'')+g.net_delta_per_lot+'/lot</span>'}).join(' ');
+var t=d.totals||{};var mg='';
+if(d.margins){mg=Object.keys(d.margins).map(function(seg){
+return seg+' ₹'+Math.round(d.margins[seg].net).toLocaleString('en-IN')+' free'}).join(' · ')}
+h+='<div style="padding:10px 16px 13px;font-size:.74em;color:#636366">'+
+(chips?chips+'<br>':'')+
+'Book Δ '+num(t.net_delta_units)+' · vega '+num(t.net_vega)+
+' · θ '+inr(t.net_theta_per_day)+'/day'+(mg?' · '+mg:'')+'</div>';
+w.innerHTML=h;}
+var t2=d.totals||{};
+MTM=t2.open_mtm!=null?t2.open_mtm:(d.positions.length?null:0);
+var mEl=$('hero-mtm');var tEl=$('hero-theta');
+if(tEl)tEl.innerHTML=t2.net_theta_per_day!=null?inr(t2.net_theta_per_day)+'/day':'₹0/day';
+if(mEl&&MTM!=null){mEl.innerHTML=inr(MTM);mEl.className=MTM>=0?'ok':'bd'}
+updateHero();
+}).catch(function(e){
+var m=document.getElementById('pos-msg');if(m)m.textContent=e.message;});
+}
+
+/* ── summary poll: meters, kite pill, next job, rail, updated-at ── */
+function inru(x){return '₹'+Math.abs(Math.round(x)).toLocaleString('en-IN')}
+function barCls(p){return p>=100?'bbd':(p>=60?'bwn':'bok')}
+function valCls(p){return p>=100?'bd':(p>=60?'wn':'ok')}
+function setMeter(key,cur,max,money){
+var b=$('m-'+key+'-b'),v=$('m-'+key+'-v');if(!b||!v)return;
+var p=max>0?cur/max*100:0;
+b.className='mb '+barCls(p);b.style.width=Math.min(p,100).toFixed(0)+'%';
+v.className='mv '+valCls(p);
+v.innerHTML=money?(inru(cur)+' / '+inru(max)):(cur+' / '+max)}
+function remarkRail(){
+var lis=document.querySelectorAll('.rail li[data-t]');
+var now=new Date();var nowM=now.getHours()*60+now.getMinutes();
+var nextFound=false;
+lis.forEach(function(li){
+if(li.getAttribute('data-en')!=='1')return;
+var t=parseInt(li.getAttribute('data-t'),10);
+var rs=li.querySelector('.rs');
+if(t<=nowM){li.className='r-done';if(rs)rs.innerHTML='✓'}
+else if(!nextFound){nextFound=true;li.className='r-next';if(rs)rs.innerHTML='● next'}
+else{li.className='';if(rs)rs.innerHTML='–'}})}
+function poll(){
+fetch('/api/control/summary').then(function(r){if(!r.ok)throw 0;return r.json()})
+.then(function(d){
+if(d.emergency_stop!==window.__estop||d.paper!==window.__paper||
+d.trade_mode!==window.__mode){location.reload();return}
+window.__realized=d.realized;updateHero();
+var rl=$('hero-real');if(rl){rl.innerHTML=inr(d.realized);
+rl.className=d.realized>0?'ok':(d.realized<0?'bd':'')}
+setMeter('loss',Math.round(d.today_loss),Math.round(d.max_loss),true);
+setMeter('trades',d.trades_today,d.max_trades,false);
+setMeter('pos',d.open_positions,d.max_positions,false);
+setMeter('consec',d.consec_losses,d.consec_limit,false);
+var k=$('pill-kite');if(k){k.className='pill '+(d.session_valid?'pg':'pr');
+k.innerHTML='<span class="sdot"></span>Kite '+(d.session_valid?'OK':'INVALID')}
+var nx=$('next-job');if(nx)nx.textContent=d.next_label?('next: '+d.next_label):'';
+remarkRail();
+var lut=$('lut');if(lut)lut.textContent='Updated '+new Date().toLocaleTimeString();
+}).catch(function(){})}
+
+/* ── commodity intelligence cards ── */
+var CA='/commodity-agents';var caPending={};
+function caBadge(rec){
+if(!rec)return '<span class="pill pm">NO DATA</span>';
+if(rec.risk_vetoed)return '<span class="pill pa">RISK VETO</span>';
+var cls=rec.direction==='SELL'?'pr':(rec.direction==='BUY'?'pg':'pm');
+var txt=rec.direction==='NO_TRADE'?'NO TRADE':rec.direction;
+if(rec.status&&rec.status!=='PROPOSED')txt+=' · '+rec.status;
+return '<span class="pill '+cls+'">'+esc(txt)+'</span>'}
+function caSpark(pts){
+if(!pts||pts.length<2)return '';
+var w=200,h=34,min=Math.min.apply(null,pts),max=Math.max.apply(null,pts);
+var pp=pts.map(function(v,i){
+return (i*(w-4)/(pts.length-1)+2).toFixed(1)+','+
+(h-3-(max>min?(v-min)/(max-min):0.5)*(h-6)).toFixed(1)}).join(' ');
+return '<svg viewBox="0 0 '+w+' '+h+'" style="width:100%;height:'+h+'px;display:block;margin-top:7px">'+
+'<polyline points="'+pp+'" fill="none" stroke="#007AFF" stroke-width="1.6" stroke-linejoin="round"/></svg>'}
+function caMsg(m){var e=$('ca-msg');if(e){e.textContent=m;
+setTimeout(function(){e.textContent=''},6000)}}
+window.caDecide=function(id,action,btn){
+var body={recommendation_id:id,action:action};
+var p=caPending[id];
+if(p&&p.action===action){body.confirm_token=p.token;body.lots=parseInt(p.lots,10)||1}
+fetch(CA+'/decision',{method:'POST',headers:{'Content-Type':'application/json'},
+body:JSON.stringify(body)})
+.then(function(r){return r.json().then(function(j){return {ok:r.ok,j:j}})})
+.then(function(res){
+if(!res.ok){caMsg(res.j.detail||'error');return}
+if(res.j.status==='confirm_required'){
+caPending[id]={action:action,token:res.j.confirm_token,
+lots:btn.getAttribute('data-lots')||1};
+btn.textContent='CONFIRM '+action.toUpperCase();return}
+delete caPending[id];
+caMsg(action.toUpperCase()+' recorded — '+res.j.status+
+(res.j.note?' ('+res.j.note+')':''));
+loadCommodities()}).catch(function(){caMsg('network error')})};
+function renderCA(coms,d,ivs){
+var g=$('ca-grid');if(!g)return;var out='';
+coms.forEach(function(c,i){
+var rec=(d.recommendations||{})[c];var iv=ivs[i];
+var pts=((iv&&iv.points)||[]).map(function(p){return p.iv*100});
+var last=(iv&&iv.points&&iv.points.length)?iv.points[iv.points.length-1]:null;
+var tr=iv&&iv.iv_trend;var arrow='',trTxt='';
+if(tr&&tr.direction==='expanding'){arrow=' ▲';trTxt='expanding'}
+else if(tr&&tr.direction==='contracting'){arrow=' ▼';trTxt='contracting'}
+else if(tr&&tr.direction==='stable'){arrow=' →';trTxt='stable'}
+var kv='<div class="cakv">'+
+'<span>ATM IV</span><span>'+(last?num(last.iv*100,1)+'%'+arrow:'—')+'</span>'+
+(trTxt?'<span>IV trend</span><span>'+trTxt+
+(tr.change_pct!=null?' '+(tr.change_pct>0?'+':'')+tr.change_pct+'%':'')+'</span>':'')+
+'<span>VRP</span><span>'+(last&&last.vrp!=null?
+((last.vrp>0?'+':'')+num(last.vrp*100,1)+' pts'):'—')+'</span>'+
+(rec&&rec.confidence!=null?'<span>Confidence</span><span>'+
+Math.round(rec.confidence*100)+'%</span>':'')+
+(rec&&rec.suggested_lots!=null?'<span>Size</span><span>'+rec.suggested_lots+
+' lot'+(rec.suggested_lots===1?'':'s')+'</span>':'')+
+'</div>';
+var btns='<div class="cabtns">';
+if(rec&&rec.status==='PROPOSED'&&!rec.risk_vetoed&&rec.direction!=='NO_TRADE'){
+btns+='<button class="btn bg2" data-lots="'+(rec.suggested_lots||1)+
+'" onclick="caDecide('+rec.id+',\'approve\',this)">Approve</button>'+
+'<button class="btn br2" onclick="caDecide('+rec.id+',\'reject\',this)">Reject</button>'}
+btns+='<a class="btn bm" style="text-decoration:none" href="'+CA+'/analyze?t='+c+'">Analyze</a></div>';
+var summary=(rec&&rec.reasoning_summary)?
+'<div style="font-size:.7em;color:#636366;margin-top:6px">'+
+esc(rec.reasoning_summary.slice(0,140))+'</div>':'';
+out+='<div class="cacard"><div class="cah"><b>'+esc(c)+'</b>'+caBadge(rec)+'</div>'+
+kv+caSpark(pts)+summary+btns+'</div>'});
+g.innerHTML=out||'<div style="font-size:.78em;color:#8E8E93">No commodities configured.</div>'}
+function loadCommodities(){
+if(!$('ca-grid'))return;
+fetch(CA+'/recommendations').then(function(r){if(!r.ok)throw 0;return r.json()})
+.then(function(d){
+var coms=Object.keys(d.recommendations||{});
+Promise.all(coms.map(function(c){
+return fetch(CA+'/'+c+'/iv-history?limit=40')
+.then(function(r){return r.ok?r.json():null}).catch(function(){return null})}))
+.then(function(ivs){renderCA(coms,d,ivs)})})
+.catch(function(){var g=$('ca-grid');
+if(g)g.innerHTML='<div style="font-size:.78em;color:#8E8E93">Commodity agents unavailable.</div>'})}
+
+/* ── intraday sparkline (Today card) ── */
+function daySpark(){
+var box=$('day-spark');var s=window.__snaps||[];
+if(!box||s.length<2)return;
+var w=460,h=52,vals=s.map(function(p){return p[1]});
+var min=Math.min.apply(null,vals.concat([0])),max=Math.max.apply(null,vals.concat([0]));
+if(max===min)max=min+1;
+var X=function(i){return 4+i*(w-58)/(vals.length-1)};
+var Y=function(v){return h-5-(v-min)/(max-min)*(h-10)};
+var pp=vals.map(function(v,i){return X(i).toFixed(1)+','+Y(v).toFixed(1)}).join(' ');
+var lastV=vals[vals.length-1];var col=lastV>=0?'#34C759':'#FF3B30';
+var svg='<svg viewBox="0 0 '+w+' '+h+'" style="width:100%;height:'+h+'px;display:block">';
+if(min<0&&max>0)svg+='<line x1="4" y1="'+Y(0).toFixed(1)+'" x2="'+(w-54)+
+'" y2="'+Y(0).toFixed(1)+'" stroke="rgba(0,0,0,.12)" stroke-dasharray="3 3"/>';
+svg+='<polyline points="'+pp+'" fill="none" stroke="'+col+
+'" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>';
+var lx=X(vals.length-1),ly=Y(lastV);
+svg+='<circle cx="'+lx.toFixed(1)+'" cy="'+ly.toFixed(1)+'" r="3" fill="'+col+
+'" stroke="#fff" stroke-width="1.5"/>';
+svg+='<text x="'+(lx+7).toFixed(1)+'" y="'+(ly+3.5).toFixed(1)+
+'" style="font-size:10px;fill:#636366">'+inr(lastV)+'</text></svg>';
+box.innerHTML=svg}
+
+/* ── equity curve (Performance card) ── */
+function eqChart(){
+var box=$('eq-chart');if(!box)return;
+var days=(window.__perf||{}).days||[];
+if(days.length<2){box.innerHTML='<div style="padding:0 16px 14px;font-size:.76em;'+
+'color:#8E8E93">Not enough closed trades yet — the curve appears after a few sessions.</div>';return}
+var cum=[];var c=0;
+days.forEach(function(d){c+=d[1];cum.push(c)});
+var w=560,h=180,pl=46,pr=14,pt=10,pb=20;
+var min=Math.min.apply(null,cum.concat([0])),max=Math.max.apply(null,cum.concat([0]));
+if(max===min)max=min+1;
+var X=function(i){return pl+i*(w-pl-pr)/(cum.length-1)};
+var Y=function(v){return pt+(1-(v-min)/(max-min))*(h-pt-pb)};
+var NS='http://www.w3.org/2000/svg';
+function mk(n,a){var e=document.createElementNS(NS,n);
+for(var k in a)e.setAttribute(k,a[k]);return e}
+var svg=mk('svg',{viewBox:'0 0 '+w+' '+h});
+svg.style.width='100%';svg.style.display='block';
+for(var i=0;i<=4;i++){
+var gv=min+(max-min)*i/4;
+svg.appendChild(mk('line',{x1:pl,y1:Y(gv),x2:w-pr,y2:Y(gv),stroke:'rgba(0,0,0,.06)'}));
+var t=mk('text',{x:pl-6,y:Y(gv)+3.5,'text-anchor':'end'});
+t.style.cssText='font-size:9.5px;fill:#8E8E93';
+t.textContent=Math.abs(gv)>=1000?(gv/1000).toFixed(1)+'k':Math.round(gv);
+svg.appendChild(t)}
+if(min<0&&max>0)svg.appendChild(mk('line',{x1:pl,y1:Y(0),x2:w-pr,y2:Y(0),stroke:'rgba(0,0,0,.2)'}));
+var line=cum.map(function(v,i){return X(i).toFixed(1)+','+Y(v).toFixed(1)}).join(' ');
+var y0=Y(Math.max(min,0));
+svg.appendChild(mk('polygon',{points:pl+','+y0+' '+line+' '+X(cum.length-1)+','+y0,
+fill:'rgba(0,122,255,.10)'}));
+svg.appendChild(mk('polyline',{points:line,fill:'none',stroke:'#007AFF',
+'stroke-width':2,'stroke-linejoin':'round'}));
+var li=cum.length-1;
+svg.appendChild(mk('circle',{cx:X(li),cy:Y(cum[li]),r:3.5,fill:'#007AFF',
+stroke:'#fff','stroke-width':2}));
+var lt=mk('text',{x:X(li)-6,y:Y(cum[li])-8,'text-anchor':'end'});
+lt.style.cssText='font-size:10.5px;font-weight:700;fill:#1C1C1E';
+lt.textContent=inr(cum[li]);svg.appendChild(lt);
+var MO=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+[0,Math.floor(days.length/2),days.length-1].forEach(function(ix){
+var t2=mk('text',{x:X(ix),y:h-5,
+'text-anchor':ix===0?'start':(ix===days.length-1?'end':'middle')});
+t2.style.cssText='font-size:9.5px;fill:#8E8E93';
+var dd=new Date(days[ix][0]);
+t2.textContent=dd.getDate()+' '+MO[dd.getMonth()];
+svg.appendChild(t2)});
+var tip=$('eq-tip');
+if(!tip){tip=document.createElement('div');tip.id='eq-tip';
+tip.style.cssText='position:fixed;pointer-events:none;background:#fff;'+
+'border:.5px solid rgba(0,0,0,.15);border-radius:7px;padding:5px 9px;'+
+'font-size:12px;color:#1C1C1E;box-shadow:0 2px 8px rgba(0,0,0,.12);'+
+'display:none;z-index:50';
+document.body.appendChild(tip)}
+var cross=mk('line',{y1:pt,y2:h-pb,stroke:'rgba(0,0,0,.25)',visibility:'hidden'});
+var dot=mk('circle',{r:3.5,fill:'#007AFF',stroke:'#fff','stroke-width':2,visibility:'hidden'});
+svg.appendChild(cross);svg.appendChild(dot);
+svg.addEventListener('mousemove',function(ev){
+var r=svg.getBoundingClientRect();
+var fx=(ev.clientX-r.left)/r.width*w;
+var i2=Math.round((fx-pl)/((w-pl-pr)/(cum.length-1)));
+i2=Math.max(0,Math.min(cum.length-1,i2));
+cross.setAttribute('x1',X(i2));cross.setAttribute('x2',X(i2));
+cross.setAttribute('visibility','visible');
+dot.setAttribute('cx',X(i2));dot.setAttribute('cy',Y(cum[i2]));
+dot.setAttribute('visibility','visible');
+tip.style.display='block';tip.style.left=(ev.clientX+12)+'px';
+tip.style.top=(ev.clientY-8)+'px';
+tip.innerHTML=days[i2][0]+' · day '+inr(days[i2][1])+' · cum '+inr(cum[i2])});
+svg.addEventListener('mouseleave',function(){
+cross.setAttribute('visibility','hidden');dot.setAttribute('visibility','hidden');
+tip.style.display='none'});
+box.innerHTML='';box.appendChild(svg)}
+
+/* ── activity-feed filters ── */
+document.querySelectorAll('.fchip').forEach(function(ch){
+ch.addEventListener('click',function(){
+document.querySelectorAll('.fchip').forEach(function(x){x.classList.remove('on')});
+ch.classList.add('on');
+var f=ch.getAttribute('data-f');
+document.querySelectorAll('#feed li').forEach(function(li){
+li.style.display=(f==='all'||li.getAttribute('data-k')===f)?'':'none'})})});
+
+loadPositions();setInterval(loadPositions,30000);
+poll();setInterval(poll,30000);
+loadCommodities();setInterval(loadCommodities,300000);
+daySpark();eqChart();remarkRail();setInterval(remarkRail,60000);
+})();
+</script>
+"""
 
 # ── Quick Trade panel — injected at top of /control ───────────────────────────
 _QUICK_TRADE_PANEL = """
@@ -2530,27 +2917,35 @@ checkChannel();renderLog();loadPendingOrders();
 """
 
 
-def _shell(active: str, content: str, wide: bool = False, refresh: bool = False) -> str:
-    """Wrap page content in the shared header / nav / CSS."""
-    pages = [("control","Control"),("orders","Orders"),("gtts","GTTs"),
-             ("history","History"),("dashboard","Alerts")]
+def _shell(active: str, content: str, wide: bool = False, refresh: bool = False,
+           live: bool = False) -> str:
+    """Wrap page content in the shared header / nav / CSS.
+
+    refresh=True adds a 120s meta-refresh; live=True shows the updated-at
+    stamp without the meta refresh (the page polls its own JSON instead).
+    """
+    pages = [("/control","Control","control"),("/orders","Orders","orders"),
+             ("/gtts","GTTs","gtts"),("/history","History","history"),
+             ("/dashboard","Alerts","dashboard"),
+             ("/commodity-agents/dashboard","Agents","agents"),
+             ("/commodity-agents/desk","Desk","desk")]
     nav = "".join(
-        "<a href='/" + p + "'" + (" class='on'" if p == active else "") + ">" + lbl + "</a>"
-        for p, lbl in pages
+        "<a href='" + href + "'" + (" class='on'" if key == active else "") + ">" + lbl + "</a>"
+        for href, lbl, key in pages
     )
     wrap_cls = "wrap wrap-lg" if wide else "wrap wrap-sm"
     refresh_meta = "<meta http-equiv='refresh' content='120'>" if refresh else ""
     lut_html = (
         "<span id='lut' style='font-size:.68em;color:rgba(255,255,255,.35);"
         "margin-left:auto;padding:10px 14px;white-space:nowrap'></span>"
-        if refresh else ""
+        if (refresh or live) else ""
     )
     lut_js = (
         "<script>window.addEventListener('load',function(){"
         "var e=document.getElementById('lut');"
         "if(e)e.textContent='Updated '+new Date().toLocaleTimeString();})"
         "</script>"
-        if refresh else ""
+        if (refresh or live) else ""
     )
     return (
         "<!DOCTYPE html><html lang='en'><head>"
@@ -2801,6 +3196,77 @@ async def toggle_stock_mode(
 # ── /control — unified dashboard ──────────────────────────────────────────────
 
 
+def _todays_schedule(settings: Settings) -> tuple[str, str]:
+    """Render today's automated-job rail for /control.
+
+    Returns (rail_html, next_label) where next_label describes the first
+    upcoming enabled job ("NATURALGAS straddle ×1 in 41m") or "" if none left.
+    """
+    from app.window_straddle import WINDOW_STRADDLE_CFG
+
+    now = datetime.now(IST)
+    today_wd = now.weekday()
+
+    items: list[tuple[int, str, str, bool, str]] = []
+
+    def add(hhmm: str, label: str, enabled: bool = True, note: str = "") -> None:
+        try:
+            h, m = str(hhmm).split(":")
+            t = int(h) * 60 + int(m)
+        except (ValueError, AttributeError):
+            return
+        items.append((t, f"{int(h):02d}:{int(m):02d}", label, enabled, note))
+
+    add(settings.KITE_AUTO_LOGIN_TIME, "Kite auto-login", settings.PYOTP_AUTO_LOGIN)
+    add(f"{settings.SCHEDULER_HOUR_IST:02d}:{settings.SCHEDULER_MINUTE_IST:02d}", "Session check")
+    add("08:30", "Instrument refresh")
+    ws_on = state.is_window_straddle_enabled()
+    for und, cfg in WINDOW_STRADDLE_CFG.items():
+        for entry_hhmm, exit_hhmm, allowed_days in cfg["windows"]:
+            if today_wd in allowed_days:
+                add(entry_hhmm, f"{und} window straddle &times;{cfg['qty']}", ws_on)
+                add(exit_hhmm, f"{und} window straddle exit", ws_on)
+    add(settings.EXPIRY_DAY_SQUAREOFF_TIME, "Expiry-day squareoff", True, "expiry days only")
+    add(settings.NSE_SQUAREOFF_TIME, "NSE EOD squareoff")
+    sched_on = settings.SCHEDULED_STRADDLE_ENABLED
+    add(settings.NG_STRADDLE_TIME,
+        f"NATURALGAS straddle &times;{settings.NG_STRADDLE_QTY}", sched_on,
+        f"ADX&lt;{settings.NG_STRADDLE_ADX_THRESHOLD:g} gate")
+    add(settings.STRADDLE_SQUAREOFF_TIME, "Sched. straddle squareoff", sched_on)
+    add(settings.MCX_SQUAREOFF_TIME, "MCX EOD squareoff")
+
+    items.sort(key=lambda it: (it[0], it[2]))
+    now_m = now.hour * 60 + now.minute
+
+    rows: list[str] = []
+    next_label = ""
+    for t, hhmm, label, enabled, note in items:
+        if not enabled:
+            cls, status = "r-off", "off"
+        elif t <= now_m:
+            cls, status = "r-done", "&#x2713;"
+        elif not next_label:
+            cls, status = "r-next", "&#x25CF; next"
+            dt_min = t - now_m
+            plain = label.replace("&times;", "×")
+            next_label = (f"{plain} in {dt_min // 60}h {dt_min % 60:02d}m"
+                          if dt_min >= 60 else f"{plain} in {dt_min}m")
+        else:
+            cls, status = "", "&ndash;"
+        note_html = f" <span style='color:#AEAEB2'>&middot; {note}</span>" if note else ""
+        rows.append(
+            f"<li class='{cls}' data-t='{t}' data-en='{1 if enabled else 0}'>"
+            f"<span class='rt'>{hhmm}</span>"
+            f"<span class='re'>{label}{note_html}</span>"
+            f"<span class='rs'>{status}</span></li>"
+        )
+    weekend = (
+        "<li><span class='rt'></span><span class='re' style='color:#C93400'>"
+        "Weekend &mdash; markets closed; cron jobs idle</span><span class='rs'></span></li>"
+        if today_wd >= 5 else ""
+    )
+    return "<ul class='rail'>" + weekend + "".join(rows) + "</ul>", next_label
+
 
 @app.get("/control")
 async def control_page(
@@ -2884,6 +3350,11 @@ async def control_page(
     ws_label    = "ON" if ws_enabled else "OFF"
     ws_lbl      = "Disable" if ws_enabled else "Enable"
     ws_cls      = "ba" if ws_enabled else "bg2"
+    hedge_enabled = state.is_ng_hedge_enabled(settings.NG_DELTA_HEDGE_ENABLED)
+    hedge_pill    = "pg" if hedge_enabled else "pr"
+    hedge_label   = "RUNNING" if hedge_enabled else "STOPPED"
+    hedge_lbl     = "Stop"    if hedge_enabled else "Start"
+    hedge_cls     = "br2"     if hedge_enabled else "bg2"
 
     def src(key: str) -> str:
         return (
@@ -2919,43 +3390,230 @@ async def control_page(
         sess_pill  = "pr"
         sess_label = f"Invalid &mdash; {sess_reason}" if sess_reason else "Invalid"
 
-    # ── errors: last 48 h ─────────────────────────────────────────────────────
-    err_cutoff = datetime.now(IST) - timedelta(hours=48)
-    errors = (
-        session.query(AppError)
-        .filter(AppError.occurred_at >= err_cutoff)
-        .order_by(AppError.occurred_at.desc())
-        .limit(20)
+    # ── activity feed: alerts / orders / GTTs / exits / errors, last 48 h ────
+    feed_cutoff = datetime.now(IST) - timedelta(hours=48)
+
+    def _fts(ts: datetime) -> datetime:
+        return ts if ts.tzinfo is not None else ts.replace(tzinfo=IST)
+
+    def _hesc(s: str | None) -> str:
+        return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+    feed: list[tuple[datetime, str, str]] = []
+    for a in (session.query(Alert).filter(Alert.received_at >= feed_cutoff)
+              .order_by(Alert.received_at.desc()).limit(30)):
+        feed.append((_fts(a.received_at), "alert",
+                     f"{_hesc(a.action)} {_hesc(a.tv_ticker)}"
+                     f" <span class='fdim'>&middot; {_hesc(a.strategy_id)}</span>"))
+    for o in (session.query(Order).filter(Order.placed_at >= feed_cutoff)
+              .order_by(Order.placed_at.desc()).limit(30)):
+        fill = f" @ {o.fill_price:.2f}" if o.fill_price else ""
+        feed.append((_fts(o.placed_at), "order",
+                     f"{_hesc(o.transaction_type)} {_hesc(o.tradingsymbol)} &times;{o.quantity}"
+                     f" <span class='fdim'>&middot; {_hesc(o.status)}{fill}</span>"))
+    for g in (session.query(Gtt).filter(Gtt.placed_at >= feed_cutoff)
+              .order_by(Gtt.placed_at.desc()).limit(30)):
+        feed.append((_fts(g.placed_at), "gtt",
+                     f"OCO {_hesc(g.tradingsymbol)} <span class='fdim'>&middot; "
+                     f"SL {g.sl_trigger:g} / tgt {g.target_trigger:g}"
+                     f" &middot; {_hesc(g.status)}</span>"))
+    for t in (session.query(ClosedTrade).filter(ClosedTrade.closed_at >= feed_cutoff)
+              .order_by(ClosedTrade.closed_at.desc()).limit(30)):
+        t_pnl = t.pnl or 0
+        feed.append((_fts(t.closed_at), "exit",
+                     f"{_hesc(t.tradingsymbol)} closed "
+                     f"<b class='{'ok' if t_pnl >= 0 else 'bd'}'>"
+                     f"{'+' if t_pnl >= 0 else '&minus;'}&#8377;{abs(t_pnl):,.0f}</b>"
+                     f" <span class='fdim'>&middot; {_hesc(t.exit_reason)}</span>"))
+    for e in (session.query(AppError).filter(AppError.occurred_at >= feed_cutoff)
+              .order_by(AppError.occurred_at.desc()).limit(30)):
+        feed.append((_fts(e.occurred_at), "err",
+                     f"{_hesc(e.error_type)} <span class='fdim'>&middot; "
+                     f"{_hesc((e.message or '')[:120])}</span>"))
+    feed.sort(key=lambda it: it[0], reverse=True)
+    feed = feed[:30]
+    _FTAG = {"alert": "ALERT", "order": "ORDER", "gtt": "GTT", "exit": "EXIT", "err": "ERR"}
+    feed_html = "".join(
+        f"<li data-k='{kind}'>"
+        f"<span class='ft'>{ts.astimezone(IST).strftime('%d %b %H:%M')}</span>"
+        f"<span class='ftag ft-{kind}'>{_FTAG[kind]}</span>"
+        f"<span class='fe'>{msg}</span></li>"
+        for ts, kind, msg in feed
+    ) or ("<li><span class='fe' style='text-align:center;color:#aaa'>"
+          "No activity in the last 48h</span></li>")
+
+    # ── performance: last 90 days of closed trades ───────────────────────────
+    perf_cutoff = datetime.now(IST) - timedelta(days=90)
+    closed_rows = (
+        session.query(ClosedTrade.closed_at, ClosedTrade.pnl)
+        .filter(ClosedTrade.closed_at >= perf_cutoff)
+        .order_by(ClosedTrade.closed_at.asc())
         .all()
     )
-    errors_html = "".join(
-        f"<tr><td style='color:#8492a6;white-space:nowrap'>"
-        f"{e.occurred_at.astimezone(IST).strftime('%m/%d %H:%M')}</td>"
-        f"<td>{e.error_type}</td>"
-        f"<td style='max-width:260px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis'>"
-        f"{e.message[:140]}</td></tr>"
-        for e in errors
-    ) or "<tr><td colspan='3' style='text-align:center;color:#aaa'>No errors in last 48h</td></tr>"
+    daily_pnl: dict[str, float] = {}
+    pnls: list[float] = []
+    for ts, pnl in closed_rows:
+        if pnl is None:
+            continue
+        day_key = _fts(ts).astimezone(IST).date().isoformat()
+        daily_pnl[day_key] = daily_pnl.get(day_key, 0.0) + pnl
+        pnls.append(pnl)
+    n_trades = len(pnls)
+    wins = [p for p in pnls if p > 0]
+    gross_w = sum(wins)
+    gross_l = abs(sum(p for p in pnls if p < 0))
+    win_rate = len(wins) / n_trades * 100 if n_trades else None
+    profit_factor = gross_w / gross_l if gross_l > 0 else None
+    expectancy = sum(pnls) / n_trades if n_trades else None
+    _cum = _peak = 0.0
+    max_dd = 0.0
+    for p in pnls:
+        _cum += p
+        _peak = max(_peak, _cum)
+        max_dd = min(max_dd, _cum - _peak)
+    perf_days = sorted((k, round(v)) for k, v in daily_pnl.items())
+
+    def _tile(val: str, label: str, cls: str = "") -> str:
+        return (f"<div class='tile'><div class='tv2 {cls}'>{val}</div>"
+                f"<div class='tl2'>{label}</div></div>")
+
+    tiles_html = (
+        _tile(f"{win_rate:.0f}%" if win_rate is not None else "&mdash;", "win rate")
+        + _tile(f"{profit_factor:.2f}" if profit_factor is not None else "&mdash;", "profit factor")
+        + _tile((f"{'+' if expectancy > 0 else ('&minus;' if expectancy < 0 else '')}"
+                 f"&#8377;{abs(expectancy):,.0f}") if expectancy is not None else "&mdash;",
+                "expectancy / trade",
+                "ok" if (expectancy or 0) > 0 else ("bd" if (expectancy or 0) < 0 else ""))
+        + _tile(f"&minus;&#8377;{abs(max_dd):,.0f}" if max_dd < 0 else "&#8377;0",
+                "max drawdown", "bd" if max_dd < 0 else "")
+        + _tile(f"{n_trades}", "closed trades")
+    )
+
+    # P&L calendar: 6 ISO weeks × Mon–Fri, server-rendered cells
+    today_d = datetime.now(IST).date()
+    monday = today_d - timedelta(days=today_d.weekday())
+    hm_weeks = [monday - timedelta(weeks=w) for w in range(5, -1, -1)]
+    hm_max = max((abs(v) for v in daily_pnl.values()), default=0.0)
+    hm_cells: list[str] = []
+    for dow in range(5):
+        for wk in hm_weeks:
+            d = wk + timedelta(days=dow)
+            v = daily_pnl.get(d.isoformat())
+            if d > today_d or v is None:
+                hm_cells.append(f"<div title='{d.strftime('%d %b')}'></div>")
+            else:
+                alpha = 0.2 + 0.8 * min(1.0, abs(v) / hm_max) if hm_max else 0.2
+                colour = (f"rgba(52,199,89,{alpha:.2f})" if v > 0
+                          else (f"rgba(255,59,48,{alpha:.2f})" if v < 0 else ""))
+                style = f" style='background:{colour}'" if colour else ""
+                sign = "+" if v > 0 else ("-" if v < 0 else "")
+                hm_cells.append(
+                    f"<div{style} title='{d.strftime('%d %b')} &middot; "
+                    f"{sign}&#8377;{abs(v):,.0f}'></div>")
+    hm_html = "<div class='hm'>" + "".join(hm_cells) + "</div>"
+
+    # ── intraday P&L snapshots (today) for the hero sparkline ────────────────
+    _snap_start = datetime.now(IST).replace(hour=0, minute=0, second=0, microsecond=0)
+    snaps = [
+        [_fts(r.at).astimezone(IST).strftime("%H:%M"),
+         round(r.realized + (r.open_mtm or 0.0))]
+        for r in (session.query(PnlSnapshot)
+                  .filter(PnlSnapshot.at >= _snap_start)
+                  .order_by(PnlSnapshot.at.asc()).all())
+    ]
+
+    # ── today hero / annunciator / schedule rail ──────────────────────────────
+    from app.voice.config import is_voice_enabled
+
+    def inr(v: float) -> str:
+        sign = "+" if v > 0 else ("&minus;" if v < 0 else "")
+        return f"{sign}&#8377;{abs(v):,.0f}"
+
+    realized = _realised_pnl_today(session)
+    realized_cls = "ok" if realized > 0 else ("bd" if realized < 0 else "")
+    loss_headroom = max(eff_max_loss - today_loss, 0)
+    voice_on = is_voice_enabled()
+    rail_html, next_label = _todays_schedule(settings)
+
+    _ovr_keys = [
+        "max_lots", "max_daily_loss", "sl_pct", "rr_ratio", "daily_profit_target",
+        "sell_options_profit_pct", "entry_window_start", "entry_window_end",
+        "no_entry_on_expiry_day", "max_trades_per_day", "max_open_positions",
+        "capital_per_trade", "consecutive_losses_limit", "adx_threshold",
+    ]
+    n_ovr = sum(1 for k in _ovr_keys if overrides.get(k) is not None)
+
+    def spill(label: str, on: bool) -> str:
+        return (f"<span class='pill {'pg' if on else 'pm'}'><span class='sdot'></span>"
+                f"{label} {'ON' if on else 'OFF'}</span>")
+
+    strip_html = (
+        "<div class='strip'>"
+        + f"<span class='pill {paper_pill}'><span class='sdot'></span>{paper_label}</span>"
+        + f"<span class='pill {sess_pill}' id='pill-kite'><span class='sdot'></span>Kite {'OK' if sess_valid else 'INVALID'}</span>"
+        + f"<span class='pill {mode_pill}'><span class='sdot'></span>{mode_display}</span>"
+        + spill("Trailing", eff_trailing)
+        + spill("Window straddle", ws_enabled)
+        + spill("NG hedge", hedge_enabled)
+        + spill("Sched. straddle", settings.SCHEDULED_STRADDLE_ENABLED)
+        + spill("Voice", voice_on)
+        + (f"<span class='pill pa'><span class='sdot'></span>{n_ovr} overrides</span>" if n_ovr else "")
+        + "</div>"
+    )
 
     body = (
-        _QUICK_TRADE_PANEL
-        + stop_banner
+        stop_banner
+        + strip_html
+
+        # today hero — realised is server-rendered; MTM/theta filled by JS
+        + "<div class='card'><div class='ct'>Today</div>"
+        + f"<div class='hero-pnl {realized_cls}' id='hero-net'>{inr(realized)}</div>"
+        + "<div class='hero-sub'>"
+        + f"<span>Realized <b id='hero-real' class='{realized_cls}'>{inr(realized)}</b></span>"
+        + "<span>Open MTM <b id='hero-mtm'>&mdash;</b></span>"
+        + "<span>&Theta;/day <b id='hero-theta'>&mdash;</b></span>"
+        + f"<span>Loss budget left <b>&#8377;{loss_headroom:,.0f}</b></span>"
+        + "</div>"
+        + "<div id='day-spark' style='padding:0 16px 12px'></div>"
+        + "</div>"
 
         # risk summary
         + "<div class='card'><div class='ct'>Today's Risk Summary</div>"
         + f"<div class='mr'><div class='ml'>Daily loss</div>"
-        + f"<div class='mw'><div class='mb {loss_bar}' style='width:{loss_pct_c:.0f}%'></div></div>"
-        + f"<div class='mv {loss_vc}'>&#x20B9;{today_loss:.0f}&thinsp;/&thinsp;&#x20B9;{eff_max_loss:.0f}</div></div>"
+        + f"<div class='mw'><div class='mb {loss_bar}' id='m-loss-b' style='width:{loss_pct_c:.0f}%'></div></div>"
+        + f"<div class='mv {loss_vc}' id='m-loss-v'>&#x20B9;{today_loss:.0f}&thinsp;/&thinsp;&#x20B9;{eff_max_loss:.0f}</div></div>"
         + f"<div class='mr'><div class='ml'>Trades today</div>"
-        + f"<div class='mw'><div class='mb {trades_bar}' style='width:{min(trades_pct,100):.0f}%'></div></div>"
-        + f"<div class='mv {trades_vc}'>{trades_today}&thinsp;/&thinsp;{eff_max_trades}</div></div>"
+        + f"<div class='mw'><div class='mb {trades_bar}' id='m-trades-b' style='width:{min(trades_pct,100):.0f}%'></div></div>"
+        + f"<div class='mv {trades_vc}' id='m-trades-v'>{trades_today}&thinsp;/&thinsp;{eff_max_trades}</div></div>"
         + f"<div class='mr'><div class='ml'>Open positions</div>"
-        + f"<div class='mw'><div class='mb {pos_bar}' style='width:{min(pos_pct,100):.0f}%'></div></div>"
-        + f"<div class='mv {pos_vc}'>{open_pos}&thinsp;/&thinsp;{eff_max_positions}</div></div>"
+        + f"<div class='mw'><div class='mb {pos_bar}' id='m-pos-b' style='width:{min(pos_pct,100):.0f}%'></div></div>"
+        + f"<div class='mv {pos_vc}' id='m-pos-v'>{open_pos}&thinsp;/&thinsp;{eff_max_positions}</div></div>"
         + f"<div class='mr'><div class='ml'>Consec. losses</div>"
-        + f"<div class='mw'><div class='mb {consec_bar}' style='width:{min(consec_pct,100):.0f}%'></div></div>"
-        + f"<div class='mv {consec_vc}'>{consec}&thinsp;/&thinsp;{eff_consec_limit}</div></div>"
+        + f"<div class='mw'><div class='mb {consec_bar}' id='m-consec-b' style='width:{min(consec_pct,100):.0f}%'></div></div>"
+        + f"<div class='mv {consec_vc}' id='m-consec-v'>{consec}&thinsp;/&thinsp;{eff_consec_limit}</div></div>"
         + "</div>"
+
+        # open positions — filled by _POSITIONS_JS from /commodity-agents/portfolio-greeks
+        + "<div class='card'><div class='ct'>Open Positions &mdash; Live Greeks</div>"
+        + "<div id='pos-wrap' style='overflow-x:auto'>"
+        + "<div id='pos-msg' style='padding:13px 16px;font-size:.78em;color:#8E8E93'>"
+        + "Loading live positions&hellip;</div></div></div>"
+
+        # today's schedule rail
+        + "<div class='card'><div class='ct'>Today's Schedule"
+        + f"<span id='next-job' style='margin-left:auto;text-transform:none;letter-spacing:0;"
+        + f"color:#0040DD'>{('next: ' + next_label) if next_label else ''}</span>"
+        + "</div>" + rail_html + "</div>"
+
+        # commodity intelligence — filled by _CONTROL_LIVE_JS
+        + "<div class='card'><div class='ct'>Commodity Intelligence"
+        + "<span id='ca-msg' style='margin-left:auto;text-transform:none;letter-spacing:0;"
+        + "color:#636366'></span></div>"
+        + "<div class='cagrid' id='ca-grid'>"
+        + "<div style='font-size:.78em;color:#8E8E93'>Loading commodity data&hellip;</div>"
+        + "</div></div>"
+
+        + _QUICK_TRADE_PANEL
 
         # kite session
         + "<div class='card'><div class='ct'>Kite Session</div>"
@@ -2989,8 +3647,26 @@ async def control_page(
         + f"<button class='btn bfull {estop_cls}' type='submit'>{estop_lbl}</button>"
         + "</form></div></div>"
 
-        # risk params
-        + "<div class='card'><div class='ct'>Risk Parameters</div>"
+        # background jobs
+        + "<div class='card'><div class='ct'>Background Jobs</div>"
+        + f"<div class='mdr'><div class='mdl'>NG Delta Hedge&ensp;<span class='pill {hedge_pill}'>{hedge_label}</span>"
+        + "<span style='font-size:.70em;color:#8E8E93'>&ensp;5-min cron &middot; incl. half-exit, BNF SL, straddle ladder</span></div>"
+        + "<form method='post' action='/control/ng-hedge/toggle' style='margin:0'>"
+        + f"<button class='btn {hedge_cls}' type='submit'>{hedge_lbl}</button></form></div>"
+        + "</div>"
+
+        # risk params — collapsible drawer; summary shows effective values
+        + "<details class='cfgd card'><summary>"
+        + "<div class='ct'>Risk Parameters"
+        + (f"<span class='pill pa' style='margin-left:8px'>{n_ovr} overridden</span>" if n_ovr else "")
+        + "</div>"
+        + "<div class='cfg-sum'>"
+        + f"lots <b>{eff_max_lots}</b> &middot; loss cap <b>&#8377;{eff_max_loss:,.0f}</b>"
+        + f" &middot; SL <b>{eff_sl_pct*100:g}%</b> &middot; R:R <b>{eff_rr:.1f}&times;</b>"
+        + f" &middot; capital <b>&#8377;{eff_capital:,.0f}</b>"
+        + f" &middot; window <b>{eff_entry_start}&ndash;{eff_entry_end}</b>"
+        + " &middot; tap to edit</div>"
+        + "</summary>"
         + "<form method='post' action='/control/risk'>"
         + f"<div class='pr2'><div class='pl'>Max lots / trade{src('max_lots')}</div>"
         + f"<input class='pi' type='number' name='max_lots' value='{eff_max_lots}' min='1' max='20' step='1'>"
@@ -3039,14 +3715,73 @@ async def control_page(
         + "<div style='display:flex;gap:8px;padding:12px 16px 16px'>"
         + "<button class='btn bp' type='submit' style='flex:1'>Apply</button>"
         + "<button class='btn bm' type='submit' name='reset' value='1' style='flex:1'>Reset to defaults</button>"
-        + "</div></form></div>"
+        + "</div></form></details>"
 
-        # errors
-        + "<div class='card'><div class='ct'>Recent Errors</div>"
-        + "<table><thead><tr><th>Time</th><th>Type</th><th>Message</th></tr></thead><tbody>"
-        + errors_html + "</tbody></table></div>"
+        # performance — 90 days
+        + "<div class='card'><div class='ct'>Performance &mdash; 90 days</div>"
+        + "<div class='tiles'>" + tiles_html + "</div>"
+        + "<div id='eq-chart' style='padding:6px 16px 4px'></div>"
+        + "<div class='hmwrap'><div class='hmlbl'>Daily P&amp;L &middot; last 6 weeks"
+        + " &middot; rows Mon&rarr;Fri</div>" + hm_html + "</div></div>"
+
+        # activity feed
+        + "<div class='card'><div class='ct'>Activity &mdash; 48h</div>"
+        + "<div class='fchips'>"
+        + "<button class='fchip on' data-f='all'>All</button>"
+        + "<button class='fchip' data-f='alert'>Alerts</button>"
+        + "<button class='fchip' data-f='order'>Orders</button>"
+        + "<button class='fchip' data-f='gtt'>GTTs</button>"
+        + "<button class='fchip' data-f='exit'>Exits</button>"
+        + "<button class='fchip' data-f='err'>Errors</button>"
+        + "</div><ul class='feed' id='feed'>" + feed_html + "</ul></div>"
+
+        # seed the live script, then load it
+        + "<script>"
+        + f"window.__realized={realized:.0f};"
+        + f"window.__estop={'true' if estop else 'false'};"
+        + f"window.__paper={'true' if paper else 'false'};"
+        + f"window.__mode={json.dumps(trade_mode)};"
+        + f"window.__snaps={json.dumps(snaps)};"
+        + f"window.__perf={json.dumps({'days': perf_days})};"
+        + "</script>"
+        + _CONTROL_LIVE_JS
     )
-    return Response(content=_shell("control", body, refresh=True), media_type="text/html")
+    return Response(content=_shell("control", body, live=True), media_type="text/html")
+
+
+@app.get("/api/control/summary")
+async def control_summary(
+    session: Session = Depends(get_db_session),
+    _: None = Depends(_auth_guard),
+    settings: Settings = Depends(get_current_settings),
+) -> dict:
+    """Live numbers for /control's 30s poll — meters, hero, session, next job.
+
+    The page reloads itself when emergency_stop / paper / trade_mode change,
+    so those are included even though the poll doesn't patch them directly.
+    """
+    try:
+        token_info = get_session_manager().get_token_info()
+        sess_valid = bool(token_info["is_valid"])
+    except Exception:
+        sess_valid = False
+    _, next_label = _todays_schedule(settings)
+    return {
+        "realized": _realised_pnl_today(session),
+        "today_loss": _realised_loss_today(session),
+        "max_loss": state.get_max_daily_loss(settings.MAX_DAILY_LOSS_ABS),
+        "trades_today": _trades_today_count(session),
+        "max_trades": state.get_max_trades_per_day(settings.MAX_TRADES_PER_DAY),
+        "open_positions": _open_position_count(session),
+        "max_positions": state.get_max_open_positions(settings.MAX_OPEN_POSITIONS),
+        "consec_losses": _consecutive_losses(session),
+        "consec_limit": state.get_consecutive_losses_limit(settings.CONSECUTIVE_LOSSES_LIMIT),
+        "paper": _dry_run(settings),
+        "emergency_stop": state.is_emergency_stop(),
+        "trade_mode": state.get_trade_mode(),
+        "session_valid": sess_valid,
+        "next_label": next_label,
+    }
 
 
 @app.post("/control/paper-mode/toggle")
@@ -3079,6 +3814,25 @@ async def toggle_trailing(_: None = Depends(_auth_guard)) -> Response:
 async def toggle_window_straddle(_: None = Depends(_auth_guard)) -> Response:
     new_val = state.toggle_window_straddle()
     log.info("Window straddle toggled to %s", new_val)
+    return Response(status_code=302, headers={"Location": "/control"})
+
+
+@app.post("/control/ng-hedge/toggle")
+async def toggle_ng_hedge(
+    _: None = Depends(_auth_guard),
+    settings: Settings = Depends(get_current_settings),
+) -> Response:
+    from app.commodity_agents.notify import send_telegram
+
+    new_val = state.toggle_ng_hedge_enabled(settings.NG_DELTA_HEDGE_ENABLED)
+    log.warning("NG delta-hedge toggled to %s via /control", new_val)
+    try:
+        send_telegram(
+            settings,
+            f"⚡ NG Delta Hedge {'STARTED' if new_val else 'STOPPED'} via /control",
+        )
+    except Exception as exc:
+        log.warning("NG delta-hedge toggle: telegram notify failed: %s", exc)
     return Response(status_code=302, headers={"Location": "/control"})
 
 

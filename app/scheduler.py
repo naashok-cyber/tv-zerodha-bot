@@ -303,6 +303,41 @@ def auto_login_job(
         log.error("[scheduler] auto-login unexpected error: %s", exc, exc_info=True)
 
 
+def pnl_snapshot_job(session_factory: Any, settings: Any) -> None:
+    """Sample today's realised P&L + open MTM for the /control intraday sparkline.
+
+    open_mtm is null when no Kite session is available; realised is always
+    recorded so the sparkline still tracks closed trades. Prunes samples older
+    than 60 days on each run.
+    """
+    from app.storage import ClosedTrade, PnlSnapshot
+
+    now = datetime.now(IST)
+    try:
+        with session_factory() as session:
+            today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            realized = float(sum(
+                p for (p,) in session.query(ClosedTrade.pnl)
+                .filter(ClosedTrade.closed_at >= today_start).all()
+                if p is not None
+            ))
+            mtm = None
+            try:
+                from app.commodity_agents.portfolio import compute_portfolio_greeks
+                kite = get_session_manager().get_kite()
+                greeks = compute_portfolio_greeks(session, kite, settings, now=now)
+                mtm = greeks.get("totals", {}).get("open_mtm")
+            except Exception:
+                pass
+            session.add(PnlSnapshot(at=now, realized=realized, open_mtm=mtm))
+            session.query(PnlSnapshot).filter(
+                PnlSnapshot.at < now - timedelta(days=60)
+            ).delete(synchronize_session=False)
+            session.commit()
+    except Exception as exc:
+        log.warning("[pnl_snapshot] failed: %s", exc)
+
+
 def make_scheduler(
     settings: Any = None,
     session_factory: Any = None,
@@ -464,7 +499,9 @@ def make_scheduler(
     )
     log.info("[scheduler] MCX expiry snapshot scheduled at 22:25 IST (NATURALGAS/CRUDEOILM)")
 
-    if settings.NG_DELTA_HEDGE_ENABLED and session_factory is not None:
+    if session_factory is not None:
+        # Job is always registered; run_delta_hedge_job checks state.is_ng_hedge_enabled()
+        # on every tick so it can be started/stopped live from /control without a restart.
         from app.delta_hedge import run_delta_hedge_job
         scheduler.add_job(
             run_delta_hedge_job,
@@ -477,11 +514,25 @@ def make_scheduler(
             misfire_grace_time=60,
             max_instances=1,  # never overlap if a tick runs long
         )
+        scheduler.add_job(
+            pnl_snapshot_job,
+            trigger="cron",
+            day_of_week="mon-fri",
+            hour="9-23",
+            minute="*/5",
+            kwargs={"session_factory": session_factory, "settings": settings},
+            id="pnl_snapshot",
+            misfire_grace_time=60,
+            max_instances=1,
+        )
+        log.info("[scheduler] P&L snapshot cron: every 5 min, Mon-Fri 09-23 IST")
         log.info(
             "[scheduler] NG delta-hedge cron: every 5 min @ :02/:07/.../:57 IST, "
-            "Mon-Fri 09-23 (threshold=±%.0f mmBtu, limit_wait=%ds)",
+            "Mon-Fri 09-23 (threshold=±%.0f mmBtu, limit_wait=%ds, enabled=%s via .env default, "
+            "live-controllable at /control)",
             settings.NG_DELTA_HEDGE_THRESHOLD,
             settings.NG_DELTA_HEDGE_LIMIT_WAIT_SEC,
+            settings.NG_DELTA_HEDGE_ENABLED,
         )
 
     if settings.SCHEDULED_STRADDLE_ENABLED and session_factory is not None:

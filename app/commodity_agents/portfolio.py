@@ -47,13 +47,15 @@ def compute_portfolio_greeks(session: Any, kite: Any, settings: Any,
     """Greeks for every open option position on MCX/NFO. Never raises —
     positions whose inputs are missing are reported with nulls."""
     from app.commodity_agents.orchestrator import _underlying_price
-    from app.storage import Instrument, Order, Position
+    from app.storage import ClosedTrade, Instrument, Order, Position
 
     now = now or datetime.now(IST)
     rows = (
         session.query(Position, Order)
         .join(Order, Position.order_id == Order.id)
-        .filter(Position.exchange.in_(["MCX", "MCX-OPT", "NFO"]),
+        .outerjoin(ClosedTrade, Position.id == ClosedTrade.position_id)
+        .filter(ClosedTrade.id == None,  # noqa: E711 — open positions only
+                Position.exchange.in_(["MCX", "MCX-OPT", "NFO"]),
                 Position.instrument_type.in_(["CE", "PE"]))
         .all()
     )
@@ -75,6 +77,7 @@ def compute_portfolio_greeks(session: Any, kite: Any, settings: Any,
     tot_delta_units = 0.0
     tot_vega = 0.0
     tot_theta = 0.0
+    tot_mtm = 0.0
 
     for pos, order in rows:
         if pos.underlying not in under_cache:
@@ -93,16 +96,28 @@ def compute_portfolio_greeks(session: Any, kite: Any, settings: Any,
         q = quotes.get(f"{pos.exchange}:{pos.tradingsymbol}") or {}
         ltp = float(q.get("last_price") or 0.0)
 
+        exch = "NFO" if pos.exchange == "NFO" else "MCX"
+        mcx_units = settings.MCX_LOT_UNITS.get(pos.underlying, 1) if exch == "MCX" else 1
+        eff_units = pos.quantity * mcx_units
+        entry_price = float(order.fill_price or 0.0)
+        pnl = None
+        if ltp > 0 and entry_price > 0:
+            sign_pnl = 1.0 if order.transaction_type == "BUY" else -1.0
+            pnl = sign_pnl * (ltp - entry_price) * eff_units
+            tot_mtm += pnl
+
         entry: dict = {
             "tradingsymbol": pos.tradingsymbol,
             "underlying": pos.underlying,
             "side": order.transaction_type,
             "quantity": pos.quantity,
             "ltp": ltp or None,
+            "entry_price": entry_price or None,
+            "pnl": round(pnl) if pnl is not None else None,
+            "sl": pos.current_sl,
             "delta": None, "vega": None, "theta_per_day": None, "iv": None,
         }
         if inst is not None and under and ltp > 0 and inst.expiry:
-            exch = "NFO" if pos.exchange == "NFO" else "MCX"
             hh, mm = _EXPIRY_HHMM[exch]
             expiry_dt = datetime(inst.expiry.year, inst.expiry.month, inst.expiry.day,
                                  hh, mm, tzinfo=IST)
@@ -110,9 +125,6 @@ def compute_portfolio_greeks(session: Any, kite: Any, settings: Any,
             g = compute_delta(inst, ltp, under, t_years)
             if g.delta is not None:
                 sign = -1.0 if order.transaction_type == "SELL" else 1.0
-                mcx_units = (settings.MCX_LOT_UNITS.get(pos.underlying, 1)
-                             if exch == "MCX" else 1)
-                eff_units = pos.quantity * mcx_units
                 flag = "c" if pos.instrument_type == "CE" else "p"
                 vega, theta = _vega_theta(exch, flag, under, float(inst.strike or 0.0),
                                           t_years, settings.RISK_FREE_RATE, g.iv or 0.0)
@@ -146,6 +158,7 @@ def compute_portfolio_greeks(session: Any, kite: Any, settings: Any,
             "net_delta_units": round(tot_delta_units, 1),
             "net_vega": round(tot_vega, 1),
             "net_theta_per_day": round(tot_theta, 1),
+            "open_mtm": round(tot_mtm),
         },
         "margins": _account_margins(kite),
     }

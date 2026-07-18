@@ -191,6 +191,18 @@ class ClosedTrade(Base):
     position: Mapped[Position] = relationship("Position", back_populates="closed_trade")
 
 
+class PnlSnapshot(Base):
+    """Intraday P&L sample — written every 5 min by the scheduler during market
+    hours to power the /control Today-card sparkline."""
+
+    __tablename__ = "pnl_snapshots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    realized: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    open_mtm: Mapped[float | None] = mapped_column(Float)   # null when no Kite session
+
+
 class KiteSession(Base):
     """Kite access-token lifecycle — kite_session.py writes encrypted ciphertext."""
 

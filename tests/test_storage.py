@@ -40,6 +40,7 @@ EXPECTED_TABLES = {
     "commodity_recommendations",
     "commodity_recommendation_decisions",
     "commodity_trade_journal",
+    "pnl_snapshots",
 }
 
 
