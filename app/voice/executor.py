@@ -152,17 +152,31 @@ def execute_voice_exit(
     product = settings.PRODUCT_TYPE.value
     dry_run = state.is_paper_mode(settings.DRY_RUN)
 
+    # Scope to the active mode: a paper exit must never DB-close a live
+    # position (its GTT would stay armed at Kite while we think it's flat).
     open_positions = (
         db.query(Position)
+        .join(Order, Position.order_id == Order.id)
         .outerjoin(ClosedTrade, Position.id == ClosedTrade.position_id)
-        .filter(Position.underlying == underlying, ClosedTrade.id == None)  # noqa: E711
+        .filter(
+            Position.underlying == underlying,
+            ClosedTrade.id == None,  # noqa: E711
+            Order.dry_run == dry_run,
+        )
         .all()
     )
 
     if not open_positions:
         return {"error": f"No open positions found for {underlying}"}, 404
 
-    kite = get_session_manager().get_kite() if not dry_run else None
+    if not dry_run:
+        kite = get_session_manager().get_kite()
+    else:
+        # Paper exits mark to LTP so the simulated trade closes with a real PnL.
+        try:
+            kite = get_session_manager().get_kite()
+        except Exception:
+            kite = None
     exited = []
 
     for position in open_positions:
@@ -197,20 +211,43 @@ def execute_voice_exit(
                     log.error("voice_exit: square_off failed for %s: %s", position.tradingsymbol, exc)
         else:
             log.info(
-                "voice_exit DRY_RUN — would EXIT %s qty=%d product=%s",
+                "voice_exit DRY_RUN — EXIT %s qty=%d product=%s at LTP",
                 position.tradingsymbol, position.quantity, exit_product,
             )
+            if gtt:
+                gtt.status = "CANCELLED"
 
+        _exit_premium = 0.0
+        _exit_pnl = 0.0
+        if dry_run and kite is not None:
+            try:
+                from app.paper_trading import paper_pnl
+                _q_key = f"{position.exchange}:{position.tradingsymbol}"
+                _exit_premium = float(kite.ltp([_q_key])[_q_key]["last_price"])
+                _exit_pnl = paper_pnl(
+                    entry_order.transaction_type if entry_order else "BUY",
+                    position.entry_premium, _exit_premium, position.quantity,
+                    position.exchange, position.underlying or position.tradingsymbol,
+                    settings,
+                )
+            except Exception as exc:
+                log.warning("voice_exit: paper LTP unavailable for %s (%s) — recording pnl=0",
+                            position.tradingsymbol, exc)
+
+        from app.storage import trade_meta_for_order
+        _vx_sid, _vx_dry = trade_meta_for_order(db, entry_order)
         ct = ClosedTrade(
             position_id=position.id,
             exchange=position.exchange,
             tradingsymbol=position.tradingsymbol,
             entry_premium=position.entry_premium,
-            exit_premium=0.0,
-            pnl=0.0,
+            exit_premium=_exit_premium,
+            pnl=_exit_pnl,
             exit_reason="VOICE_MANUAL_EXIT",
             opened_at=position.opened_at,
             closed_at=now,
+            strategy_id=_vx_sid,
+            dry_run=_vx_dry,
         )
         db.add(ct)
         exited.append(position.tradingsymbol)

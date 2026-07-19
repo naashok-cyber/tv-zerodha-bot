@@ -187,6 +187,10 @@ class ClosedTrade(Base):
     exit_reason: Mapped[str] = mapped_column(String(32), nullable=False)
     opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     closed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # Denormalized from the entry Alert/Order so per-strategy and paper-vs-live
+    # analytics never need the 3-table join at read time.
+    strategy_id: Mapped[str | None] = mapped_column(String(64))
+    dry_run: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
     position: Mapped[Position] = relationship("Position", back_populates="closed_trade")
 
@@ -346,6 +350,29 @@ def get_db_session() -> Any:
         yield sess
 
 
+def trade_meta_for_order(session: Any, order: Any) -> tuple[str | None, bool]:
+    """(strategy_id, dry_run) for a ClosedTrade, derived from its entry Order.
+
+    Every ClosedTrade creation site should pass these through so per-strategy
+    and paper-vs-live analytics work without join-time archaeology.
+    """
+    if order is None:
+        return None, False
+    strategy_id = None
+    if order.alert_id is not None:
+        row = session.query(Alert.strategy_id).filter(Alert.id == order.alert_id).first()
+        strategy_id = row[0] if row else None
+    return strategy_id, bool(order.dry_run)
+
+
+def trade_meta_for_position(session: Any, position: Any) -> tuple[str | None, bool]:
+    """(strategy_id, dry_run) for a ClosedTrade when only the Position is at hand."""
+    if position is None:
+        return None, False
+    order = session.query(Order).filter(Order.id == position.order_id).first()
+    return trade_meta_for_order(session, order)
+
+
 def init_db(database_url: str | None = None) -> Engine:
     """Create SQLAlchemy engine and all tables.
 
@@ -391,6 +418,25 @@ def _migrate(engine: Engine) -> None:
         "ALTER TABLE commodity_trade_journal ADD COLUMN mfe_pct FLOAT",
         "ALTER TABLE positions ADD COLUMN max_favorable_price FLOAT",
         "ALTER TABLE positions ADD COLUMN max_adverse_price FLOAT",
+        "ALTER TABLE closed_trades ADD COLUMN strategy_id VARCHAR(64)",
+        "ALTER TABLE closed_trades ADD COLUMN dry_run BOOLEAN NOT NULL DEFAULT 0",
+        # Backfill legacy rows from the entry chain (position → order → alert).
+        # WHERE clauses make these no-ops on every boot after the first.
+        """UPDATE closed_trades SET strategy_id = (
+             SELECT alerts.strategy_id FROM positions
+             JOIN orders ON orders.id = positions.order_id
+             JOIN alerts ON alerts.id = orders.alert_id
+             WHERE positions.id = closed_trades.position_id
+           ) WHERE strategy_id IS NULL""",
+        """UPDATE closed_trades SET dry_run = (
+             SELECT COALESCE(orders.dry_run, 0) FROM positions
+             JOIN orders ON orders.id = positions.order_id
+             WHERE positions.id = closed_trades.position_id
+           ) WHERE dry_run = 0 AND EXISTS (
+             SELECT 1 FROM positions
+             JOIN orders ON orders.id = positions.order_id
+             WHERE positions.id = closed_trades.position_id AND orders.dry_run = 1
+           )""",
     ]
     with engine.connect() as conn:
         for stmt in migrations:

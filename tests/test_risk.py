@@ -380,8 +380,9 @@ def test_risk_halt_error_causes_early_return_no_broker_calls():
     mock_ss.assert_not_called()
 
 
-def test_dry_run_bypasses_check_risk_gates():
-    """DRY_RUN=True: check_risk_gates must not be called at all."""
+def test_dry_run_runs_check_risk_gates_scoped_to_paper():
+    """DRY_RUN=True: risk gates run scoped to paper trades (dry_run=True) so a
+    paper session exercises the same halt behavior live trading would see."""
     factory = _make_session_factory()
     s = Settings(
         _env_file=None, DRY_RUN=True, KITE_API_KEY="k", DATABASE_URL="sqlite:///:memory:",
@@ -400,7 +401,8 @@ def test_dry_run_bypasses_check_risk_gates():
     with patch("app.risk.check_risk_gates") as mock_crg:
         _process_alert(alert_id, _alert_data("NIFTY"), s)
 
-    mock_crg.assert_not_called()
+    mock_crg.assert_called_once()
+    assert mock_crg.call_args.kwargs.get("dry_run") is True
 
 
 # ── GttFilledEvent → record_trade_result wiring ───────────────────────────────

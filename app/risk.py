@@ -62,8 +62,11 @@ def compute_futures_qty(
     return qty if qty >= int(lot_size) else 0
 
 
-def daily_loss_remaining(db: Any, today_ist: Any) -> Decimal:
-    """Return remaining daily loss allowance; floored at 0. Injects today_ist — no internal clock."""
+def daily_loss_remaining(db: Any, today_ist: Any, dry_run: bool = False) -> Decimal:
+    """Return remaining daily loss allowance; floored at 0. Injects today_ist — no internal clock.
+
+    dry_run scopes the calculation to trades of that mode so paper losses never
+    consume the live budget (and vice versa)."""
     import app.state as state
     settings = get_settings()
     cap = Decimal(str(state.get_max_daily_loss(float(settings.MAX_DAILY_LOSS))))
@@ -71,7 +74,11 @@ def daily_loss_remaining(db: Any, today_ist: Any) -> Decimal:
     today_start = today_ist.replace(hour=0, minute=0, second=0, microsecond=0)
     rows = (
         db.query(ClosedTrade.pnl)
-        .filter(ClosedTrade.closed_at >= today_start, ClosedTrade.pnl < 0)
+        .filter(
+            ClosedTrade.closed_at >= today_start,
+            ClosedTrade.pnl < 0,
+            ClosedTrade.dry_run == dry_run,
+        )
         .all()
     )
     losses_abs = sum(abs(Decimal(str(r[0]))) for r in rows)
@@ -79,21 +86,26 @@ def daily_loss_remaining(db: Any, today_ist: Any) -> Decimal:
     return remaining if remaining > Decimal("0") else Decimal("0")
 
 
-def daily_realized_pnl(db: Any, today_ist: Any) -> Decimal:
+def daily_realized_pnl(db: Any, today_ist: Any, dry_run: bool = False) -> Decimal:
     """Return total realized PnL for today (positive = profit, negative = loss)."""
     today_start = today_ist.replace(hour=0, minute=0, second=0, microsecond=0)
-    rows = db.query(ClosedTrade.pnl).filter(ClosedTrade.closed_at >= today_start).all()
+    rows = (
+        db.query(ClosedTrade.pnl)
+        .filter(ClosedTrade.closed_at >= today_start, ClosedTrade.dry_run == dry_run)
+        .all()
+    )
     return sum((Decimal(str(r[0])) for r in rows), Decimal("0"))
 
 
-def check_risk_gates(db: Any, today_ist: Any, consecutive_limit: int = 5) -> None:
-    """Raise RiskHaltError if any gate is breached. Caller must skip this when DRY_RUN=True."""
-    remaining = daily_loss_remaining(db, today_ist)
+def check_risk_gates(db: Any, today_ist: Any, consecutive_limit: int = 5, dry_run: bool = False) -> None:
+    """Raise RiskHaltError if any gate is breached, scoped to trades of the given mode."""
+    remaining = daily_loss_remaining(db, today_ist, dry_run=dry_run)
     if remaining == Decimal("0"):
         raise RiskHaltError("daily loss cap exhausted")
 
     rows = (
         db.query(ClosedTrade.pnl)
+        .filter(ClosedTrade.dry_run == dry_run)
         .order_by(ClosedTrade.closed_at.desc())
         .all()
     )
@@ -126,6 +138,8 @@ def record_trade_result(
         ct.pnl = float(pnl)
         ct.closed_at = closed_at_ist
     else:
+        from app.storage import trade_meta_for_order
+        strategy_id, entry_dry_run = trade_meta_for_order(db, order)
         ct = ClosedTrade(
             position_id=position.id,
             exchange=position.exchange,
@@ -136,5 +150,7 @@ def record_trade_result(
             exit_reason="GTT_FILLED",
             opened_at=position.opened_at,
             closed_at=closed_at_ist,
+            strategy_id=strategy_id,
+            dry_run=entry_dry_run,
         )
         db.add(ct)

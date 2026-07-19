@@ -634,7 +634,7 @@ def run_delta_hedge_job(settings: Any, session_factory: Any) -> None:
     from app.config import IST
     from app.greeks import compute_delta
     from app.kite_session import get_session_manager
-    from app.storage import ClosedTrade, Instrument, Position
+    from app.storage import ClosedTrade, Instrument, Order, Position
 
     if not state.is_ng_hedge_enabled(settings.NG_DELTA_HEDGE_ENABLED):
         log.info("%s disabled via /control — skipping", _LOG_PREFIX)
@@ -1030,11 +1030,13 @@ def run_delta_hedge_job(settings: Any, session_factory: Any) -> None:
                     # Update Position row for the closed OTM leg
                     otm_pos = (
                         session.query(Position)
+                        .join(Order, Position.order_id == Order.id)
                         .outerjoin(ClosedTrade, Position.id == ClosedTrade.position_id)
                         .filter(
                             Position.tradingsymbol == otm_sym,
                             Position.exchange == "MCX",
                             ClosedTrade.id == None,  # noqa: E711
+                            Order.dry_run == False,  # noqa: E712 — real hedge must not mutate paper rows
                         )
                         .first()
                     )
@@ -1189,11 +1191,13 @@ def run_delta_hedge_job(settings: Any, session_factory: Any) -> None:
         # Update existing Position row so 23:20 squareoff closes full broker qty.
         pos = (
             session.query(Position)
+            .join(Order, Position.order_id == Order.id)
             .outerjoin(ClosedTrade, Position.id == ClosedTrade.position_id)
             .filter(
                 Position.tradingsymbol == final_inst.tradingsymbol,
                 Position.exchange == "MCX",
                 ClosedTrade.id == None,  # noqa: E711
+                Order.dry_run == False,  # noqa: E712 — real hedge must not mutate paper rows
             )
             .first()
         )

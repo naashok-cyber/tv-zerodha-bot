@@ -132,7 +132,7 @@ def eod_squareoff_job(
     symbols_filter: if provided, only close positions whose tradingsymbol is in the set
     (used by expiry_day_squareoff_job to close only today's expiring contracts).
     """
-    from app.storage import ClosedTrade, Gtt, Instrument, Order, Position
+    from app.storage import ClosedTrade, Gtt, Instrument, Order, Position, trade_meta_for_order
     from app.orders import cancel_gtt, square_off
 
     if dry_run:
@@ -149,10 +149,14 @@ def eod_squareoff_job(
     with session_factory() as session:
         q = (
             session.query(Position)
+            .join(Order, Position.order_id == Order.id)
             .outerjoin(ClosedTrade, Position.id == ClosedTrade.position_id)
             .filter(
                 Position.exchange.in_(exchanges),
                 ClosedTrade.id == None,  # noqa: E711
+                # Paper positions have no Kite-side order to square off — the
+                # paper monitor closes them at LTP on its own schedule.
+                Order.dry_run == False,  # noqa: E712
             )
         )
         if symbols_filter:
@@ -207,6 +211,7 @@ def eod_squareoff_job(
                     kite, instrument, position.quantity,
                     product=product, entry_side=entry_side,
                 )
+                _sq_sid, _sq_dry = trade_meta_for_order(session, entry_order)
                 ct = ClosedTrade(
                     position_id=position.id,
                     exchange=position.exchange,
@@ -217,6 +222,8 @@ def eod_squareoff_job(
                     exit_reason=reason,
                     opened_at=position.opened_at,
                     closed_at=now,
+                    strategy_id=_sq_sid,
+                    dry_run=_sq_dry,
                 )
                 session.add(ct)
                 log.info(
@@ -313,12 +320,18 @@ def pnl_snapshot_job(session_factory: Any, settings: Any) -> None:
     from app.storage import ClosedTrade, PnlSnapshot
 
     now = datetime.now(IST)
+    # Sample the active mode's trades so the sparkline matches the /control hero
+    # (which also scopes to the current paper/live mode).
+    paper = state.is_paper_mode(settings.DRY_RUN)
     try:
         with session_factory() as session:
             today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
             realized = float(sum(
                 p for (p,) in session.query(ClosedTrade.pnl)
-                .filter(ClosedTrade.closed_at >= today_start).all()
+                .filter(
+                    ClosedTrade.closed_at >= today_start,
+                    ClosedTrade.dry_run == paper,
+                ).all()
                 if p is not None
             ))
             mtm = None
@@ -526,6 +539,21 @@ def make_scheduler(
             max_instances=1,
         )
         log.info("[scheduler] P&L snapshot cron: every 5 min, Mon-Fri 09-23 IST")
+        # Paper-position exit simulator — cheap no-op when no paper positions
+        # are open, so it is always registered (paper mode can be toggled live).
+        from app.paper_trading import paper_monitor_job
+        scheduler.add_job(
+            paper_monitor_job,
+            trigger="cron",
+            day_of_week="mon-fri",
+            hour="9-23",
+            minute="*",
+            kwargs={"settings": settings, "session_factory": session_factory},
+            id="paper_monitor",
+            misfire_grace_time=30,
+            max_instances=1,
+        )
+        log.info("[scheduler] paper-trade monitor: every 1 min, Mon-Fri 09-23 IST (simulated GTT exits + EOD close)")
         # Always registered; the job checks state.is_straddle_defense_enabled()
         # each tick so it can be started/stopped live from /control.
         from app.straddle_defense import straddle_defense_job

@@ -69,42 +69,58 @@ _scheduler: Any = None
 
 # ── Risk guard helpers ────────────────────────────────────────────────────────
 
-def _realised_loss_today(session: Any) -> float:
-    """Return the total realised loss (positive number) from ClosedTrade rows closed today IST."""
+def _realised_loss_today(session: Any, paper: bool = False) -> float:
+    """Total realised loss (positive ₹) today IST, scoped to paper or live trades."""
     today_start = datetime.now(IST).replace(hour=0, minute=0, second=0, microsecond=0)
     rows = (
         session.query(ClosedTrade.pnl)
-        .filter(ClosedTrade.closed_at >= today_start, ClosedTrade.pnl < 0)
+        .filter(
+            ClosedTrade.closed_at >= today_start,
+            ClosedTrade.pnl < 0,
+            ClosedTrade.dry_run == paper,
+        )
         .all()
     )
     return abs(sum(r[0] for r in rows))
 
 
-def _realised_pnl_today(session: Any) -> float:
-    """Net realised P&L (signed ₹) from ClosedTrade rows closed today IST."""
+def _realised_pnl_today(session: Any, paper: bool = False) -> float:
+    """Net realised P&L (signed ₹) today IST, scoped to paper or live trades."""
     today_start = datetime.now(IST).replace(hour=0, minute=0, second=0, microsecond=0)
-    rows = session.query(ClosedTrade.pnl).filter(ClosedTrade.closed_at >= today_start).all()
+    rows = (
+        session.query(ClosedTrade.pnl)
+        .filter(ClosedTrade.closed_at >= today_start, ClosedTrade.dry_run == paper)
+        .all()
+    )
     return float(sum(r[0] for r in rows if r[0] is not None))
 
 
-def _open_position_count(session: Any) -> int:
+def _open_position_count(session: Any, paper: bool = False) -> int:
     return (
         session.query(Position)
+        .join(Order, Position.order_id == Order.id)
         .outerjoin(ClosedTrade, Position.id == ClosedTrade.position_id)
-        .filter(ClosedTrade.id == None)  # noqa: E711
+        .filter(ClosedTrade.id == None, Order.dry_run == paper)  # noqa: E711
         .count()
     )
 
 
-def _trades_today_count(session: Any) -> int:
+def _trades_today_count(session: Any, paper: bool = False) -> int:
+    """Distinct entry signals that produced an order today, scoped by mode.
+
+    Counts distinct alerts (not orders) so a 2-leg straddle is one trade —
+    matching the old Alert-based count — while letting paper trades stop
+    consuming the live day's trade budget after a mode toggle."""
     today_start = datetime.now(IST).replace(hour=0, minute=0, second=0, microsecond=0)
     return (
-        session.query(Alert)
+        session.query(Order.alert_id)
+        .join(Alert, Alert.id == Order.alert_id)
         .filter(
             Alert.action.in_(["BUY", "SELL"]),
-            Alert.processed == True,  # noqa: E712
-            Alert.received_at >= today_start,
+            Order.placed_at >= today_start,
+            Order.dry_run == paper,
         )
+        .distinct()
         .count()
     )
 
@@ -170,9 +186,10 @@ def _fetch_adx_for_underlying(underlying: Any, settings: Any, kite: Any, session
     return adx
 
 
-def _consecutive_losses(session: Any) -> int:
+def _consecutive_losses(session: Any, paper: bool = False) -> int:
     rows = (
         session.query(ClosedTrade.exit_reason)
+        .filter(ClosedTrade.dry_run == paper)
         .order_by(ClosedTrade.closed_at.desc())
         .all()
     )
@@ -186,21 +203,25 @@ def _consecutive_losses(session: Any) -> int:
 
 
 def _check_risk_guards(session: Any, settings: Settings) -> tuple[bool, str]:
+    # Guards evaluate trades of the active mode only, so a paper session
+    # exercises the same guard behavior live trading would see — and paper
+    # losses never block live entries after a mode toggle (or vice versa).
+    paper = _dry_run(settings)
     if state.is_emergency_stop():
         return False, "EMERGENCY STOP is active"
-    loss = _realised_loss_today(session)
+    loss = _realised_loss_today(session, paper=paper)
     effective_loss_cap = state.get_max_daily_loss(settings.MAX_DAILY_LOSS_ABS)
     if loss >= effective_loss_cap:
         return False, f"daily loss ₹{loss:.2f} >= limit ₹{effective_loss_cap:.2f}"
-    trades = _trades_today_count(session)
+    trades = _trades_today_count(session, paper=paper)
     eff_max_trades = state.get_max_trades_per_day(settings.MAX_TRADES_PER_DAY)
     if trades >= eff_max_trades:
         return False, f"trades today {trades} >= MAX_TRADES_PER_DAY {eff_max_trades}"
-    positions = _open_position_count(session)
+    positions = _open_position_count(session, paper=paper)
     eff_max_positions = state.get_max_open_positions(settings.MAX_OPEN_POSITIONS)
     if positions >= eff_max_positions:
         return False, f"open positions {positions} >= MAX_OPEN_POSITIONS {eff_max_positions}"
-    losses = _consecutive_losses(session)
+    losses = _consecutive_losses(session, paper=paper)
     eff_consec_limit = state.get_consecutive_losses_limit(settings.CONSECUTIVE_LOSSES_LIMIT)
     if losses >= eff_consec_limit:
         return False, f"consecutive losses {losses} >= CONSECUTIVE_LOSSES_LIMIT {eff_consec_limit}"
@@ -754,6 +775,8 @@ def _on_gtt_filled(event: GttFilledEvent) -> None:
                             limit_price=limit_px,
                         )
                         now2 = datetime.now(IST)
+                        from app.storage import trade_meta_for_order
+                        _sib_sid, _sib_dry = trade_meta_for_order(session2, sib_order)
                         ct = ClosedTrade(
                             position_id=sib_pos.id,
                             exchange=sib_pos.exchange,
@@ -764,6 +787,8 @@ def _on_gtt_filled(event: GttFilledEvent) -> None:
                             exit_reason="straddle_paired_sl_exit",
                             opened_at=sib_pos.opened_at,
                             closed_at=now2,
+                            strategy_id=_sib_sid,
+                            dry_run=_sib_dry,
                         )
                         session2.add(ct)
                         log.info(
@@ -941,10 +966,30 @@ def _process_straddle(alert_id: int, entry_data: dict, settings: Settings) -> No
                 session.commit()
                 return
         else:
-            log.info(
-                "_process_straddle %d DRY_RUN — would SELL %s + SELL %s qty=%d product=%s",
-                alert_id, ce_sym, pe_sym, total_qty, product,
-            )
+            # Paper straddle: simulate both leg fills at LTP so Position/Gtt
+            # rows exist and the paper monitor can manage exits. Falls back to
+            # stub Order rows (no fill) when quotes are unavailable.
+            _paper_ltps: dict[str, float] = {}
+            try:
+                from app.paper_trading import new_paper_order_id
+                _kite_q = get_session_manager().get_kite()
+                _q_keys = [f"{_straddle_exchange}:{ce_sym}", f"{_straddle_exchange}:{pe_sym}"]
+                _quotes = _kite_q.ltp(_q_keys)
+                _paper_ltps["CE"] = float(_quotes[_q_keys[0]]["last_price"])
+                _paper_ltps["PE"] = float(_quotes[_q_keys[1]]["last_price"])
+                ce_kite_id = new_paper_order_id()
+                pe_kite_id = new_paper_order_id()
+                log.info(
+                    "_process_straddle %d DRY_RUN — simulated SELL %s @ %.2f + SELL %s @ %.2f qty=%d product=%s",
+                    alert_id, ce_sym, _paper_ltps["CE"], pe_sym, _paper_ltps["PE"], total_qty, product,
+                )
+            except Exception as _exc:
+                _paper_ltps.clear()
+                log.warning(
+                    "_process_straddle %d DRY_RUN — quotes unavailable (%s); recording stub: "
+                    "would SELL %s + SELL %s qty=%d product=%s",
+                    alert_id, _exc, ce_sym, pe_sym, total_qty, product,
+                )
 
         # Shared straddle_id links the two Order rows for combined P&L queries
         straddle_id = str(_uuid.uuid4())
@@ -956,7 +1001,7 @@ def _process_straddle(alert_id: int, entry_data: dict, settings: Settings) -> No
                     "entry_side": "SELL",
                     "underlying": underlying,
                     "straddle_id": straddle_id,
-                    "dry_run": False,
+                    "dry_run": dry,
                 }
 
         now2 = datetime.now(IST)
@@ -986,11 +1031,20 @@ def _process_straddle(alert_id: int, entry_data: dict, settings: Settings) -> No
         alert.processed = True
         session.commit()
 
-        if not dry and _watcher is not None:
+        if dry:
+            # Simulated fills — same handler as live: Position + DRY_RUN Gtt rows.
+            for kite_oid, instr_type in [(ce_kite_id, "CE"), (pe_kite_id, "PE")]:
+                if kite_oid and instr_type in _paper_ltps:
+                    _on_entry_filled(EntryFilledEvent(
+                        kite_order_id=kite_oid,
+                        fill_price=_paper_ltps[instr_type],
+                        fill_qty=total_qty,
+                    ))
+        elif _watcher is not None:
             for kite_oid in [ce_kite_id, pe_kite_id]:
                 if kite_oid:
                     _watcher.watch_order(kite_oid, kite_fetcher=get_session_manager().get_kite)
-        elif not dry and _watcher is None:
+        else:
             log.error("_process_straddle %d: _watcher is None — GTTs will NOT be placed", alert_id)
 
         log.info(
@@ -1291,28 +1345,32 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
                 session.commit()
                 return
 
-        if not _dry_run(settings):
-            try:
-                risk.check_risk_gates(session, now, state.get_consecutive_losses_limit(settings.CONSECUTIVE_LOSSES_LIMIT))
-            except risk.RiskHaltError as exc:
-                log.warning("Alert %d: risk halt — %s", alert_id, exc.reason)
+        # Risk gates run in BOTH modes, scoped to that mode's trades — a paper
+        # session exercises the same halt behavior live trading would see.
+        try:
+            risk.check_risk_gates(
+                session, now,
+                state.get_consecutive_losses_limit(settings.CONSECUTIVE_LOSSES_LIMIT),
+                dry_run=_dry_run(settings),
+            )
+        except risk.RiskHaltError as exc:
+            log.warning("Alert %d: risk halt — %s", alert_id, exc.reason)
+            alert.processed = True
+            session.commit()
+            return
+
+        # ── Daily profit target circuit breaker ───────────────────────────────
+        _profit_target = state.get_daily_profit_target(settings.DAILY_PROFIT_TARGET)
+        if _profit_target > 0:
+            _today_pnl = risk.daily_realized_pnl(session, now, dry_run=_dry_run(settings))
+            if _today_pnl >= Decimal(str(_profit_target)):
+                log.info(
+                    "Alert %d: blocked — daily profit target ₹%.0f reached (realized ₹%.0f)",
+                    alert_id, _profit_target, float(_today_pnl),
+                )
                 alert.processed = True
                 session.commit()
                 return
-
-        # ── Daily profit target circuit breaker ───────────────────────────────
-        if not _dry_run(settings):
-            _profit_target = state.get_daily_profit_target(settings.DAILY_PROFIT_TARGET)
-            if _profit_target > 0:
-                _today_pnl = risk.daily_realized_pnl(session, now)
-                if _today_pnl >= Decimal(str(_profit_target)):
-                    log.info(
-                        "Alert %d: blocked — daily profit target ₹%.0f reached (realized ₹%.0f)",
-                        alert_id, _profit_target, float(_today_pnl),
-                    )
-                    alert.processed = True
-                    session.commit()
-                    return
 
         # ── Time-of-day entry filter ──────────────────────────────────────────
         # Voice orders are manual commands — skip the time gate.
@@ -1397,20 +1455,23 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
 
                 _eq_lp = alert_data.limit_price
                 _eq_ot = "LIMIT" if _eq_lp else "MARKET"
+                _eq_paper = _dry_run(settings)
                 kite_order_id = None
-                if not _dry_run(settings):
+                if not _eq_paper:
                     kite_order_id = place_entry(kite_client, eq_instrument, "BUY", qty, _eq_ot, "CNC", price=_eq_lp)
-                    if kite_order_id:
-                        _pending_order_meta[kite_order_id] = {
-                            "instrument_type": "EQ",
-                            "underlying": underlying.name,
-                            "dry_run": False,
-                        }
                 else:
+                    from app.paper_trading import new_paper_order_id
+                    kite_order_id = new_paper_order_id()
                     log.info(
-                        "Alert %d: DRY_RUN — would BUY %d shares %s %s CNC at ltp=%.2f",
-                        alert_id, qty, eq_instrument.tradingsymbol, _eq_ot, ltp,
+                        "Alert %d: DRY_RUN — simulated BUY %d shares %s %s CNC at ltp=%.2f (%s)",
+                        alert_id, qty, eq_instrument.tradingsymbol, _eq_ot, ltp, kite_order_id,
                     )
+                if kite_order_id:
+                    _pending_order_meta[kite_order_id] = {
+                        "instrument_type": "EQ",
+                        "underlying": underlying.name,
+                        "dry_run": _eq_paper,
+                    }
 
                 order = Order(
                     alert_id=alert_id,
@@ -1423,10 +1484,10 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
                     price=float(_eq_lp) if _eq_lp else None,
                     product="CNC",
                     quantity=qty,
-                    status="PENDING" if not _dry_run(settings) else "DRY_RUN",
+                    status="PENDING" if not _eq_paper else "DRY_RUN",
                     placed_at=now,
                     updated_at=now,
-                    dry_run=_dry_run(settings),
+                    dry_run=_eq_paper,
                 )
                 session.add(order)
                 session.flush()
@@ -1434,7 +1495,13 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
                 alert.processed = True
                 session.commit()
                 # Register AFTER commit so _on_entry_filled can find the Order row.
-                if kite_order_id and not _dry_run(settings):
+                if kite_order_id and _eq_paper:
+                    _on_entry_filled(EntryFilledEvent(
+                        kite_order_id=kite_order_id,
+                        fill_price=float(_eq_lp) if _eq_lp else ltp,
+                        fill_qty=qty,
+                    ))
+                elif kite_order_id:
                     if _watcher is not None:
                         _watcher.watch_order(kite_order_id, kite_fetcher=get_session_manager().get_kite)
                     else:
@@ -1447,10 +1514,17 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
         # ── EXIT ──────────────────────────────────────────────────────────────
         if alert_data.action == "EXIT":
             ts = underlying.name
+            # Scope to the active mode: a paper EXIT must never DB-close a live
+            # position (its GTT would stay armed at Kite while we think it's flat).
             position = (
                 session.query(Position)
+                .join(Order, Position.order_id == Order.id)
                 .outerjoin(ClosedTrade, Position.id == ClosedTrade.position_id)
-                .filter(Position.tradingsymbol == ts, ClosedTrade.id == None)  # noqa: E711
+                .filter(
+                    Position.tradingsymbol == ts,
+                    ClosedTrade.id == None,  # noqa: E711
+                    Order.dry_run == _dry_run(settings),
+                )
                 .first()
             )
             if position is None:
@@ -1475,6 +1549,8 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
             entry_order = session.query(Order).filter(Order.id == position.order_id).first()
             exit_product = entry_order.product if entry_order else product
 
+            _exit_premium = 0.0
+            _exit_pnl = 0.0
             if not _dry_run(settings):
                 kite_client = get_session_manager().get_kite()
                 if gtt and gtt.kite_gtt_id:
@@ -1484,18 +1560,37 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
                 if instrument:
                     square_off(kite_client, instrument, position.quantity, exit_product)
             else:
-                log.info("Alert %d: DRY_RUN — would EXIT %s qty=%d product=%s", alert_id, ts, position.quantity, exit_product)
+                # Paper exit: mark to LTP so the simulated trade has a real PnL.
+                log.info("Alert %d: DRY_RUN — EXIT %s qty=%d product=%s at LTP", alert_id, ts, position.quantity, exit_product)
+                if gtt:
+                    gtt.status = "CANCELLED"
+                try:
+                    from app.paper_trading import paper_pnl
+                    _q_key = f"{position.exchange}:{ts}"
+                    _kite_q = get_session_manager().get_kite()
+                    _exit_premium = float(_kite_q.ltp([_q_key])[_q_key]["last_price"])
+                    _exit_pnl = paper_pnl(
+                        entry_order.transaction_type if entry_order else "BUY",
+                        position.entry_premium, _exit_premium, position.quantity,
+                        position.exchange, position.underlying or ts, settings,
+                    )
+                except Exception as _exc:
+                    log.warning("Alert %d: paper EXIT LTP unavailable for %s (%s) — recording pnl=0", alert_id, ts, _exc)
 
+            from app.storage import trade_meta_for_order
+            _exit_sid, _exit_dry = trade_meta_for_order(session, entry_order)
             ct = ClosedTrade(
                 position_id=position.id,
                 exchange=position.exchange,
                 tradingsymbol=position.tradingsymbol,
                 entry_premium=position.entry_premium,
-                exit_premium=0.0,
-                pnl=0.0,
+                exit_premium=_exit_premium,
+                pnl=_exit_pnl,
                 exit_reason="MANUAL_EXIT",
                 opened_at=position.opened_at,
                 closed_at=now,
+                strategy_id=_exit_sid,
+                dry_run=_exit_dry,
             )
             session.add(ct)
             alert.processed = True
@@ -1581,30 +1676,51 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
             target_delta = settings.TARGET_DELTA if _is_buying else settings.SELL_OPTIONS_TARGET_DELTA
             delta_fallbacks = settings.DELTA_FALLBACK_STEPS if _is_buying else settings.SELL_OPTIONS_DELTA_FALLBACK_STEPS
 
-        if _dry_run(settings):
-            log.info(
-                "[%s] Alert %d: DRY_RUN — would %s %s option for %s (segment=%s)",
-                trade_mode, alert_id, entry_side, flag, underlying.name, underlying.segment,
-            )
-            order = Order(
-                alert_id=alert_id,
-                kite_order_id=None,
-                variety="regular",
-                exchange=underlying.segment,
-                tradingsymbol=underlying.name,
-                transaction_type=entry_side,
-                order_type="MARKET",
-                product=product,
-                quantity=0,
-                status="DRY_RUN",
-                placed_at=now,
-                updated_at=now,
-                dry_run=True,
-            )
-            session.add(order)
-            alert.processed = True
-            session.commit()
-            return
+        # Paper mode runs the FULL pipeline — expiry, strike selection, sizing,
+        # then a simulated fill at LTP — so a paper session produces the same
+        # decisions and a real track record. Falls back to a stub Order only
+        # when there's no Kite session for market data.
+        _paper = _dry_run(settings)
+        if _paper:
+            _paper_session_ok = False
+            try:
+                _paper_session_ok = (
+                    bool(get_session_manager().get_token_info().get("is_valid"))
+                    and not state.SESSION_INVALID
+                )
+            except Exception:
+                pass
+            if _paper_session_ok:
+                log.info(
+                    "[%s] Alert %d: DRY_RUN — simulating %s %s option for %s "
+                    "(segment=%s) via full pipeline",
+                    trade_mode, alert_id, entry_side, flag, underlying.name, underlying.segment,
+                )
+            else:
+                log.info(
+                    "[%s] Alert %d: DRY_RUN — no Kite session for simulation; "
+                    "recording stub: would %s %s option for %s (segment=%s)",
+                    trade_mode, alert_id, entry_side, flag, underlying.name, underlying.segment,
+                )
+                order = Order(
+                    alert_id=alert_id,
+                    kite_order_id=None,
+                    variety="regular",
+                    exchange=underlying.segment,
+                    tradingsymbol=underlying.name,
+                    transaction_type=entry_side,
+                    order_type="MARKET",
+                    product=product,
+                    quantity=0,
+                    status="DRY_RUN",
+                    placed_at=now,
+                    updated_at=now,
+                    dry_run=True,
+                )
+                session.add(order)
+                alert.processed = True
+                session.commit()
+                return
 
         kite_client = get_session_manager().get_kite()
 
@@ -1700,7 +1816,7 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
         # Risk-based sizing: cap position so loss at SL ≤ capital_risk (mirrors NG futures).
         # For NSE (mcx_units=1): sl_per_unit = ltp×SL_PCT; compute_futures_qty divides by lot_size.
         # For MCX (lot_size=1):  sl_per_unit = ltp×mcx_units×SL_PCT (= risk per Kite lot directly).
-        daily_remaining_opt = risk.daily_loss_remaining(session, now)
+        daily_remaining_opt = risk.daily_loss_remaining(session, now, dry_run=_dry_run(settings))
         capital_risk_opt = min(
             Decimal(str(state.get_capital_per_trade(settings.CAPITAL_PER_TRADE))) * settings.RISK_PCT,
             daily_remaining_opt,
@@ -1800,15 +1916,25 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
 
         _opt_lp = alert_data.limit_price
         _opt_ot = "LIMIT" if _opt_lp else "MARKET"
-        kite_order_id = place_entry(
-            kite_client, selection.instrument, entry_side, qty, _opt_ot, product, price=_opt_lp
-        )
+        if _paper:
+            from app.paper_trading import new_paper_order_id
+            kite_order_id = new_paper_order_id()
+            log.info(
+                "[%s] Alert %d: DRY_RUN — simulated %s %d lot(s) %s @ %.2f (%s)",
+                trade_mode, alert_id, entry_side, lots_count,
+                selection.instrument.tradingsymbol,
+                float(_opt_lp) if _opt_lp else option_ltp, kite_order_id,
+            )
+        else:
+            kite_order_id = place_entry(
+                kite_client, selection.instrument, entry_side, qty, _opt_ot, product, price=_opt_lp
+            )
         if kite_order_id:
             _pending_order_meta[kite_order_id] = {
                 "instrument_type": flag,
                 "underlying": underlying.name,
                 "entry_side": entry_side,
-                "dry_run": False,
+                "dry_run": _paper,
             }
 
         order = Order(
@@ -1822,10 +1948,10 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
             price=float(_opt_lp) if _opt_lp else None,
             product=product,
             quantity=qty,
-            status="PENDING",
+            status="DRY_RUN" if _paper else "PENDING",
             placed_at=now,
             updated_at=now,
-            dry_run=False,
+            dry_run=_paper,
         )
         session.add(order)
         session.flush()
@@ -1835,7 +1961,15 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
         # Register AFTER commit so _on_entry_filled can find the Order row.
         # MARKET orders fill in milliseconds; committing first closes the race.
         if kite_order_id:
-            if _watcher is not None:
+            if _paper:
+                # Simulated fill at LTP (or the requested limit) — same handler
+                # as a live fill: Position + DRY_RUN Gtt row, no Kite calls.
+                _on_entry_filled(EntryFilledEvent(
+                    kite_order_id=kite_order_id,
+                    fill_price=float(_opt_lp) if _opt_lp else option_ltp,
+                    fill_qty=qty,
+                ))
+            elif _watcher is not None:
                 _watcher.watch_order(kite_order_id, kite_fetcher=get_session_manager().get_kite)
             else:
                 log.error(
@@ -2286,6 +2420,21 @@ _CSS = (
     "letter-spacing:.06em;margin:8px 0 6px}"
     ".hm{display:grid;grid-template-columns:repeat(6,26px);gap:4px}"
     ".hm div{width:26px;height:26px;border-radius:5px;background:#F2F2F7}"
+
+    # ── Strategy scorecard ───────────────────────────────────────────────────
+    ".sct-wrap{padding:6px 16px 14px;overflow-x:auto}"
+    ".sct{width:100%;border-collapse:collapse;font-size:.78em}"
+    ".sct th{text-align:left;font-size:.82em;color:#8E8E93;text-transform:uppercase;"
+    "letter-spacing:.05em;font-weight:600;padding:6px 8px;border-bottom:1px solid #E5E5EA}"
+    ".sct td{padding:7px 8px;border-bottom:1px solid #F2F2F7;"
+    "font-variant-numeric:tabular-nums;white-space:nowrap}"
+    ".sct td.scn{font-weight:600}"
+    ".sct td.ok{color:#34C759}.sct td.bd{color:#FF3B30}"
+    ".scb{display:inline-block;padding:2px 8px;border-radius:20px;"
+    "font-size:.82em;font-weight:600;white-space:nowrap}"
+    ".scb-ok{background:rgba(52,199,89,.14);color:#248A3D}"
+    ".scb-wn{background:rgba(255,149,0,.14);color:#C93400}"
+    ".scb-p{background:#F2F2F7;color:#636366}"
 )
 
 # ── /control live script ──────────────────────────────────────────────────────
@@ -3048,7 +3197,8 @@ async def history(
         q = q.filter(ClosedTrade.closed_at >= datetime.now(IST) - timedelta(days=days))
     rows = q.order_by(ClosedTrade.closed_at.desc()).limit(200).all()
 
-    total_pnl = sum((r.pnl or 0) for r in rows)
+    total_pnl = sum((r.pnl or 0) for r in rows if not r.dry_run)
+    n_paper = sum(1 for r in rows if r.dry_run)
     pnl_vc = "ok" if total_pnl >= 0 else "bd"
 
     day_opts = [(1, "Today"), (3, "3 Days"), (7, "7 Days"), (0, "All")]
@@ -3062,12 +3212,14 @@ async def history(
         f"<div class='card' style='display:flex;gap:16px;align-items:center;padding:11px 18px;margin-bottom:14px'>"
         f"<span style='font-size:.78em;color:#8492a6'>Period P&amp;L</span>"
         f"<span class='mv {pnl_vc}' style='font-size:.95em'>&#x20B9;{total_pnl:+.2f}</span>"
-        f"<span style='font-size:.78em;color:#8492a6;margin-left:auto'>{len(rows)} trade(s)</span>"
+        + (f"<span style='font-size:.72em;color:#8492a6'>&#128221; {n_paper} paper excluded</span>" if n_paper else "")
+        + f"<span style='font-size:.78em;color:#8492a6;margin-left:auto'>{len(rows)} trade(s)</span>"
         f"</div>"
     )
 
     rows_html = "".join(
-        f"<tr><td>{r.id}</td><td style='font-weight:600'>{r.tradingsymbol}</td>"
+        f"<tr><td>{r.id}</td><td style='font-weight:600'>{r.tradingsymbol}"
+        f"{' &#128221;' if r.dry_run else ''}</td>"
         f"<td class='tr {'ok' if (r.pnl or 0) >= 0 else 'bd'}'>&#x20B9;{(r.pnl or 0):+.2f}</td>"
         f"<td>{r.exit_reason}</td>"
         f"<td>{r.closed_at.strftime('%m/%d %H:%M') if r.closed_at else '—'}</td></tr>"
@@ -3301,11 +3453,11 @@ async def control_page(
     eff_capital         = state.get_capital_per_trade(settings.CAPITAL_PER_TRADE)
     eff_consec_limit    = state.get_consecutive_losses_limit(settings.CONSECUTIVE_LOSSES_LIMIT)
 
-    # ── today's risk summary ──────────────────────────────────────────────────
-    today_loss = _realised_loss_today(session)
-    trades_today = _trades_today_count(session)
-    consec = _consecutive_losses(session)
-    open_pos = _open_position_count(session)
+    # ── today's risk summary (scoped to the active paper/live mode) ───────────
+    today_loss = _realised_loss_today(session, paper=paper)
+    trades_today = _trades_today_count(session, paper=paper)
+    consec = _consecutive_losses(session, paper=paper)
+    open_pos = _open_position_count(session, paper=paper)
     loss_pct = (today_loss / eff_max_loss * 100) if eff_max_loss > 0 else 0
 
     # ── meter helpers ─────────────────────────────────────────────────────────
@@ -3445,11 +3597,14 @@ async def control_page(
     ) or ("<li><span class='fe' style='text-align:center;color:#aaa'>"
           "No activity in the last 48h</span></li>")
 
-    # ── performance: last 90 days of closed trades ───────────────────────────
+    # ── performance: last 90 days of closed trades (live only) ───────────────
     perf_cutoff = datetime.now(IST) - timedelta(days=90)
     closed_rows = (
         session.query(ClosedTrade.closed_at, ClosedTrade.pnl)
-        .filter(ClosedTrade.closed_at >= perf_cutoff)
+        .filter(
+            ClosedTrade.closed_at >= perf_cutoff,
+            ClosedTrade.dry_run == False,  # noqa: E712
+        )
         .order_by(ClosedTrade.closed_at.asc())
         .all()
     )
@@ -3515,6 +3670,97 @@ async def control_page(
                     f"{sign}&#8377;{abs(v):,.0f}'></div>")
     hm_html = "<div class='hm'>" + "".join(hm_cells) + "</div>"
 
+    # ── strategy scorecard: per-strategy stats over 90 days, paper vs live ────
+    # The deploy-small-then-scale gate: a strategy earns size only after
+    # ~30 live trading days of positive evidence.
+    _SCORE_PROVEN_DAYS = 30
+
+    def inr_s(v: float) -> str:
+        sign = "+" if v > 0 else ("&minus;" if v < 0 else "")
+        return f"{sign}&#8377;{abs(v):,.0f}"
+    sc_rows = (
+        session.query(
+            ClosedTrade.strategy_id, ClosedTrade.dry_run,
+            ClosedTrade.closed_at, ClosedTrade.pnl,
+        )
+        .filter(ClosedTrade.closed_at >= perf_cutoff)
+        .order_by(ClosedTrade.closed_at.asc())
+        .all()
+    )
+    _sc_groups: dict[tuple[str, bool], dict] = {}
+    for _sid, _sdry, _sts, _spnl in sc_rows:
+        if _spnl is None:
+            continue
+        _key = (_sid or "manual", bool(_sdry))
+        g = _sc_groups.setdefault(_key, {"pnls": [], "days": set()})
+        g["pnls"].append(_spnl)
+        g["days"].add(_fts(_sts).astimezone(IST).date())
+
+    def _sc_stats(g: dict) -> dict:
+        _pnls = g["pnls"]
+        _n = len(_pnls)
+        _wins = sum(1 for p in _pnls if p > 0)
+        _cum = _pk = 0.0
+        _dd = 0.0
+        for p in _pnls:
+            _cum += p
+            _pk = max(_pk, _cum)
+            _dd = min(_dd, _cum - _pk)
+        return {
+            "n": _n,
+            "win_rate": _wins / _n * 100 if _n else 0.0,
+            "expectancy": sum(_pnls) / _n if _n else 0.0,
+            "total": sum(_pnls),
+            "max_dd": _dd,
+            "days": len(g["days"]),
+        }
+
+    def _sc_name(sid: str) -> str:
+        label = sid
+        if sid.startswith("sched_straddle_"):
+            label = sid.removeprefix("sched_straddle_") + " straddle"
+        elif sid.startswith("voice_"):
+            label = "voice"
+        elif sid == "manual":
+            label = "manual / other"
+        return label if len(label) <= 28 else label[:27] + "&hellip;"
+
+    _sc_entries = sorted(
+        ((k, _sc_stats(g)) for k, g in _sc_groups.items()),
+        key=lambda kv: (kv[0][1], -kv[1]["total"]),  # live first, then total P&L desc
+    )
+    sc_trs: list[str] = []
+    for (_sid, _sdry), st in _sc_entries:
+        if _sdry:
+            _badge = "<span class='scb scb-p'>&#128221; paper</span>"
+        elif st["days"] >= _SCORE_PROVEN_DAYS and st["total"] > 0:
+            _badge = f"<span class='scb scb-ok'>proven &middot; {st['days']}d</span>"
+        else:
+            _badge = f"<span class='scb scb-wn'>proving &middot; {st['days']}/{_SCORE_PROVEN_DAYS}d</span>"
+        _exp_cls = "ok" if st["expectancy"] > 0 else ("bd" if st["expectancy"] < 0 else "")
+        _tot_cls = "ok" if st["total"] > 0 else ("bd" if st["total"] < 0 else "")
+        sc_trs.append(
+            "<tr>"
+            f"<td class='scn'>{_sc_name(_sid)}</td>"
+            f"<td>{_badge}</td>"
+            f"<td>{st['n']}</td>"
+            f"<td>{st['win_rate']:.0f}%</td>"
+            f"<td class='{_exp_cls}'>{inr_s(st['expectancy'])}</td>"
+            f"<td class='{_tot_cls}'>{inr_s(st['total'])}</td>"
+            f"<td class='bd'>{('&minus;&#8377;' + format(abs(st['max_dd']), ',.0f')) if st['max_dd'] < 0 else '&#8377;0'}</td>"
+            "</tr>"
+        )
+    scorecard_html = (
+        "<div class='sct-wrap'><table class='sct'>"
+        "<tr><th>strategy</th><th></th><th>trades</th><th>win</th>"
+        "<th>expect/tr</th><th>total P&amp;L</th><th>max DD</th></tr>"
+        + "".join(sc_trs)
+        + "</table></div>"
+        if sc_trs else
+        "<div style='color:#aaa;text-align:center;padding:12px 0'>"
+        "No closed trades in the last 90 days</div>"
+    )
+
     # ── intraday P&L snapshots (today) for the hero sparkline ────────────────
     _snap_start = datetime.now(IST).replace(hour=0, minute=0, second=0, microsecond=0)
     snaps = [
@@ -3532,7 +3778,7 @@ async def control_page(
         sign = "+" if v > 0 else ("&minus;" if v < 0 else "")
         return f"{sign}&#8377;{abs(v):,.0f}"
 
-    realized = _realised_pnl_today(session)
+    realized = _realised_pnl_today(session, paper=paper)
     realized_cls = "ok" if realized > 0 else ("bd" if realized < 0 else "")
     loss_headroom = max(eff_max_loss - today_loss, 0)
     voice_on = is_voice_enabled()
@@ -3838,6 +4084,12 @@ async def control_page(
         + "<div class='hmwrap'><div class='hmlbl'>Daily P&amp;L &middot; last 6 weeks"
         + " &middot; rows Mon&rarr;Fri</div>" + hm_html + "</div></div>"
 
+        # strategy scorecard — the deploy-small-then-scale gate
+        + "<div class='card'><div class='ct'>Strategies &mdash; 90 days"
+        + "<span style='float:right;font-weight:400;color:#aaa;font-size:11px'>"
+        + f"scale after {_SCORE_PROVEN_DAYS} live days</span></div>"
+        + scorecard_html + "</div>"
+
         # activity feed
         + "<div class='card'><div class='ct'>Activity &mdash; 48h</div>"
         + "<div class='fchips'>"
@@ -3880,13 +4132,14 @@ async def control_summary(
     except Exception:
         sess_valid = False
     _, next_label = _todays_schedule(settings)
+    _paper_now = _dry_run(settings)
     return {
-        "realized": _realised_pnl_today(session),
-        "today_loss": _realised_loss_today(session),
+        "realized": _realised_pnl_today(session, paper=_paper_now),
+        "today_loss": _realised_loss_today(session, paper=_paper_now),
         "max_loss": state.get_max_daily_loss(settings.MAX_DAILY_LOSS_ABS),
-        "trades_today": _trades_today_count(session),
+        "trades_today": _trades_today_count(session, paper=_paper_now),
         "max_trades": state.get_max_trades_per_day(settings.MAX_TRADES_PER_DAY),
-        "open_positions": _open_position_count(session),
+        "open_positions": _open_position_count(session, paper=_paper_now),
         "max_positions": state.get_max_open_positions(settings.MAX_OPEN_POSITIONS),
         "consec_losses": _consecutive_losses(session),
         "consec_limit": state.get_consecutive_losses_limit(settings.CONSECUTIVE_LOSSES_LIMIT),

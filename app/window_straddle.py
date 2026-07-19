@@ -277,6 +277,8 @@ def squareoff_window_straddle(
                 Position.instrument_type.in_(["CE", "PE"]),
                 Order.straddle_id.isnot(None),
                 ClosedTrade.id == None,  # noqa: E711
+                # Paper straddles are closed at LTP by the paper monitor.
+                Order.dry_run == False,  # noqa: E712
             )
             .all()
         )
@@ -361,6 +363,8 @@ def squareoff_window_straddle(
                     product=product, entry_side=entry_side,
                     limit_price=limit_px,
                 )
+                from app.storage import trade_meta_for_order
+                _ws_sid, _ws_dry = trade_meta_for_order(session, entry_order)
                 ct = ClosedTrade(
                     position_id=position.id,
                     exchange=position.exchange,
@@ -371,6 +375,8 @@ def squareoff_window_straddle(
                     exit_reason="window_straddle_exit",
                     opened_at=position.opened_at,
                     closed_at=now,
+                    strategy_id=_ws_sid,
+                    dry_run=_ws_dry,
                 )
                 session.add(ct)
                 log.info(

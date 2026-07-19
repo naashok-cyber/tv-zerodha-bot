@@ -239,6 +239,8 @@ def squareoff_scheduled_straddles(settings: Any, session_factory: Any) -> None:
                 Position.instrument_type.in_(["CE", "PE"]),
                 Order.straddle_id.isnot(None),
                 ClosedTrade.id == None,  # noqa: E711
+                # Paper straddles are closed at LTP by the paper monitor.
+                Order.dry_run == False,  # noqa: E712
             )
             .all()
         )
@@ -303,6 +305,8 @@ def squareoff_scheduled_straddles(settings: Any, session_factory: Any) -> None:
 
                 sq_id = square_off(kite, instrument, position.quantity, product, entry_side)
 
+                from app.storage import trade_meta_for_order
+                _sq_sid, _sq_dry = trade_meta_for_order(session, entry_order)
                 ct = ClosedTrade(
                     position_id=position.id,
                     exchange=position.exchange,
@@ -313,6 +317,8 @@ def squareoff_scheduled_straddles(settings: Any, session_factory: Any) -> None:
                     exit_reason=_SQUAREOFF_REASON,
                     opened_at=position.opened_at,
                     closed_at=now,
+                    strategy_id=_sq_sid,
+                    dry_run=_sq_dry,
                 )
                 session.add(ct)
                 log.info(

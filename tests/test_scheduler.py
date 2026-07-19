@@ -424,11 +424,14 @@ class TestPnlSnapshotJob:
             )
             session.add(pos)
             session.flush()
+            # dry_run=True matches the paper mode the default test settings
+            # run in — the snapshot job samples the active mode's trades.
             session.add(ClosedTrade(
                 position_id=pos.id, exchange="NFO",
                 tradingsymbol="NIFTY25JUL24800PE", entry_premium=100.0,
                 exit_premium=80.0, pnl=1500.0, exit_reason="TARGET_HIT",
                 opened_at=now - timedelta(hours=2), closed_at=now,
+                dry_run=True,
             ))
             session.commit()
 

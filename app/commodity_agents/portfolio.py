@@ -28,6 +28,12 @@ _ALERT_COOLDOWN_S = 3600            # one drift alert per straddle per hour
 _last_alert: dict[str, float] = {}
 
 
+def _paper_mode(settings: Any) -> bool:
+    """Effective paper/live mode (the /control toggle beats .env DRY_RUN)."""
+    import app.state as state
+    return state.is_paper_mode(settings.DRY_RUN)
+
+
 def _vega_theta(exch: str, flag: str, under: float, strike: float,
                 t: float, r: float, sigma: float) -> tuple[float | None, float | None]:
     try:
@@ -56,7 +62,11 @@ def compute_portfolio_greeks(session: Any, kite: Any, settings: Any,
         .outerjoin(ClosedTrade, Position.id == ClosedTrade.position_id)
         .filter(ClosedTrade.id == None,  # noqa: E711 — open positions only
                 Position.exchange.in_(["MCX", "MCX-OPT", "NFO"]),
-                Position.instrument_type.in_(["CE", "PE"]))
+                Position.instrument_type.in_(["CE", "PE"]),
+                # Scope to the active mode: in live mode paper positions must
+                # never feed greeks/defense (they have no broker-side risk);
+                # in paper mode the defense monitors the simulated straddles.
+                Order.dry_run == _paper_mode(settings))  # noqa: E712
         .all()
     )
     if not rows:

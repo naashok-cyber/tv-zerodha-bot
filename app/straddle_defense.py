@@ -219,7 +219,8 @@ def select_wings(session: Any, settings: Any, straddle_key: str) -> dict | None:
         .outerjoin(ClosedTrade, Position.id == ClosedTrade.position_id)
         .filter(Order.straddle_id == straddle_key,
                 Order.transaction_type == "SELL",
-                ClosedTrade.id == None)  # noqa: E711
+                ClosedTrade.id == None,  # noqa: E711
+                Order.dry_run == False)  # noqa: E712 — never hedge paper straddles with real wings
         .all()
     )
     legs: dict[str, tuple[Any, Any]] = {}
@@ -737,11 +738,14 @@ def unwind_hedge(session: Any, settings: Any, action: Any, now: datetime,
             continue
         pos, order = row
         px = exit_px.get(pos.tradingsymbol, 0.0)
+        from app.storage import trade_meta_for_order
+        _hu_sid, _hu_dry = trade_meta_for_order(session, order)
         session.add(ClosedTrade(
             position_id=pos.id, exchange=pos.exchange, tradingsymbol=pos.tradingsymbol,
             entry_premium=pos.entry_premium, exit_premium=px,
             pnl=round((px - pos.entry_premium) * pos.quantity * units, 2),
             exit_reason="HEDGE_UNWIND", opened_at=pos.opened_at, closed_at=now,
+            strategy_id=_hu_sid, dry_run=_hu_dry,
         ))
 
     restored = 0
