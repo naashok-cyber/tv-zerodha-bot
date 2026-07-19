@@ -548,14 +548,19 @@ def register_jobs(scheduler: Any, settings: Any, session_factory: Any) -> None:
       fresh read lands right after the number, not at the next 30-min tick
     """
     interval = settings.COMMODITY_AGENTS_INTERVAL_MIN
+    # Cron minute fields only span 0-59, so intervals of an hour or more are
+    # expressed as an hour step at minute 0 (e.g. 120 -> hour="9-23/2").
+    if interval >= 60:
+        cadence = {"hour": f"9-23/{max(1, interval // 60)}", "minute": "0"}
+    else:
+        cadence = {"hour": "9-23", "minute": f"*/{interval}"}
     scheduler.add_job(
         run_all_commodities,
         trigger="cron",
-        hour="9-23",
-        minute=f"*/{interval}",
         args=[session_factory, settings],
         id="commodity_agents_cycle",
         misfire_grace_time=300,
+        **cadence,
     )
     scheduler.add_job(
         run_commodity_pipeline_by_name, trigger="cron", day_of_week="thu",
