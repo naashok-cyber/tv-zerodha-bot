@@ -224,13 +224,24 @@ class Settings(BaseSettings):
     NG_STRADDLE_ADX_THRESHOLD: float = 25.0   # skip if ADX >= this
     STRADDLE_SQUAREOFF_TIME: str = "23:20"    # HH:MM IST
 
-    # ── Straddle defense (Phase 1: monitor + Telegram alerts, NO execution) ──
+    # ── Straddle defense (monitor + IV-expansion wing hedging) ────────────────
     STRADDLE_DEFENSE_ENABLED: bool = False           # live-toggleable at /control
     STRADDLE_DEFENSE_DRAWDOWN_TRIGGER: float = 5000.0  # ₹ drawdown from peak straddle MTM
     STRADDLE_DEFENSE_IV_SAMPLES: int = 3             # consecutive rising IV deltas to confirm expansion
     STRADDLE_DEFENSE_MAX_ALERTS_PER_DAY: int = 2     # per straddle; hysteresis
     STRADDLE_DEFENSE_REARM_MINUTES: int = 20         # quiet period after an alert
-    STRADDLE_DEFENSE_PREHEDGE_TIME: str = "17:45"    # daily pre-hedge reminder (IST; "" disables)
+    STRADDLE_DEFENSE_PREHEDGE_TIME: str = "17:45"    # daily pre-hedge window (IST; "" disables)
+    # Phase 2: execution. ALERT = notify only. SEMI_AUTO = build wing proposal,
+    # execute on two-tap approval at /control. AUTO = place wings unattended —
+    # additionally hard-gated by STRADDLE_DEFENSE_AUTO_EXECUTE (env-only).
+    STRADDLE_DEFENSE_MODE: str = "ALERT"             # ALERT | SEMI_AUTO | AUTO (cyclable at /control)
+    STRADDLE_DEFENSE_AUTO_EXECUTE: bool = False      # env-only master gate for AUTO placement
+    STRADDLE_DEFENSE_WING_STEPS: int = 2             # wing distance from short strike, in strike intervals
+    STRADDLE_DEFENSE_MAX_HEDGE_COST: float = 6000.0  # ₹/day hedge-premium budget cap
+    STRADDLE_DEFENSE_PROPOSAL_TTL_MINUTES: int = 10  # SEMI_AUTO proposal expiry
+    STRADDLE_DEFENSE_SUSPEND_GTT: bool = True        # suspend short-leg GTT SLs while wings are on
+    STRADDLE_DEFENSE_UNWIND_TIME: str = "20:45"      # scheduled wing exit after IV cool-off ("" disables)
+    STRADDLE_DEFENSE_FORCE_UNWIND_TIME: str = "23:10"  # hard cutoff — unwind before straddle squareoff
 
     # ── ADX (for scheduled straddle gate) ─────────────────────────────────────
     ADX_PERIOD: int = 14

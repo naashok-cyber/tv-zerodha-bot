@@ -3569,6 +3569,16 @@ async def control_page(
 
     # ── straddle defense card ────────────────────────────────────────────────
     sd_trigger = settings.STRADDLE_DEFENSE_DRAWDOWN_TRIGGER
+    sd_mode_cfg = state.get_straddle_defense_mode(settings.STRADDLE_DEFENSE_MODE)
+    from app.straddle_defense import effective_mode as _sd_eff_mode
+    sd_mode = _sd_eff_mode(settings)
+    sd_mode_label = (f"{sd_mode_cfg} (unarmed &rarr; SEMI_AUTO)"
+                     if sd_mode_cfg == "AUTO" and sd_mode != "AUTO" else sd_mode)
+    # two-tap: first click flips the button to "Confirm?", second submits
+    _tt = ("onclick=\"if(this.dataset.c!=='1'){this.dataset.c='1';var b=this;"
+           "b.dataset.l=b.textContent;b.textContent='Confirm?';"
+           "setTimeout(function(){b.dataset.c='';b.textContent=b.dataset.l;},4000);"
+           "return false}\"")
     sd_rows: list = []
     if sd_enabled:
         try:
@@ -3602,11 +3612,56 @@ async def control_page(
                 f" &middot; alerts {r['alerts']}/{settings.STRADDLE_DEFENSE_MAX_ALERTS_PER_DAY}"
                 f" &middot; {upd}</div>"
             )
+            h = r.get("hedge")
+            if h is not None and h["status"] == "ACTIVE":
+                cost = h["entry_cost"] if h["entry_cost"] is not None else h["est_cost"]
+                sd_parts.append(
+                    "<div class='mdr' style='background:#F0FDF4'>"
+                    f"<div class='mdl'><span class='pill pg'>HEDGED</span>"
+                    f"<span style='font-size:.72em;color:#3C3C43'>&ensp;{h['ce_symbol']} + "
+                    f"{h['pe_symbol']} qty {h['quantity']} &middot; cost &#8377;{cost:,.0f}"
+                    f"{' &middot; paper' if h['dry_run'] else ''}</span></div>"
+                    "<form method='post' action='/control/straddle-defense/unwind' style='margin:0'>"
+                    f"<input type='hidden' name='action_id' value='{h['id']}'>"
+                    f"<button class='btn br2' type='submit' {_tt}>Unwind</button></form></div>"
+                )
+            elif h is not None and h["status"] == "PROPOSED":
+                exp = (h["expires_at"].astimezone(IST).strftime("%H:%M")
+                       if h["expires_at"] is not None and h["expires_at"].tzinfo
+                       else (h["expires_at"].strftime("%H:%M") if h["expires_at"] else "?"))
+                sd_parts.append(
+                    "<div class='mdr' style='background:#FFFBEB'>"
+                    f"<div class='mdl'><span class='pill pa'>PROPOSED</span>"
+                    f"<span style='font-size:.72em;color:#3C3C43'>&ensp;BUY {h['ce_symbol']} + "
+                    f"{h['pe_symbol']} qty {h['quantity']} &asymp; &#8377;{h['est_cost']:,.0f}"
+                    f" &middot; {h['trigger']} &middot; expires {exp}</span></div>"
+                    "<div style='display:flex;gap:6px'>"
+                    "<form method='post' action='/control/straddle-defense/hedge/decision' style='margin:0'>"
+                    f"<input type='hidden' name='action_id' value='{h['id']}'>"
+                    f"<input type='hidden' name='token' value='{h['confirm_token']}'>"
+                    "<input type='hidden' name='decision' value='approve'>"
+                    f"<button class='btn bg2' type='submit' {_tt}>Approve</button></form>"
+                    "<form method='post' action='/control/straddle-defense/hedge/decision' style='margin:0'>"
+                    f"<input type='hidden' name='action_id' value='{h['id']}'>"
+                    f"<input type='hidden' name='token' value='{h['confirm_token']}'>"
+                    "<input type='hidden' name='decision' value='reject'>"
+                    "<button class='btn br2' type='submit'>Reject</button></form>"
+                    "</div></div>"
+                )
+            else:
+                sd_parts.append(
+                    "<div class='mdr'>"
+                    "<div class='mdl'><span style='font-size:.72em;color:#8E8E93'>"
+                    "No wings on &mdash; manual hedge builds a proposal to approve</span></div>"
+                    "<form method='post' action='/control/straddle-defense/hedge' style='margin:0'>"
+                    f"<input type='hidden' name='straddle_key' value='{r['key']}'>"
+                    "<button class='btn bn' type='submit'>Hedge now</button></form></div>"
+                )
         sd_body = "".join(sd_parts)
     sd_card = (
         "<div class='card'><div class='ct'>Straddle Defense"
         "<span style='margin-left:auto;text-transform:none;letter-spacing:0;color:#8E8E93'>"
-        "drawdown vs trigger &middot; alert-only</span></div>"
+        f"drawdown vs trigger &middot; mode {sd_mode_label}</span></div>"
         + sd_body + "</div>"
     )
 
@@ -3705,9 +3760,13 @@ async def control_page(
         + "<form method='post' action='/control/ng-hedge/toggle' style='margin:0'>"
         + f"<button class='btn {hedge_cls}' type='submit'>{hedge_lbl}</button></form></div>"
         + f"<div class='mdr'><div class='mdl'>Straddle Defense&ensp;<span class='pill {'pg' if sd_enabled else 'pr'}'>{'RUNNING' if sd_enabled else 'STOPPED'}</span>"
-        + "<span style='font-size:.70em;color:#8E8E93'>&ensp;1-min monitor &middot; alert-only &middot; drawdown+IV trigger</span></div>"
+        + f"<span class='pill {'pa' if sd_mode != 'ALERT' else 'pm'}'>{sd_mode}</span>"
+        + "<span style='font-size:.70em;color:#8E8E93'>&ensp;1-min monitor &middot; drawdown+IV trigger &middot; wing hedging</span></div>"
+        + "<div style='display:flex;gap:6px'>"
+        + "<form method='post' action='/control/straddle-defense/mode' style='margin:0'>"
+        + "<button class='btn bn' type='submit'>Mode</button></form>"
         + "<form method='post' action='/control/straddle-defense/toggle' style='margin:0'>"
-        + f"<button class='btn {'br2' if sd_enabled else 'bg2'}' type='submit'>{'Stop' if sd_enabled else 'Start'}</button></form></div>"
+        + f"<button class='btn {'br2' if sd_enabled else 'bg2'}' type='submit'>{'Stop' if sd_enabled else 'Start'}</button></form></div></div>"
         + "</div>"
 
         # risk params — collapsible drawer; summary shows effective values
@@ -3901,13 +3960,100 @@ async def toggle_straddle_defense(
     new_val = state.toggle_straddle_defense_enabled(settings.STRADDLE_DEFENSE_ENABLED)
     log.warning("straddle-defense monitor toggled to %s via /control", new_val)
     try:
+        from app.straddle_defense import effective_mode as _sd_eff
         send_telegram(
             settings,
             f"\U0001f6e1 Straddle Defense monitor {'STARTED' if new_val else 'STOPPED'} via /control "
-            f"(alert-only)",
+            f"(mode {_sd_eff(settings)})",
         )
     except Exception as exc:
         log.warning("straddle-defense toggle: telegram notify failed: %s", exc)
+    return Response(status_code=302, headers={"Location": "/control"})
+
+
+@app.post("/control/straddle-defense/mode")
+async def cycle_straddle_defense_mode(
+    _: None = Depends(_auth_guard),
+    settings: Settings = Depends(get_current_settings),
+) -> Response:
+    from app.commodity_agents.notify import send_telegram
+    from app.straddle_defense import effective_mode as _sd_eff
+
+    new_mode = state.cycle_straddle_defense_mode(settings.STRADDLE_DEFENSE_MODE)
+    eff = _sd_eff(settings)
+    log.warning("straddle-defense mode cycled to %s (effective %s) via /control", new_mode, eff)
+    try:
+        note = (" — AUTO is unarmed (STRADDLE_DEFENSE_AUTO_EXECUTE=false), acting as SEMI_AUTO"
+                if new_mode == "AUTO" and eff != "AUTO" else "")
+        send_telegram(settings, f"\U0001f6e1 Straddle Defense mode: {new_mode}{note}")
+    except Exception as exc:
+        log.warning("straddle-defense mode: telegram notify failed: %s", exc)
+    return Response(status_code=302, headers={"Location": "/control"})
+
+
+@app.post("/control/straddle-defense/hedge")
+async def straddle_defense_manual_hedge(
+    _: None = Depends(_auth_guard),
+    settings: Settings = Depends(get_current_settings),
+    db: Session = Depends(get_db_session),
+    straddle_key: str = Form(...),
+) -> Response:
+    """Build a wing-hedge proposal for the straddle; the user then approves it
+    on the card (single execution path for manual and automatic hedges)."""
+    from app.straddle_defense import propose_hedge
+
+    try:
+        action = propose_hedge(db, settings, straddle_key, "manual",
+                               datetime.now(IST), "MANUAL")
+        db.commit()
+        if action is None:
+            log.warning("manual hedge for %s: no proposal created (see logs)", straddle_key)
+    except Exception as exc:
+        db.rollback()
+        log.error("manual hedge for %s failed: %s", straddle_key, exc)
+    return Response(status_code=302, headers={"Location": "/control"})
+
+
+@app.post("/control/straddle-defense/hedge/decision")
+async def straddle_defense_hedge_decision(
+    _: None = Depends(_auth_guard),
+    settings: Settings = Depends(get_current_settings),
+    db: Session = Depends(get_db_session),
+    action_id: int = Form(...),
+    token: str = Form(...),
+    decision: str = Form(...),
+) -> Response:
+    from app.straddle_defense import decide_hedge
+
+    try:
+        ok, msg = decide_hedge(db, settings, action_id, token,
+                               decision == "approve", datetime.now(IST))
+        db.commit()
+        log.warning("hedge decision #%d %s: %s (%s)", action_id, decision, ok, msg)
+    except Exception as exc:
+        db.rollback()
+        log.error("hedge decision #%d failed: %s", action_id, exc)
+    return Response(status_code=302, headers={"Location": "/control"})
+
+
+@app.post("/control/straddle-defense/unwind")
+async def straddle_defense_unwind(
+    _: None = Depends(_auth_guard),
+    settings: Settings = Depends(get_current_settings),
+    db: Session = Depends(get_db_session),
+    action_id: int = Form(...),
+) -> Response:
+    from app.storage import HedgeAction
+    from app.straddle_defense import unwind_hedge
+
+    try:
+        action = db.get(HedgeAction, action_id)
+        if action is not None:
+            unwind_hedge(db, settings, action, datetime.now(IST), reason="manual")
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        log.error("hedge unwind #%d failed: %s", action_id, exc)
     return Response(status_code=302, headers={"Location": "/control"})
 
 

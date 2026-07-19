@@ -44,6 +44,7 @@ app/
   adx.py             — Wilder-smoothed ADX computation (no deps, pure stdlib)
   auto_login.py      — Headless Kite login: password + TOTP → access_token (PYOTP_AUTO_LOGIN)
   scheduled_straddle.py — Automated short straddle jobs for CRUDEOILM + NATURALGAS
+  straddle_defense.py — 1-min short-straddle monitor: IV-expansion alerts + wing hedging (ALERT/SEMI_AUTO/AUTO)
   webauthn_routes.py — Dashboard login (password form → session cookie)
   routes/
     voice.py         — /voice/* endpoints (transcribe, confirm, cancel, pending)
@@ -144,6 +145,21 @@ Blocks new entries if any of:
 
 ---
 
+## Straddle Defense (`app/straddle_defense.py`)
+
+1-min cron (Mon–Fri 09–23 IST), live-toggleable at /control. Watches short straddles (via `compute_portfolio_greeks` straddle groups) and defends them against the evening IV expansion:
+
+- **Trigger**: drawdown-from-peak ≥ `STRADDLE_DEFENSE_DRAWDOWN_TRIGGER` AND IV rose `STRADDLE_DEFENSE_IV_SAMPLES` consecutive 1-min samples. Hysteresis: max 2 alerts/day/straddle + 20-min re-arm. Peak persisted to `data/straddle_defense_state.json`; IV/MTM series in `iv_snapshots` (30-day retention).
+- **Modes** (cyclable at /control, persisted): `ALERT` (Telegram only) → `SEMI_AUTO` (creates a `HedgeAction` PROPOSED row; two-tap Approve on /control, TTL 10 min) → `AUTO` (places unattended; requires env-only `STRADDLE_DEFENSE_AUTO_EXECUTE=true` or degrades to SEMI_AUTO).
+- **Hedge** = BUY CE + BUY PE wings `STRADDLE_DEFENSE_WING_STEPS` strike intervals outside the shorts, same expiry/qty (straddle → iron butterfly). ₹/day budget cap `STRADDLE_DEFENSE_MAX_HEDGE_COST`. Wing fills recorded as Order + Position rows (no GTT), so EOD squareoff is a backstop.
+- **GTT coordination**: short-leg GTTs are cancelled on Kite and marked `SUSPENDED` while wings are on (restore params in `hedge_actions.suspended_gtts`); re-placed verbatim at unwind. Failed restores alert loudly.
+- **Unwind**: scheduled at `STRADDLE_DEFENSE_UNWIND_TIME` (AUTO acts; SEMI_AUTO gets one nudge + /control button), force-unwind for all modes at `STRADDLE_DEFENSE_FORCE_UNWIND_TIME` (before the 23:20 straddle squareoff). Wing exits become `ClosedTrade` rows (`exit_reason=HEDGE_UNWIND`).
+- **Tuning**: `scripts/replay_straddle_defense.py` replays recorded `iv_snapshots` through the exact trigger functions across a trigger×samples grid.
+
+Routes: `/control/straddle-defense/{toggle,mode,hedge,hedge/decision,unwind}` (POST).
+
+---
+
 ## Scheduled Straddle (`app/scheduled_straddle.py`)
 
 - **Entry** (`run_scheduled_straddle`):
@@ -239,6 +255,13 @@ Relationships: Alert → [Order] → Position → ClosedTrade; Order → Gtt
 - `CRUDEOILM_STRADDLE_TIME=22:00`, `CRUDEOILM_STRADDLE_QTY=5`
 - `NG_STRADDLE_TIME=22:05`, `NG_STRADDLE_QTY=1`, `NG_STRADDLE_ADX_THRESHOLD=22.0`
 - `STRADDLE_SQUAREOFF_TIME=23:20`
+
+**Straddle defense**
+- `STRADDLE_DEFENSE_ENABLED=false`, `STRADDLE_DEFENSE_MODE=ALERT` — both live-overridable at /control
+- `STRADDLE_DEFENSE_AUTO_EXECUTE=false` — env-only hard gate for AUTO placement
+- `STRADDLE_DEFENSE_DRAWDOWN_TRIGGER=5000`, `STRADDLE_DEFENSE_IV_SAMPLES=3`
+- `STRADDLE_DEFENSE_WING_STEPS=2`, `STRADDLE_DEFENSE_MAX_HEDGE_COST=6000`
+- `STRADDLE_DEFENSE_PREHEDGE_TIME=17:45`, `STRADDLE_DEFENSE_UNWIND_TIME=20:45`, `STRADDLE_DEFENSE_FORCE_UNWIND_TIME=23:10`
 - `ADX_PERIOD=14`, `ADX_CANDLE_INTERVAL=10minute`
 
 **Auto login**

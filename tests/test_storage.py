@@ -42,6 +42,7 @@ EXPECTED_TABLES = {
     "commodity_trade_journal",
     "pnl_snapshots",
     "iv_snapshots",
+    "hedge_actions",
 }
 
 

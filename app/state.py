@@ -32,6 +32,7 @@ _TRAILING_SL_ENABLED: bool = True
 _WINDOW_STRADDLE_ENABLED: bool = False
 _NG_HEDGE_ENABLED_OVERRIDE: Optional[bool] = None  # None = use .env NG_DELTA_HEDGE_ENABLED
 _STRADDLE_DEFENSE_ENABLED_OVERRIDE: Optional[bool] = None  # None = use .env STRADDLE_DEFENSE_ENABLED
+_STRADDLE_DEFENSE_MODE_OVERRIDE: Optional[str] = None  # ALERT/SEMI_AUTO/AUTO; None = use .env
 _MAX_TRADES_PER_DAY_OVERRIDE: Optional[int] = None
 _MAX_OPEN_POSITIONS_OVERRIDE: Optional[int] = None
 _CAPITAL_PER_TRADE_OVERRIDE: Optional[float] = None
@@ -60,6 +61,7 @@ def _save_overrides() -> None:
         "window_straddle_enabled": _WINDOW_STRADDLE_ENABLED,
         "ng_hedge_enabled": _NG_HEDGE_ENABLED_OVERRIDE,
         "straddle_defense_enabled": _STRADDLE_DEFENSE_ENABLED_OVERRIDE,
+        "straddle_defense_mode": _STRADDLE_DEFENSE_MODE_OVERRIDE,
         "max_trades_per_day": _MAX_TRADES_PER_DAY_OVERRIDE,
         "max_open_positions": _MAX_OPEN_POSITIONS_OVERRIDE,
         "capital_per_trade": _CAPITAL_PER_TRADE_OVERRIDE,
@@ -85,6 +87,7 @@ def load_overrides_from_disk() -> None:
     global _MAX_OPEN_POSITIONS_OVERRIDE, _CAPITAL_PER_TRADE_OVERRIDE
     global _CONSECUTIVE_LOSSES_LIMIT_OVERRIDE, _ADX_THRESHOLD_OVERRIDE
     global _NG_HEDGE_ENABLED_OVERRIDE, _STRADDLE_DEFENSE_ENABLED_OVERRIDE
+    global _STRADDLE_DEFENSE_MODE_OVERRIDE
 
     if not os.path.exists(_OVERRIDES_PATH):
         return
@@ -128,6 +131,8 @@ def load_overrides_from_disk() -> None:
             _NG_HEDGE_ENABLED_OVERRIDE = data["ng_hedge_enabled"]
         if "straddle_defense_enabled" in data:
             _STRADDLE_DEFENSE_ENABLED_OVERRIDE = data["straddle_defense_enabled"]
+        if "straddle_defense_mode" in data:
+            _STRADDLE_DEFENSE_MODE_OVERRIDE = data["straddle_defense_mode"]
         if "max_trades_per_day" in data:
             _MAX_TRADES_PER_DAY_OVERRIDE = data["max_trades_per_day"]
         if "max_open_positions" in data:
@@ -438,6 +443,36 @@ def toggle_straddle_defense_enabled(env_default: bool) -> bool:
         return _STRADDLE_DEFENSE_ENABLED_OVERRIDE
 
 
+_SD_MODES = ("ALERT", "SEMI_AUTO", "AUTO")
+
+
+def get_straddle_defense_mode(env_default: str) -> str:
+    with _lock:
+        mode = (_STRADDLE_DEFENSE_MODE_OVERRIDE
+                if _STRADDLE_DEFENSE_MODE_OVERRIDE is not None else env_default)
+    return mode if mode in _SD_MODES else "ALERT"
+
+
+def set_straddle_defense_mode(value: Optional[str]) -> None:
+    """Pass None (or an unknown mode) to clear the override."""
+    global _STRADDLE_DEFENSE_MODE_OVERRIDE
+    with _lock:
+        _STRADDLE_DEFENSE_MODE_OVERRIDE = value if value in _SD_MODES else None
+        _save_overrides()
+
+
+def cycle_straddle_defense_mode(env_default: str) -> str:
+    global _STRADDLE_DEFENSE_MODE_OVERRIDE
+    with _lock:
+        current = (_STRADDLE_DEFENSE_MODE_OVERRIDE
+                   if _STRADDLE_DEFENSE_MODE_OVERRIDE is not None else env_default)
+        if current not in _SD_MODES:
+            current = "ALERT"
+        _STRADDLE_DEFENSE_MODE_OVERRIDE = _SD_MODES[(_SD_MODES.index(current) + 1) % len(_SD_MODES)]
+        _save_overrides()
+        return _STRADDLE_DEFENSE_MODE_OVERRIDE
+
+
 # ── Additional risk overrides ─────────────────────────────────────────────────
 
 def get_max_trades_per_day(env_default: int) -> int:
@@ -519,6 +554,7 @@ def get_all_overrides() -> dict:
             "window_straddle_enabled": _WINDOW_STRADDLE_ENABLED,
             "ng_hedge_enabled": _NG_HEDGE_ENABLED_OVERRIDE,
             "straddle_defense_enabled": _STRADDLE_DEFENSE_ENABLED_OVERRIDE,
+            "straddle_defense_mode": _STRADDLE_DEFENSE_MODE_OVERRIDE,
             "max_trades_per_day": _MAX_TRADES_PER_DAY_OVERRIDE,
             "max_open_positions": _MAX_OPEN_POSITIONS_OVERRIDE,
             "capital_per_trade": _CAPITAL_PER_TRADE_OVERRIDE,

@@ -542,8 +542,9 @@ def make_scheduler(
         )
         log.info(
             "[scheduler] straddle-defense monitor: every 1 min, Mon-Fri 09-23 IST "
-            "(alert-only; trigger=₹%.0f drawdown + %d rising IV samples, enabled=%s "
+            "(mode=%s; trigger=₹%.0f drawdown + %d rising IV samples, enabled=%s "
             "via .env default, live-controllable at /control)",
+            settings.STRADDLE_DEFENSE_MODE,
             settings.STRADDLE_DEFENSE_DRAWDOWN_TRIGGER,
             settings.STRADDLE_DEFENSE_IV_SAMPLES,
             settings.STRADDLE_DEFENSE_ENABLED,

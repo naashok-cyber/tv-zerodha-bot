@@ -219,6 +219,41 @@ class PnlSnapshot(Base):
     open_mtm: Mapped[float | None] = mapped_column(Float)   # null when no Kite session
 
 
+class HedgeAction(Base):
+    """Straddle-defense wing hedge — one row per proposed/placed BUY-wing pair.
+
+    Lifecycle: PROPOSED → ACTIVE → UNWOUND (happy path); PROPOSED → REJECTED /
+    EXPIRED when the user declines or the TTL lapses; FAILED when placement
+    errored. suspended_gtts holds the short legs' GTT parameters (JSON) so the
+    stops can be restored exactly when the wings come off."""
+
+    __tablename__ = "hedge_actions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    straddle_key: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    underlying: Mapped[str] = mapped_column(String(32), nullable=False)
+    exchange: Mapped[str] = mapped_column(String(8), nullable=False, default="MCX")
+    mode: Mapped[str] = mapped_column(String(12), nullable=False)      # SEMI_AUTO / AUTO / MANUAL
+    trigger: Mapped[str] = mapped_column(String(16), nullable=False)   # reactive / prehedge / manual
+    status: Mapped[str] = mapped_column(String(12), nullable=False, default="PROPOSED")
+    ce_symbol: Mapped[str] = mapped_column(String(64), nullable=False)
+    pe_symbol: Mapped[str] = mapped_column(String(64), nullable=False)
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False)     # Kite qty per wing leg
+    est_cost: Mapped[float] = mapped_column(Float, nullable=False)     # ₹ premium at proposal
+    entry_cost: Mapped[float | None] = mapped_column(Float)            # ₹ actually paid
+    exit_value: Mapped[float | None] = mapped_column(Float)            # ₹ recovered at unwind
+    pnl: Mapped[float | None] = mapped_column(Float)                   # exit_value − entry_cost
+    ce_order_id: Mapped[str | None] = mapped_column(String(32))
+    pe_order_id: Mapped[str | None] = mapped_column(String(32))
+    suspended_gtts: Mapped[str | None] = mapped_column(Text)           # JSON restore params
+    confirm_token: Mapped[str | None] = mapped_column(String(64))
+    proposed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    executed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    unwound_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    dry_run: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+
 class KiteSession(Base):
     """Kite access-token lifecycle — kite_session.py writes encrypted ciphertext."""
 

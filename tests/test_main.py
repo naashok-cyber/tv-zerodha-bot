@@ -261,9 +261,40 @@ def test_control_page_renders_dashboard_sections(client) -> None:
     assert "id='eq-chart'" in html
     assert "class='hm'" in html
     assert "window.__snaps=" in html
-    # straddle defense: card + toggle + annunciator pill
+    # straddle defense: card + toggle + annunciator pill + phase-2 mode cycle
     assert "Straddle Defense" in html
     assert "/control/straddle-defense/toggle" in html
+    assert "/control/straddle-defense/mode" in html
+    assert "mode ALERT" in html
+
+
+def test_straddle_defense_mode_cycle_route(client, monkeypatch, tmp_path) -> None:
+    """POST /control/straddle-defense/mode cycles ALERT → SEMI_AUTO and persists."""
+    import app.state as state
+
+    c, _ = client
+    monkeypatch.setattr(state, "_OVERRIDES_PATH", str(tmp_path / "ovr.json"))
+    state.set_straddle_defense_mode(None)
+    try:
+        resp = c.post("/control/straddle-defense/mode", follow_redirects=False)
+        assert resp.status_code == 302
+        assert state.get_straddle_defense_mode("ALERT") == "SEMI_AUTO"
+        resp = c.post("/control/straddle-defense/mode", follow_redirects=False)
+        assert resp.status_code == 302
+        assert state.get_straddle_defense_mode("ALERT") == "AUTO"
+    finally:
+        state.set_straddle_defense_mode(None)
+
+
+def test_straddle_defense_hedge_decision_route_bad_id(client) -> None:
+    """Decision route degrades gracefully for an unknown proposal."""
+    c, _ = client
+    resp = c.post(
+        "/control/straddle-defense/hedge/decision",
+        data={"action_id": "99999", "token": "x", "decision": "approve"},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 302
 
 
 def test_control_summary_endpoint_shape(client) -> None:
