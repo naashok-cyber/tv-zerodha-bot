@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import secrets
 import traceback
 
@@ -233,6 +234,27 @@ def _round_to_tick(price: float, tick: float) -> float:
     if tick <= 0:
         return round(price, 2)
     return round(round(price / tick) * tick, 2)
+
+
+def _scorecard_group(strategy_id: str | None) -> str:
+    """Collapse per-trade-unique strategy_ids into stable scorecard buckets.
+
+    TradingView alert templates commonly stamp {{timenow}}-style unique ids
+    (\"1780293014253\", \"2026-05-12T16:02:13Z\", \"BANKNIFTY-1781511000000\"),
+    and voice orders carry per-order uuid suffixes — without collapsing these,
+    every trade would be its own scorecard row."""
+    sid = strategy_id or "manual"
+    if re.fullmatch(r"voice_[0-9a-f]{6,}", sid):
+        return "voice"
+    if re.fullmatch(r"straddle_[0-9a-f]{6,}", sid):
+        return "voice_straddle"
+    if (
+        re.fullmatch(r"\d{9,}", sid)
+        or re.fullmatch(r"\d{4}-\d{2}-\d{2}T[0-9:.Z+-]+", sid)
+        or re.fullmatch(r"[A-Z0-9]+-\d{9,}", sid)
+    ):
+        return "tv_webhook"
+    return sid
 
 
 # ── EntryFilledEvent callback ─────────────────────────────────────────────────
@@ -3691,7 +3713,7 @@ async def control_page(
     for _sid, _sdry, _sts, _spnl in sc_rows:
         if _spnl is None:
             continue
-        _key = (_sid or "manual", bool(_sdry))
+        _key = (_scorecard_group(_sid), bool(_sdry))
         g = _sc_groups.setdefault(_key, {"pnls": [], "days": set()})
         g["pnls"].append(_spnl)
         g["days"].add(_fts(_sts).astimezone(IST).date())
@@ -3716,13 +3738,16 @@ async def control_page(
         }
 
     def _sc_name(sid: str) -> str:
-        label = sid
+        label = {
+            "tv_webhook": "TV webhook",
+            "voice": "voice",
+            "voice_straddle": "voice straddle",
+            "manual": "manual / other",
+        }.get(sid, sid)
         if sid.startswith("sched_straddle_"):
             label = sid.removeprefix("sched_straddle_") + " straddle"
-        elif sid.startswith("voice_"):
-            label = "voice"
-        elif sid == "manual":
-            label = "manual / other"
+        elif sid.startswith("ws_"):
+            label = sid.removeprefix("ws_").replace("_", " ") + " window"
         return label if len(label) <= 28 else label[:27] + "&hellip;"
 
     _sc_entries = sorted(

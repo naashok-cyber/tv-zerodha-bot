@@ -186,6 +186,24 @@ def test_webhook_dry_run_logs_dry_run_message(client, caplog) -> None:
     assert any("DRY_RUN" in r.message for r in caplog.records)
 
 
+# ── Strategy scorecard grouping ───────────────────────────────────────────────
+
+def test_scorecard_group_collapses_per_trade_ids() -> None:
+    from app.main import _scorecard_group
+
+    # Per-trade-unique ids collapse into stable buckets
+    assert _scorecard_group("1780293014253") == "tv_webhook"
+    assert _scorecard_group("2026-05-12T16:02:13Z") == "tv_webhook"
+    assert _scorecard_group("BANKNIFTY-1781511000000") == "tv_webhook"
+    assert _scorecard_group("voice_b5caa55a") == "voice"
+    assert _scorecard_group("straddle_8419962c") == "voice_straddle"
+    assert _scorecard_group(None) == "manual"
+    # Stable ids pass through unchanged
+    assert _scorecard_group("sched_straddle_CRUDEOILM") == "sched_straddle_CRUDEOILM"
+    assert _scorecard_group("ws_NATURALGAS_0905") == "ws_NATURALGAS_0905"
+    assert _scorecard_group("my_supertrend_v2") == "my_supertrend_v2"
+
+
 # ── Kite callback ─────────────────────────────────────────────────────────────
 
 def test_kite_callback_success_returns_200_html(client) -> None:
