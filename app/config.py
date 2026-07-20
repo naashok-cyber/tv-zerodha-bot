@@ -243,6 +243,22 @@ class Settings(BaseSettings):
     STRADDLE_DEFENSE_UNWIND_TIME: str = "20:45"      # scheduled wing exit after IV cool-off ("" disables)
     STRADDLE_DEFENSE_FORCE_UNWIND_TIME: str = "23:10"  # hard cutoff — unwind before straddle squareoff
 
+    # ── Defined-risk straddle: buy wings at entry ─────────────────────────────
+    # Protection goes on BEFORE the short legs, so the straddle is an iron
+    # butterfly from t=0 instead of waiting for the defense monitor to react.
+    STRADDLE_ENTRY_WINGS_ENABLED: bool = False       # live-toggleable at /control
+    STRADDLE_ENTRY_WING_STEPS: int = 3               # wing distance from ATM, in strike intervals
+    STRADDLE_ENTRY_WING_MAX_COST_PCT: float = 0.35   # skip wings above this share of straddle credit
+    STRADDLE_ENTRY_WINGS_REQUIRED: bool = False      # True = no wings, no straddle
+
+    # ── Partial profit booking (1-min cron) ───────────────────────────────────
+    # Books part of a winning position once it has travelled far enough toward
+    # target, then re-arms the GTT on the remainder at breakeven.
+    PARTIAL_BOOKING_ENABLED: bool = False            # live-toggleable at /control
+    PARTIAL_BOOK_TRIGGER_PCT: float = 0.60           # share of the entry→target distance
+    PARTIAL_BOOK_QTY_PCT: float = 0.50               # share of open qty to book
+    PARTIAL_BOOK_MOVE_SL_TO_BREAKEVEN: bool = True   # remainder rides risk-free after booking
+
     # ── ADX (for scheduled straddle gate) ─────────────────────────────────────
     ADX_PERIOD: int = 14
     ADX_CANDLE_INTERVAL: str = "10minute"     # Kite interval string for historical candles

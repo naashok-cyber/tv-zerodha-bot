@@ -212,13 +212,14 @@ def eod_squareoff_job(
                     product=product, entry_side=entry_side,
                 )
                 _sq_sid, _sq_dry = trade_meta_for_order(session, entry_order)
+                from app.storage import booked_partial_pnl
                 ct = ClosedTrade(
                     position_id=position.id,
                     exchange=position.exchange,
                     tradingsymbol=position.tradingsymbol,
                     entry_premium=position.entry_premium,
                     exit_premium=0.0,
-                    pnl=0.0,
+                    pnl=booked_partial_pnl(position),
                     exit_reason=reason,
                     opened_at=position.opened_at,
                     closed_at=now,
@@ -554,6 +555,21 @@ def make_scheduler(
             max_instances=1,
         )
         log.info("[scheduler] paper-trade monitor: every 1 min, Mon-Fri 09-23 IST (simulated GTT exits + EOD close)")
+        # Always registered; the job checks state.is_partial_booking_enabled()
+        # each tick so it can be started/stopped live from /control.
+        from app.partial_booking import partial_booking_job
+        scheduler.add_job(
+            partial_booking_job,
+            trigger="cron",
+            day_of_week="mon-fri",
+            hour="9-23",
+            minute="*",
+            kwargs={"settings": settings, "session_factory": session_factory},
+            id="partial_booking",
+            misfire_grace_time=30,
+            max_instances=1,
+        )
+        log.info("[scheduler] partial profit booking: every 1 min, Mon-Fri 09-23 IST")
         # Always registered; the job checks state.is_straddle_defense_enabled()
         # each tick so it can be started/stopped live from /control.
         from app.straddle_defense import straddle_defense_job

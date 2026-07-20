@@ -305,7 +305,7 @@ def squareoff_scheduled_straddles(settings: Any, session_factory: Any) -> None:
 
                 sq_id = square_off(kite, instrument, position.quantity, product, entry_side)
 
-                from app.storage import trade_meta_for_order
+                from app.storage import booked_partial_pnl, trade_meta_for_order
                 _sq_sid, _sq_dry = trade_meta_for_order(session, entry_order)
                 ct = ClosedTrade(
                     position_id=position.id,
@@ -313,7 +313,7 @@ def squareoff_scheduled_straddles(settings: Any, session_factory: Any) -> None:
                     tradingsymbol=position.tradingsymbol,
                     entry_premium=position.entry_premium,
                     exit_premium=0.0,
-                    pnl=0.0,
+                    pnl=booked_partial_pnl(position),
                     exit_reason=_SQUAREOFF_REASON,
                     opened_at=position.opened_at,
                     closed_at=now,

@@ -363,7 +363,7 @@ def squareoff_window_straddle(
                     product=product, entry_side=entry_side,
                     limit_price=limit_px,
                 )
-                from app.storage import trade_meta_for_order
+                from app.storage import booked_partial_pnl, trade_meta_for_order
                 _ws_sid, _ws_dry = trade_meta_for_order(session, entry_order)
                 ct = ClosedTrade(
                     position_id=position.id,
@@ -371,7 +371,7 @@ def squareoff_window_straddle(
                     tradingsymbol=position.tradingsymbol,
                     entry_premium=position.entry_premium,
                     exit_premium=0.0,
-                    pnl=0.0,
+                    pnl=booked_partial_pnl(position),
                     exit_reason="window_straddle_exit",
                     opened_at=position.opened_at,
                     closed_at=now,

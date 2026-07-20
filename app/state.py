@@ -33,6 +33,8 @@ _WINDOW_STRADDLE_ENABLED: bool = False
 _NG_HEDGE_ENABLED_OVERRIDE: Optional[bool] = None  # None = use .env NG_DELTA_HEDGE_ENABLED
 _STRADDLE_DEFENSE_ENABLED_OVERRIDE: Optional[bool] = None  # None = use .env STRADDLE_DEFENSE_ENABLED
 _STRADDLE_DEFENSE_MODE_OVERRIDE: Optional[str] = None  # ALERT/SEMI_AUTO/AUTO; None = use .env
+_PARTIAL_BOOKING_ENABLED_OVERRIDE: Optional[bool] = None  # None = use .env PARTIAL_BOOKING_ENABLED
+_ENTRY_WINGS_ENABLED_OVERRIDE: Optional[bool] = None  # None = use .env STRADDLE_ENTRY_WINGS_ENABLED
 _MAX_TRADES_PER_DAY_OVERRIDE: Optional[int] = None
 _MAX_OPEN_POSITIONS_OVERRIDE: Optional[int] = None
 _CAPITAL_PER_TRADE_OVERRIDE: Optional[float] = None
@@ -62,6 +64,8 @@ def _save_overrides() -> None:
         "ng_hedge_enabled": _NG_HEDGE_ENABLED_OVERRIDE,
         "straddle_defense_enabled": _STRADDLE_DEFENSE_ENABLED_OVERRIDE,
         "straddle_defense_mode": _STRADDLE_DEFENSE_MODE_OVERRIDE,
+        "partial_booking_enabled": _PARTIAL_BOOKING_ENABLED_OVERRIDE,
+        "entry_wings_enabled": _ENTRY_WINGS_ENABLED_OVERRIDE,
         "max_trades_per_day": _MAX_TRADES_PER_DAY_OVERRIDE,
         "max_open_positions": _MAX_OPEN_POSITIONS_OVERRIDE,
         "capital_per_trade": _CAPITAL_PER_TRADE_OVERRIDE,
@@ -88,6 +92,7 @@ def load_overrides_from_disk() -> None:
     global _CONSECUTIVE_LOSSES_LIMIT_OVERRIDE, _ADX_THRESHOLD_OVERRIDE
     global _NG_HEDGE_ENABLED_OVERRIDE, _STRADDLE_DEFENSE_ENABLED_OVERRIDE
     global _STRADDLE_DEFENSE_MODE_OVERRIDE
+    global _PARTIAL_BOOKING_ENABLED_OVERRIDE, _ENTRY_WINGS_ENABLED_OVERRIDE
 
     if not os.path.exists(_OVERRIDES_PATH):
         return
@@ -131,6 +136,10 @@ def load_overrides_from_disk() -> None:
             _NG_HEDGE_ENABLED_OVERRIDE = data["ng_hedge_enabled"]
         if "straddle_defense_enabled" in data:
             _STRADDLE_DEFENSE_ENABLED_OVERRIDE = data["straddle_defense_enabled"]
+        if "partial_booking_enabled" in data:
+            _PARTIAL_BOOKING_ENABLED_OVERRIDE = data["partial_booking_enabled"]
+        if "entry_wings_enabled" in data:
+            _ENTRY_WINGS_ENABLED_OVERRIDE = data["entry_wings_enabled"]
         if "straddle_defense_mode" in data:
             _STRADDLE_DEFENSE_MODE_OVERRIDE = data["straddle_defense_mode"]
         if "max_trades_per_day" in data:
@@ -418,6 +427,56 @@ def toggle_ng_hedge_enabled(env_default: bool) -> bool:
         return _NG_HEDGE_ENABLED_OVERRIDE
 
 
+# ── Partial profit booking (1-min cron) ───────────────────────────────────────
+
+def is_partial_booking_enabled(env_default: bool) -> bool:
+    with _lock:
+        return (_PARTIAL_BOOKING_ENABLED_OVERRIDE
+                if _PARTIAL_BOOKING_ENABLED_OVERRIDE is not None else env_default)
+
+
+def set_partial_booking_enabled(value: Optional[bool]) -> None:
+    global _PARTIAL_BOOKING_ENABLED_OVERRIDE
+    with _lock:
+        _PARTIAL_BOOKING_ENABLED_OVERRIDE = value
+        _save_overrides()
+
+
+def toggle_partial_booking_enabled(env_default: bool) -> bool:
+    global _PARTIAL_BOOKING_ENABLED_OVERRIDE
+    with _lock:
+        current = (_PARTIAL_BOOKING_ENABLED_OVERRIDE
+                   if _PARTIAL_BOOKING_ENABLED_OVERRIDE is not None else env_default)
+        _PARTIAL_BOOKING_ENABLED_OVERRIDE = not current
+        _save_overrides()
+        return _PARTIAL_BOOKING_ENABLED_OVERRIDE
+
+
+# ── Defined-risk straddle: wings bought at entry ──────────────────────────────
+
+def is_entry_wings_enabled(env_default: bool) -> bool:
+    with _lock:
+        return (_ENTRY_WINGS_ENABLED_OVERRIDE
+                if _ENTRY_WINGS_ENABLED_OVERRIDE is not None else env_default)
+
+
+def set_entry_wings_enabled(value: Optional[bool]) -> None:
+    global _ENTRY_WINGS_ENABLED_OVERRIDE
+    with _lock:
+        _ENTRY_WINGS_ENABLED_OVERRIDE = value
+        _save_overrides()
+
+
+def toggle_entry_wings_enabled(env_default: bool) -> bool:
+    global _ENTRY_WINGS_ENABLED_OVERRIDE
+    with _lock:
+        current = (_ENTRY_WINGS_ENABLED_OVERRIDE
+                   if _ENTRY_WINGS_ENABLED_OVERRIDE is not None else env_default)
+        _ENTRY_WINGS_ENABLED_OVERRIDE = not current
+        _save_overrides()
+        return _ENTRY_WINGS_ENABLED_OVERRIDE
+
+
 # ── Straddle defense (1-min monitor + alerts; see app/straddle_defense.py) ────
 
 def is_straddle_defense_enabled(env_default: bool) -> bool:
@@ -555,6 +614,8 @@ def get_all_overrides() -> dict:
             "ng_hedge_enabled": _NG_HEDGE_ENABLED_OVERRIDE,
             "straddle_defense_enabled": _STRADDLE_DEFENSE_ENABLED_OVERRIDE,
             "straddle_defense_mode": _STRADDLE_DEFENSE_MODE_OVERRIDE,
+            "partial_booking_enabled": _PARTIAL_BOOKING_ENABLED_OVERRIDE,
+            "entry_wings_enabled": _ENTRY_WINGS_ENABLED_OVERRIDE,
             "max_trades_per_day": _MAX_TRADES_PER_DAY_OVERRIDE,
             "max_open_positions": _MAX_OPEN_POSITIONS_OVERRIDE,
             "capital_per_trade": _CAPITAL_PER_TRADE_OVERRIDE,

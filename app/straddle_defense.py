@@ -791,7 +791,16 @@ def _maybe_unwind_scheduled(session: Any, settings: Any, st: dict, now: datetime
     from app.commodity_agents.notify import send_telegram
     from app.storage import HedgeAction
 
-    actives = session.query(HedgeAction).filter(HedgeAction.status == "ACTIVE").all()
+    # Wings bought with the straddle are structural, not a reaction to an IV
+    # spike: they stay on until the straddle itself is squared off, so the
+    # timed unwinds skip them.
+    from app.entry_wings import ENTRY_TRIGGER
+
+    actives = (
+        session.query(HedgeAction)
+        .filter(HedgeAction.status == "ACTIVE", HedgeAction.trigger != ENTRY_TRIGGER)
+        .all()
+    )
     if not actives:
         return
     now_min = now.hour * 60 + now.minute

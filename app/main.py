@@ -797,7 +797,7 @@ def _on_gtt_filled(event: GttFilledEvent) -> None:
                             limit_price=limit_px,
                         )
                         now2 = datetime.now(IST)
-                        from app.storage import trade_meta_for_order
+                        from app.storage import booked_partial_pnl, trade_meta_for_order
                         _sib_sid, _sib_dry = trade_meta_for_order(session2, sib_order)
                         ct = ClosedTrade(
                             position_id=sib_pos.id,
@@ -805,7 +805,7 @@ def _on_gtt_filled(event: GttFilledEvent) -> None:
                             tradingsymbol=sib_pos.tradingsymbol,
                             entry_premium=sib_pos.entry_premium,
                             exit_premium=0.0,
-                            pnl=0.0,
+                            pnl=booked_partial_pnl(sib_pos),
                             exit_reason="straddle_paired_sl_exit",
                             opened_at=sib_pos.opened_at,
                             closed_at=now2,
@@ -930,6 +930,39 @@ def _process_straddle(alert_id: int, entry_data: dict, settings: Settings) -> No
             except Exception as exc:
                 log.warning("_process_straddle %d: re-validation skipped (%s)", alert_id, exc)
 
+        # Defined-risk entry: wings go on BEFORE the shorts, so the position is
+        # never naked. straddle_id is minted here because the wings are tagged
+        # with it and recorded against it once the shorts fill.
+        straddle_id = str(_uuid.uuid4())
+        wing_plan = None
+        if state.is_entry_wings_enabled(settings.STRADDLE_ENTRY_WINGS_ENABLED):
+            from app.entry_wings import attach_entry_wings
+            try:
+                _wing_kite = get_session_manager().get_kite()
+            except Exception as _wexc:
+                _wing_kite = None
+                log.warning("_process_straddle %d: no Kite session for wings (%s)", alert_id, _wexc)
+            wing_plan, wing_block = attach_entry_wings(
+                session, settings,
+                underlying=underlying, exchange=_straddle_exchange,
+                ce_short_symbol=ce_sym, pe_short_symbol=pe_sym,
+                quantity=total_qty, product=product, kite=_wing_kite, dry=dry,
+            )
+            if wing_block is not None:
+                log.error("_process_straddle %d aborted — wings required but %s",
+                          alert_id, wing_block)
+                try:
+                    from app.commodity_agents.notify import send_telegram
+                    send_telegram(settings, (
+                        f"\U0001f6d1 <b>{underlying} straddle skipped</b> — "
+                        f"defined-risk wings unavailable: {wing_block}"
+                    ))
+                except Exception:
+                    pass
+                alert.processed = True
+                session.commit()
+                return
+
         # Place both legs concurrently
         ce_kite_id = pe_kite_id = None
         ce_err = pe_err = None
@@ -968,6 +1001,9 @@ def _process_straddle(alert_id: int, entry_data: dict, settings: Settings) -> No
                         "_process_straddle %d: CRITICAL — cannot cancel CE %s: %s "
                         "— MANUAL INTERVENTION REQUIRED", alert_id, ce_kite_id, exc,
                     )
+                if wing_plan is not None:
+                    from app.entry_wings import reverse_entry_wings
+                    reverse_entry_wings(wing_plan, kite_client, product)
                 alert.processed = True
                 session.commit()
                 return
@@ -984,6 +1020,18 @@ def _process_straddle(alert_id: int, entry_data: dict, settings: Settings) -> No
                         "_process_straddle %d: CRITICAL — cannot cancel PE %s: %s "
                         "— MANUAL INTERVENTION REQUIRED", alert_id, pe_kite_id, exc,
                     )
+                if wing_plan is not None:
+                    from app.entry_wings import reverse_entry_wings
+                    reverse_entry_wings(wing_plan, kite_client, product)
+                alert.processed = True
+                session.commit()
+                return
+
+            if not ce_kite_id and not pe_kite_id and wing_plan is not None:
+                log.error("_process_straddle %d: both short legs failed — reversing wings", alert_id)
+                from app.entry_wings import reverse_entry_wings
+                reverse_entry_wings(wing_plan, kite_client, product)
+                wing_plan = None
                 alert.processed = True
                 session.commit()
                 return
@@ -1013,9 +1061,7 @@ def _process_straddle(alert_id: int, entry_data: dict, settings: Settings) -> No
                     alert_id, _exc, ce_sym, pe_sym, total_qty, product,
                 )
 
-        # Shared straddle_id links the two Order rows for combined P&L queries
-        straddle_id = str(_uuid.uuid4())
-
+        # straddle_id (minted above, before the wings) links the Order rows
         for kite_oid, instr_type in [(ce_kite_id, "CE"), (pe_kite_id, "PE")]:
             if kite_oid:
                 _pending_order_meta[kite_oid] = {
@@ -1049,6 +1095,15 @@ def _process_straddle(alert_id: int, entry_data: dict, settings: Settings) -> No
                 straddle_id=straddle_id,
             )
             session.add(o)
+
+        # Wings are recorded only now: the shorts are on, so the HedgeAction
+        # that marks this straddle as already-hedged is accurate.
+        if wing_plan is not None:
+            from app.entry_wings import record_entry_wings
+            record_entry_wings(
+                session, settings, wing_plan, wing_plan.get("orders", {}),
+                straddle_key=straddle_id, now=now2, dry=dry, product=product,
+            )
 
         alert.processed = True
         session.commit()
@@ -1599,7 +1654,7 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
                 except Exception as _exc:
                     log.warning("Alert %d: paper EXIT LTP unavailable for %s (%s) — recording pnl=0", alert_id, ts, _exc)
 
-            from app.storage import trade_meta_for_order
+            from app.storage import booked_partial_pnl, trade_meta_for_order
             _exit_sid, _exit_dry = trade_meta_for_order(session, entry_order)
             ct = ClosedTrade(
                 position_id=position.id,
@@ -1607,7 +1662,7 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
                 tradingsymbol=position.tradingsymbol,
                 entry_premium=position.entry_premium,
                 exit_premium=_exit_premium,
-                pnl=_exit_pnl,
+                pnl=_exit_pnl + booked_partial_pnl(position),
                 exit_reason="MANUAL_EXIT",
                 opened_at=position.opened_at,
                 closed_at=now,
@@ -2370,9 +2425,11 @@ _CSS = (
     ".pr2:last-of-type{border-bottom:none}"
     ".pl{flex:1;font-size:13px;color:var(--ink);font-weight:500}"
     ".pi{"
-    "width:90px;padding:7px 10px;"
+    "width:96px;padding:9px 10px;"
     "border:1px solid var(--line);border-radius:8px;"
-    "font-size:13px;text-align:right;background:var(--surface2);color:var(--ink);"
+    # 16px minimum — iOS Safari auto-zooms the page on focus of any input
+    # below that, which is jarring on a page meant to live on an iPhone.
+    "font-size:16px;text-align:right;background:var(--surface2);color:var(--ink);"
     "font-family:inherit;font-variant-numeric:tabular-nums;"
     "transition:border-color .2s,box-shadow .2s"
     "}"
@@ -2518,9 +2575,9 @@ _CSS = (
     ".vm-controls{display:flex;gap:8px;align-items:center;flex-wrap:wrap}"
     ".selw{position:relative;display:inline-flex}"
     ".selw select{"
-    "appearance:none;-webkit-appearance:none;font-family:inherit;font-size:13.5px;"
+    "appearance:none;-webkit-appearance:none;font-family:inherit;font-size:16px;"
     "font-weight:600;letter-spacing:-.01em;color:var(--ink);background:var(--surface2);"
-    "border:1px solid var(--line);border-radius:9px;padding:6px 30px 6px 12px;"
+    "border:1px solid var(--line);border-radius:9px;padding:9px 32px 9px 12px;"
     "cursor:pointer}"
     ".selw::after{content:'';position:absolute;right:12px;top:50%;width:6px;height:6px;"
     "margin-top:-5px;border-right:1.6px solid var(--ink2);"
@@ -2548,6 +2605,27 @@ _CSS = (
     ".vm-legend{margin-left:auto;display:flex;gap:12px;font-size:11px;color:var(--ink3)}"
     ".vm-legend i{display:inline-block;width:14px;height:3px;border-radius:2px;"
     "margin-right:5px;vertical-align:middle}"
+
+    # ── Mobile / touch — this page's primary device is an iPhone ─────────────
+    # No visual scaling here (that's the max-width:980px/640px rules above);
+    # this is purely about the page behaving like a native app on a touch
+    # screen: no accidental Safari zoom, no missed taps, no gray flash, and
+    # content that respects the notch / home-indicator safe areas.
+    "a,button,input,select,summary{-webkit-tap-highlight-color:transparent}"
+    "@media (hover:none) and (pointer:coarse){"
+    ".btn{min-height:44px;padding:11px 16px}"
+    ".btn.bfull{min-height:48px}"
+    ".fchip{min-height:36px;padding:8px 14px}"
+    ".seg button{min-height:36px;padding:8px 13px}"
+    ".tb-nav a{padding:10px 13px;min-height:44px;display:flex;align-items:center}"
+    ".mdr,.pr2{min-height:44px}"
+    ".vm-controls .selw select,.vm-controls .seg button{min-height:40px}"
+    "}"
+    "button,a.btn,.seg button,.fchip{touch-action:manipulation}"
+    ".topbar{padding-top:env(safe-area-inset-top)}"
+    ".wrap{padding-left:calc(16px + env(safe-area-inset-left));"
+    "padding-right:calc(16px + env(safe-area-inset-right));"
+    "padding-bottom:calc(24px + env(safe-area-inset-bottom))}"
 )
 
 # ── /control live script ──────────────────────────────────────────────────────
@@ -3405,7 +3483,7 @@ def _shell(active: str, content: str, wide: bool = False, refresh: bool = False,
     return (
         "<!DOCTYPE html><html lang='en'><head>"
         "<meta charset='UTF-8'>"
-        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+        "<meta name='viewport' content='width=device-width,initial-scale=1,viewport-fit=cover'>"
         "<title>ZeroBot</title>"
         + refresh_meta +
         "<link rel='manifest' href='/manifest.json'>"
@@ -3815,6 +3893,16 @@ async def control_page(
     hedge_label   = "RUNNING" if hedge_enabled else "STOPPED"
     hedge_lbl     = "Stop"    if hedge_enabled else "Start"
     hedge_cls     = "br2"     if hedge_enabled else "bg2"
+    pb_enabled    = state.is_partial_booking_enabled(settings.PARTIAL_BOOKING_ENABLED)
+    pb_pill       = "pg" if pb_enabled else "pm"
+    pb_label      = "ON" if pb_enabled else "OFF"
+    pb_lbl        = "Disable" if pb_enabled else "Enable"
+    pb_cls        = "ba" if pb_enabled else "bg2"
+    ew_enabled    = state.is_entry_wings_enabled(settings.STRADDLE_ENTRY_WINGS_ENABLED)
+    ew_pill       = "pg" if ew_enabled else "pm"
+    ew_label      = "ON" if ew_enabled else "OFF"
+    ew_lbl        = "Disable" if ew_enabled else "Enable"
+    ew_cls        = "ba" if ew_enabled else "bg2"
 
     def src(key: str) -> str:
         return (
@@ -4257,6 +4345,11 @@ async def control_page(
     )
 
     # ── monitoring column ────────────────────────────────────────────────────
+    # Order below is the mobile priority order: this is what stacks top-to-
+    # bottom on a phone (iPhone is the primary device this page is read on),
+    # so the cards you act on during the evening session come first and the
+    # cards you only check occasionally (performance/scorecard/activity) sit
+    # at the bottom. The desktop two-column split reuses the same HTML.
     main_col = (
         # today hero — realised is server-rendered; MTM/theta filled by JS
         "<div class='card'><div class='ct'>Today</div>"
@@ -4270,45 +4363,8 @@ async def control_page(
         + "<div id='day-spark' style='padding:0 18px 12px'></div>"
         + "</div>"
 
-        + vol_card
-
-        # open positions — filled by _CONTROL_LIVE_JS from /commodity-agents/portfolio-greeks
-        + "<div class='card'><div class='ct'>Open Positions &mdash; Live Greeks</div>"
-        + "<div id='pos-wrap' style='overflow-x:auto'>"
-        + "<div id='pos-msg' style='padding:13px 18px;font-size:.78em;color:var(--ink3)'>"
-        + "Loading live positions&hellip;</div></div></div>"
-
-        + sd_card
-
-        # performance — 90 days
-        + "<div class='card'><div class='ct'>Performance &mdash; 90 days</div>"
-        + "<div class='tiles'>" + tiles_html + "</div>"
-        + "<div id='eq-chart' style='padding:6px 18px 4px'></div>"
-        + "<div class='hmwrap'><div class='hmlbl'>Daily P&amp;L &middot; last 6 weeks"
-        + " &middot; rows Mon&rarr;Fri</div>" + hm_html + "</div></div>"
-
-        # strategy scorecard — the deploy-small-then-scale gate
-        + "<div class='card'><div class='ct'>Strategies &mdash; 90 days"
-        + "<span style='margin-left:auto;text-transform:none;letter-spacing:0;"
-        + f"font-weight:400;color:var(--ink3)'>scale after {_SCORE_PROVEN_DAYS} live days</span></div>"
-        + scorecard_html + "</div>"
-
-        # activity feed
-        + "<div class='card'><div class='ct'>Activity &mdash; 48h</div>"
-        + "<div class='fchips'>"
-        + "<button class='fchip on' data-f='all'>All</button>"
-        + "<button class='fchip' data-f='alert'>Alerts</button>"
-        + "<button class='fchip' data-f='order'>Orders</button>"
-        + "<button class='fchip' data-f='gtt'>GTTs</button>"
-        + "<button class='fchip' data-f='exit'>Exits</button>"
-        + "<button class='fchip' data-f='err'>Errors</button>"
-        + "</div><ul class='feed' id='feed'>" + feed_html + "</ul></div>"
-    )
-
-    # ── controls rail ────────────────────────────────────────────────────────
-    rail_col = (
         # risk summary
-        "<div class='card'><div class='ct'>Today's Risk Summary</div>"
+        + "<div class='card'><div class='ct'>Today's Risk Summary</div>"
         + f"<div class='mr'><div class='ml'>Daily loss</div>"
         + f"<div class='mw'><div class='mb {loss_bar}' id='m-loss-b' style='width:{loss_pct_c:.0f}%'></div></div>"
         + f"<div class='mv {loss_vc}' id='m-loss-v'>&#x20B9;{today_loss:.0f}&thinsp;/&thinsp;&#x20B9;{eff_max_loss:.0f}</div></div>"
@@ -4323,20 +4379,23 @@ async def control_page(
         + f"<div class='mv {consec_vc}' id='m-consec-v'>{consec}&thinsp;/&thinsp;{eff_consec_limit}</div></div>"
         + "</div>"
 
+        + vol_card
+
+        # open positions — filled by _CONTROL_LIVE_JS from /commodity-agents/portfolio-greeks
+        + "<div class='card'><div class='ct'>Open Positions &mdash; Live Greeks</div>"
+        + "<div id='pos-wrap' style='overflow-x:auto'>"
+        + "<div id='pos-msg' style='padding:13px 18px;font-size:.78em;color:var(--ink3)'>"
+        + "Loading live positions&hellip;</div></div></div>"
+
+        + sd_card
+
+        + _QUICK_TRADE_PANEL
+
         # today's schedule rail
         + "<div class='card'><div class='ct'>Today's Schedule"
         + f"<span id='next-job' style='margin-left:auto;text-transform:none;letter-spacing:0;"
         + f"color:var(--accent)'>{('next: ' + next_label) if next_label else ''}</span>"
         + "</div>" + rail_html + "</div>"
-
-        + _QUICK_TRADE_PANEL
-
-        # kite session
-        + "<div class='card'><div class='ct'>Kite Session</div>"
-        + f"<div class='mdr'><div class='mdl'>Status&ensp;<span class='pill {sess_pill}'>{sess_label}</span>"
-        + f"<span style='font-size:.72em;color:var(--ink3)'>&ensp;{checked_str}</span></div>"
-        + "<a href='/kite/login' class='btn bn' style='text-decoration:none'>Re-login</a></div>"
-        + "</div>"
 
         # mode / switches
         + "<div class='card'><div class='ct'>Mode</div>"
@@ -4363,8 +4422,56 @@ async def control_page(
         + f"<button class='btn bfull {estop_cls}' type='submit'>{estop_lbl}</button>"
         + "</form></div></div>"
 
+        # defined-risk controls — deploy-small-then-scale features 3 & 4
+        + "<div class='card'><div class='ct'>Risk Controls</div>"
+        + f"<div class='mdr'><div class='mdl'>Partial Profit Booking&ensp;<span class='pill {pb_pill}'>{pb_label}</span>"
+        + f"<span style='font-size:.70em;color:var(--ink3)'>&ensp;books {settings.PARTIAL_BOOK_QTY_PCT*100:.0f}% of qty at "
+        + f"{settings.PARTIAL_BOOK_TRIGGER_PCT*100:.0f}% to target, remainder to breakeven</span></div>"
+        + "<form method='post' action='/control/partial-booking/toggle' style='margin:0'>"
+        + f"<button class='btn {pb_cls}' type='submit'>{pb_lbl}</button></form></div>"
+        + f"<div class='mdr'><div class='mdl'>Defined-Risk Wings&ensp;<span class='pill {ew_pill}'>{ew_label}</span>"
+        + f"<span style='font-size:.70em;color:var(--ink3)'>&ensp;buys wings {settings.STRADDLE_ENTRY_WING_STEPS} strikes "
+        + f"OTM before every new short straddle{' (required)' if settings.STRADDLE_ENTRY_WINGS_REQUIRED else ''}</span></div>"
+        + "<form method='post' action='/control/entry-wings/toggle' style='margin:0'>"
+        + f"<button class='btn {ew_cls}' type='submit'>{ew_lbl}</button></form></div>"
+        + "</div>"
+
+        # kite session
+        + "<div class='card'><div class='ct'>Kite Session</div>"
+        + f"<div class='mdr'><div class='mdl'>Status&ensp;<span class='pill {sess_pill}'>{sess_label}</span>"
+        + f"<span style='font-size:.72em;color:var(--ink3)'>&ensp;{checked_str}</span></div>"
+        + "<a href='/kite/login' class='btn bn' style='text-decoration:none'>Re-login</a></div>"
+        + "</div>"
+
+        # performance — 90 days
+        + "<div class='card'><div class='ct'>Performance &mdash; 90 days</div>"
+        + "<div class='tiles'>" + tiles_html + "</div>"
+        + "<div id='eq-chart' style='padding:6px 18px 4px'></div>"
+        + "<div class='hmwrap'><div class='hmlbl'>Daily P&amp;L &middot; last 6 weeks"
+        + " &middot; rows Mon&rarr;Fri</div>" + hm_html + "</div></div>"
+
+        # strategy scorecard — the deploy-small-then-scale gate
+        + "<div class='card'><div class='ct'>Strategies &mdash; 90 days"
+        + "<span style='margin-left:auto;text-transform:none;letter-spacing:0;"
+        + f"font-weight:400;color:var(--ink3)'>scale after {_SCORE_PROVEN_DAYS} live days</span></div>"
+        + scorecard_html + "</div>"
+
+        # activity feed
+        + "<div class='card'><div class='ct'>Activity &mdash; 48h</div>"
+        + "<div class='fchips'>"
+        + "<button class='fchip on' data-f='all'>All</button>"
+        + "<button class='fchip' data-f='alert'>Alerts</button>"
+        + "<button class='fchip' data-f='order'>Orders</button>"
+        + "<button class='fchip' data-f='gtt'>GTTs</button>"
+        + "<button class='fchip' data-f='exit'>Exits</button>"
+        + "<button class='fchip' data-f='err'>Errors</button>"
+        + "</div><ul class='feed' id='feed'>" + feed_html + "</ul></div>"
+    )
+
+    # ── secondary rail — configuration checked occasionally, not every session ─
+    rail_col = (
         # background jobs
-        + "<div class='card'><div class='ct'>Background Jobs</div>"
+        "<div class='card'><div class='ct'>Background Jobs</div>"
         + f"<div class='mdr'><div class='mdl'>NG Delta Hedge&ensp;<span class='pill {hedge_pill}'>{hedge_label}</span>"
         + "<span style='font-size:.70em;color:var(--ink3)'>&ensp;5-min cron &middot; incl. half-exit, BNF SL, straddle ladder</span></div>"
         + "<form method='post' action='/control/ng-hedge/toggle' style='margin:0'>"
@@ -4539,6 +4646,26 @@ async def toggle_trailing(_: None = Depends(_auth_guard)) -> Response:
 async def toggle_window_straddle(_: None = Depends(_auth_guard)) -> Response:
     new_val = state.toggle_window_straddle()
     log.info("Window straddle toggled to %s", new_val)
+    return Response(status_code=302, headers={"Location": "/control"})
+
+
+@app.post("/control/partial-booking/toggle")
+async def toggle_partial_booking(
+    _: None = Depends(_auth_guard),
+    settings: Settings = Depends(get_current_settings),
+) -> Response:
+    new_val = state.toggle_partial_booking_enabled(settings.PARTIAL_BOOKING_ENABLED)
+    log.info("Partial profit booking toggled to %s", new_val)
+    return Response(status_code=302, headers={"Location": "/control"})
+
+
+@app.post("/control/entry-wings/toggle")
+async def toggle_entry_wings(
+    _: None = Depends(_auth_guard),
+    settings: Settings = Depends(get_current_settings),
+) -> Response:
+    new_val = state.toggle_entry_wings_enabled(settings.STRADDLE_ENTRY_WINGS_ENABLED)
+    log.info("Straddle entry wings toggled to %s", new_val)
     return Response(status_code=302, headers={"Location": "/control"})
 
 

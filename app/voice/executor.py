@@ -234,7 +234,7 @@ def execute_voice_exit(
                 log.warning("voice_exit: paper LTP unavailable for %s (%s) — recording pnl=0",
                             position.tradingsymbol, exc)
 
-        from app.storage import trade_meta_for_order
+        from app.storage import booked_partial_pnl, trade_meta_for_order
         _vx_sid, _vx_dry = trade_meta_for_order(db, entry_order)
         ct = ClosedTrade(
             position_id=position.id,
@@ -242,7 +242,7 @@ def execute_voice_exit(
             tradingsymbol=position.tradingsymbol,
             entry_premium=position.entry_premium,
             exit_premium=_exit_premium,
-            pnl=_exit_pnl,
+            pnl=_exit_pnl + booked_partial_pnl(position),
             exit_reason="VOICE_MANUAL_EXIT",
             opened_at=position.opened_at,
             closed_at=now,

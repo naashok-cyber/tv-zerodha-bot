@@ -133,9 +133,13 @@ def record_trade_result(
     position = db.query(Position).filter(Position.order_id == order.id).first()
     if position is None:
         return
+    # `pnl` covers the slice that just closed; a partially-booked position also
+    # carries an earlier realized amount that belongs in the same trade result.
+    from app.storage import booked_partial_pnl
+    total_pnl = float(pnl) + booked_partial_pnl(position)
     ct = db.query(ClosedTrade).filter(ClosedTrade.position_id == position.id).first()
     if ct is not None:
-        ct.pnl = float(pnl)
+        ct.pnl = total_pnl
         ct.closed_at = closed_at_ist
     else:
         from app.storage import trade_meta_for_order
@@ -146,7 +150,7 @@ def record_trade_result(
             tradingsymbol=position.tradingsymbol,
             entry_premium=position.entry_premium,
             exit_premium=0.0,
-            pnl=float(pnl),
+            pnl=total_pnl,
             exit_reason="GTT_FILLED",
             opened_at=position.opened_at,
             closed_at=closed_at_ist,

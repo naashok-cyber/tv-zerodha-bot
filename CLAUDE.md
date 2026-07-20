@@ -43,6 +43,8 @@ app/
   schemas.py         — AlertPayload (unified webhook schema)
   adx.py             — Wilder-smoothed ADX computation (no deps, pure stdlib)
   paper_trading.py   — Paper-mode fill/exit simulation: 1-min monitor closes paper positions on GTT band breach or EOD
+  partial_booking.py — 1-min monitor: books part of a winning position past a target% threshold, re-arms GTT on the remainder at breakeven
+  entry_wings.py     — Defined-risk straddles: buys protective wings BEFORE the short legs, records an ACTIVE HedgeAction(trigger="entry")
   auto_login.py      — Headless Kite login: password + TOTP → access_token (PYOTP_AUTO_LOGIN)
   scheduled_straddle.py — Automated short straddle jobs for CRUDEOILM + NATURALGAS
   straddle_defense.py — 1-min short-straddle monitor: IV-expansion alerts + wing hedging (ALERT/SEMI_AUTO/AUTO)
@@ -80,6 +82,8 @@ terraform/          — GCP infrastructure
 | POST | `/toggle-emergency-stop` | Set/clear emergency stop |
 | POST | `/toggle-trailing` | Enable/disable trailing SL |
 | POST | `/update-risk` | Update capital/lot/loss overrides |
+| POST | `/control/partial-booking/toggle` | Enable/disable partial profit booking |
+| POST | `/control/entry-wings/toggle` | Enable/disable defined-risk wings at straddle entry |
 | GET | `/kite/login` | Start Kite OAuth flow |
 | GET | `/kite/callback` | Exchange request_token → access_token |
 | GET | `/healthz` | Health check (returns session status) |
@@ -141,6 +145,7 @@ Blocks new entries if any of:
 | NATURALGAS straddle entry | `NG_STRADDLE_TIME` (22:05) | `_PreciseTimer` thread |
 | `eod_squareoff_job` MCX | 23:25 | APScheduler cron |
 | `paper_monitor_job` | every 1 min, Mon–Fri 09–23 | APScheduler cron |
+| `partial_booking_job` | every 1 min, Mon–Fri 09–23 | APScheduler cron |
 | Scheduled straddle squareoff | `STRADDLE_SQUAREOFF_TIME` (23:20) | APScheduler cron |
 
 `_PreciseTimer`: dedicated daemon thread that busy-waits the final 10 s before target to fire within ~100 ms. Used for straddle entries where exact timing matters.
@@ -217,6 +222,26 @@ Paper mode (env `DRY_RUN` or the /control paper toggle) runs the **full real pip
   - Performance card on /control is live-only; the Strategies scorecard shows paper and live separately (📝 badge); /history tags paper rows 📝 and excludes them from period P&L.
 - **Limitations**: fills at LTP (no slippage/spread model), static SL (no trailing — live trailing needs GTT modify calls).
 
+## Partial Profit Booking (`app/partial_booking.py`)
+
+`PARTIAL_BOOKING_ENABLED` (env + live /control toggle, default off). `partial_booking_job` (1-min cron, Mon–Fri 09–23 IST) banks part of a winner instead of waiting for the full target:
+
+- **Trigger**: position has travelled `PARTIAL_BOOK_TRIGGER_PCT` (default 60%) of the entry→target distance.
+- **Action**: closes `PARTIAL_BOOK_QTY_PCT` (default 50%) of the open quantity via a reducing market order, then resizes the GTT to the remainder — at breakeven when `PARTIAL_BOOK_MOVE_SL_TO_BREAKEVEN=true` (default), so the rest rides risk-free. GTT is resized **before** the reducing order goes out, so the position is never larger than its protection; a failed reducing order restores the GTT to full size.
+- **Latch**: `Position.partial_booked_qty` — each position books at most once. The banked amount is stored on the position (`partial_booked_pnl`) and folded into the eventual `ClosedTrade.pnl` by every exit path via `storage.booked_partial_pnl()`.
+- Skips a position when the breakeven band wouldn't bracket the current LTP (would be rejected by the broker as "trigger already met").
+- Mode-scoped like every other job here: paper positions are booked by `paper_pnl`-based math with no broker calls; live positions place a real reducing order via `orders.place_entry` (not `orders.square_off`, whose 30 s per-symbol dedup would swallow a genuine full exit arriving right after).
+
+## Defined-Risk Straddle Entry (`app/entry_wings.py`)
+
+`STRADDLE_ENTRY_WINGS_ENABLED` (env + live /control toggle, default off). When on, every new short straddle in `_process_straddle` buys protective wings **before** the short legs go out, turning it into an iron butterfly from t=0 instead of relying on `straddle_defense` to react after a drawdown:
+
+- **Wings**: long CE + long PE, `STRADDLE_ENTRY_WING_STEPS` (default 3) strike intervals outside the short strikes, same expiry/qty. Reuses `straddle_defense`'s chain-derived strike-interval and wing-selection helpers.
+- **Cost cap**: `STRADDLE_ENTRY_WING_MAX_COST_PCT` (default 35%) — wings costing more than this share of the straddle's credit are skipped.
+- **`STRADDLE_ENTRY_WINGS_REQUIRED`** (default false): when true, a straddle whose wings can't be sourced or priced within cap is abandoned entirely rather than entered naked.
+- **Bookkeeping**: wings are Order + Position rows (no GTT — their loss is bounded by the premium paid) plus a `HedgeAction(trigger="entry", status=ACTIVE)`. That trigger value is what stops `straddle_defense` from proposing a *second* hedge on the same straddle, and what excludes it from the defense's timed unwinds (`_maybe_unwind_scheduled` filters `trigger != "entry"`) — entry wings stay on until the straddle itself is squared off.
+- **Failure handling**: a half-filled wing pair is reversed immediately; if the short legs then fail to fill, the wings are reversed too (`reverse_entry_wings`).
+
 ## Trade Mode & Options Direction
 
 Controlled by `state.get_trade_mode()` (persisted to `data/state_overrides.json`):
@@ -238,7 +263,7 @@ Controlled by `state.get_trade_mode()` (persisted to `data/state_overrides.json`
 |-------|-----------|-------|
 | `Alert` | `strategy_id`, `action`, `processed` | Idempotency key; dedup guard |
 | `Order` | `kite_order_id`, `status`, `fill_price` | PENDING→COMPLETE/REJECTED/DRY_RUN |
-| `Position` | `order_id`, `current_sl`, `quantity` | Mirrors active GTT SL trigger |
+| `Position` | `order_id`, `current_sl`, `quantity` | Mirrors active GTT SL trigger; `quantity` is what remains open — `partial_booked_qty`/`partial_booked_pnl` hold the already-realized slice, folded into `ClosedTrade.pnl` at final exit via `storage.booked_partial_pnl()` |
 | `Gtt` | `kite_gtt_id`, `sl_trigger`, `target_trigger`, `status` | ACTIVE/TRIGGERED/CANCELLED/GTT_FAILED |
 | `ClosedTrade` | `pnl`, `exit_reason`, `strategy_id`, `dry_run` | SL_HIT/TARGET_HIT/MANUAL_EXIT/GTT_FILLED/scheduled_straddle_squareoff; `dry_run=True` = paper trade (excluded from live analytics/guards) |
 | `Instrument` | `instrument_token`, `tradingsymbol`, `expiry`, `tick_size` | Refreshed daily at 08:30 |
@@ -278,6 +303,16 @@ Relationships: Alert → [Order] → Position → ClosedTrade; Order → Gtt
 - `STRADDLE_DEFENSE_WING_STEPS=2`, `STRADDLE_DEFENSE_MAX_HEDGE_COST=6000`
 - `STRADDLE_DEFENSE_PREHEDGE_TIME=17:45`, `STRADDLE_DEFENSE_UNWIND_TIME=20:45`, `STRADDLE_DEFENSE_FORCE_UNWIND_TIME=23:10`
 - `ADX_PERIOD=14`, `ADX_CANDLE_INTERVAL=10minute`
+
+**Defined-risk straddle entry**
+- `STRADDLE_ENTRY_WINGS_ENABLED=false` — live-overridable at /control
+- `STRADDLE_ENTRY_WING_STEPS=3`, `STRADDLE_ENTRY_WING_MAX_COST_PCT=0.35`
+- `STRADDLE_ENTRY_WINGS_REQUIRED=false` — true blocks the straddle entirely if wings aren't available
+
+**Partial profit booking**
+- `PARTIAL_BOOKING_ENABLED=false` — live-overridable at /control
+- `PARTIAL_BOOK_TRIGGER_PCT=0.60`, `PARTIAL_BOOK_QTY_PCT=0.50`
+- `PARTIAL_BOOK_MOVE_SL_TO_BREAKEVEN=true`
 
 **Auto login**
 - `PYOTP_AUTO_LOGIN=false` — headless login (unofficial)

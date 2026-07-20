@@ -163,6 +163,12 @@ class Position(Base):
     # (MAE/MFE inputs; None when trailing never saw a tick for this position).
     max_favorable_price: Mapped[float | None] = mapped_column(Float)
     max_adverse_price: Mapped[float | None] = mapped_column(Float)
+    # Partial profit booking: `quantity` above is what remains open, so the
+    # already-realized slice is banked here and folded into the final
+    # ClosedTrade (position_id is unique — one ClosedTrade per position).
+    partial_booked_qty: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    partial_booked_pnl: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    partial_booked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     order: Mapped[Order] = relationship("Order", back_populates="position")
     gtt: Mapped[Gtt | None] = relationship("Gtt", back_populates="position")
@@ -373,6 +379,18 @@ def trade_meta_for_position(session: Any, position: Any) -> tuple[str | None, bo
     return trade_meta_for_order(session, order)
 
 
+def booked_partial_pnl(position: Any) -> float:
+    """P&L already banked on this position by partial profit booking.
+
+    Every ClosedTrade site adds this to the P&L of the closing slice, so a
+    partially-booked trade reports its whole result rather than only the
+    remainder. Zero for positions that were never partially booked.
+    """
+    if position is None:
+        return 0.0
+    return float(getattr(position, "partial_booked_pnl", 0.0) or 0.0)
+
+
 def init_db(database_url: str | None = None) -> Engine:
     """Create SQLAlchemy engine and all tables.
 
@@ -418,6 +436,9 @@ def _migrate(engine: Engine) -> None:
         "ALTER TABLE commodity_trade_journal ADD COLUMN mfe_pct FLOAT",
         "ALTER TABLE positions ADD COLUMN max_favorable_price FLOAT",
         "ALTER TABLE positions ADD COLUMN max_adverse_price FLOAT",
+        "ALTER TABLE positions ADD COLUMN partial_booked_qty INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE positions ADD COLUMN partial_booked_pnl FLOAT NOT NULL DEFAULT 0",
+        "ALTER TABLE positions ADD COLUMN partial_booked_at DATETIME",
         "ALTER TABLE closed_trades ADD COLUMN strategy_id VARCHAR(64)",
         "ALTER TABLE closed_trades ADD COLUMN dry_run BOOLEAN NOT NULL DEFAULT 0",
         # Backfill legacy rows from the entry chain (position → order → alert).

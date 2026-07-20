@@ -95,13 +95,14 @@ def close_paper_position(
         settings,
     )
     strategy_id, _ = trade_meta_for_order(session, order)
+    from app.storage import booked_partial_pnl
     ct = ClosedTrade(
         position_id=position.id,
         exchange=position.exchange,
         tradingsymbol=position.tradingsymbol,
         entry_premium=position.entry_premium,
         exit_premium=exit_premium,
-        pnl=pnl,
+        pnl=pnl + booked_partial_pnl(position),
         exit_reason=exit_reason,
         opened_at=position.opened_at,
         closed_at=now,
