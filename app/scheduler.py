@@ -514,8 +514,15 @@ def make_scheduler(
     log.info("[scheduler] MCX expiry snapshot scheduled at 22:25 IST (NATURALGAS/CRUDEOILM)")
 
     if session_factory is not None:
-        # Job is always registered; run_delta_hedge_job checks state.is_ng_hedge_enabled()
-        # on every tick so it can be started/stopped live from /control without a restart.
+        # Job is always registered; the dispatcher checks each underlying's
+        # enable flag every tick so they can be toggled live from /control.
+        #
+        # The four 1-min crons below are deliberately offset by `second=` so
+        # they do not all land on :00. They run in separate scheduler threads
+        # and each hits Kite's quote bucket, which is capped at 1 req/sec —
+        # firing together guarantees 429s. 15s apart leaves each job room for
+        # its own internal calls. app.orders.throttled_quote_call is the
+        # process-wide backstop for whatever still overlaps.
         from app.delta_hedge import run_delta_hedge_job
         scheduler.add_job(
             run_delta_hedge_job,
@@ -523,6 +530,7 @@ def make_scheduler(
             day_of_week="mon-fri",
             hour="9-23",
             minute="*",
+            second=5,
             kwargs={"settings": settings, "session_factory": session_factory},
             id="ng_delta_hedge",
             misfire_grace_time=30,
@@ -549,6 +557,7 @@ def make_scheduler(
             day_of_week="mon-fri",
             hour="9-23",
             minute="*",
+            second=20,
             kwargs={"settings": settings, "session_factory": session_factory},
             id="paper_monitor",
             misfire_grace_time=30,
@@ -564,6 +573,7 @@ def make_scheduler(
             day_of_week="mon-fri",
             hour="9-23",
             minute="*",
+            second=35,
             kwargs={"settings": settings, "session_factory": session_factory},
             id="partial_booking",
             misfire_grace_time=30,
@@ -579,6 +589,7 @@ def make_scheduler(
             day_of_week="mon-fri",
             hour="9-23",
             minute="*",
+            second=50,
             kwargs={"settings": settings, "session_factory": session_factory},
             id="straddle_defense",
             misfire_grace_time=30,

@@ -31,6 +31,7 @@ _NO_ENTRY_ON_EXPIRY_DAY_OVERRIDE: Optional[bool] = None
 _TRAILING_SL_ENABLED: bool = True
 _WINDOW_STRADDLE_ENABLED: bool = False
 _NG_HEDGE_ENABLED_OVERRIDE: Optional[bool] = None  # None = use .env NG_DELTA_HEDGE_ENABLED
+_CRUDE_HEDGE_ENABLED_OVERRIDE: Optional[bool] = None  # None = use .env CRUDEOILM_HEDGE_ENABLED
 _STRADDLE_DEFENSE_ENABLED_OVERRIDE: Optional[bool] = None  # None = use .env STRADDLE_DEFENSE_ENABLED
 _STRADDLE_DEFENSE_MODE_OVERRIDE: Optional[str] = None  # ALERT/SEMI_AUTO/AUTO; None = use .env
 _PARTIAL_BOOKING_ENABLED_OVERRIDE: Optional[bool] = None  # None = use .env PARTIAL_BOOKING_ENABLED
@@ -62,6 +63,7 @@ def _save_overrides() -> None:
         "trailing_sl_enabled": _TRAILING_SL_ENABLED,
         "window_straddle_enabled": _WINDOW_STRADDLE_ENABLED,
         "ng_hedge_enabled": _NG_HEDGE_ENABLED_OVERRIDE,
+        "crude_hedge_enabled": _CRUDE_HEDGE_ENABLED_OVERRIDE,
         "straddle_defense_enabled": _STRADDLE_DEFENSE_ENABLED_OVERRIDE,
         "straddle_defense_mode": _STRADDLE_DEFENSE_MODE_OVERRIDE,
         "partial_booking_enabled": _PARTIAL_BOOKING_ENABLED_OVERRIDE,
@@ -90,7 +92,7 @@ def load_overrides_from_disk() -> None:
     global _TRAILING_SL_ENABLED, _WINDOW_STRADDLE_ENABLED, _MAX_TRADES_PER_DAY_OVERRIDE
     global _MAX_OPEN_POSITIONS_OVERRIDE, _CAPITAL_PER_TRADE_OVERRIDE
     global _CONSECUTIVE_LOSSES_LIMIT_OVERRIDE, _ADX_THRESHOLD_OVERRIDE
-    global _NG_HEDGE_ENABLED_OVERRIDE, _STRADDLE_DEFENSE_ENABLED_OVERRIDE
+    global _NG_HEDGE_ENABLED_OVERRIDE, _CRUDE_HEDGE_ENABLED_OVERRIDE, _STRADDLE_DEFENSE_ENABLED_OVERRIDE
     global _STRADDLE_DEFENSE_MODE_OVERRIDE
     global _PARTIAL_BOOKING_ENABLED_OVERRIDE, _ENTRY_WINGS_ENABLED_OVERRIDE
 
@@ -134,6 +136,8 @@ def load_overrides_from_disk() -> None:
             _WINDOW_STRADDLE_ENABLED = data["window_straddle_enabled"]
         if "ng_hedge_enabled" in data:
             _NG_HEDGE_ENABLED_OVERRIDE = data["ng_hedge_enabled"]
+        if "crude_hedge_enabled" in data:
+            _CRUDE_HEDGE_ENABLED_OVERRIDE = data["crude_hedge_enabled"]
         if "straddle_defense_enabled" in data:
             _STRADDLE_DEFENSE_ENABLED_OVERRIDE = data["straddle_defense_enabled"]
         if "partial_booking_enabled" in data:
@@ -427,6 +431,29 @@ def toggle_ng_hedge_enabled(env_default: bool) -> bool:
         return _NG_HEDGE_ENABLED_OVERRIDE
 
 
+# ── CRUDEOILM delta-hedge (same cron tick, independent book and cadence) ──────
+
+def is_crude_hedge_enabled(env_default: bool) -> bool:
+    with _lock:
+        return _CRUDE_HEDGE_ENABLED_OVERRIDE if _CRUDE_HEDGE_ENABLED_OVERRIDE is not None else env_default
+
+
+def set_crude_hedge_enabled(value: bool) -> None:
+    global _CRUDE_HEDGE_ENABLED_OVERRIDE
+    with _lock:
+        _CRUDE_HEDGE_ENABLED_OVERRIDE = value
+        _save_overrides()
+
+
+def toggle_crude_hedge_enabled(env_default: bool) -> bool:
+    global _CRUDE_HEDGE_ENABLED_OVERRIDE
+    with _lock:
+        current = _CRUDE_HEDGE_ENABLED_OVERRIDE if _CRUDE_HEDGE_ENABLED_OVERRIDE is not None else env_default
+        _CRUDE_HEDGE_ENABLED_OVERRIDE = not current
+        _save_overrides()
+        return _CRUDE_HEDGE_ENABLED_OVERRIDE
+
+
 # ── Partial profit booking (1-min cron) ───────────────────────────────────────
 
 def is_partial_booking_enabled(env_default: bool) -> bool:
@@ -612,6 +639,7 @@ def get_all_overrides() -> dict:
             "trailing_sl_enabled": _TRAILING_SL_ENABLED,
             "window_straddle_enabled": _WINDOW_STRADDLE_ENABLED,
             "ng_hedge_enabled": _NG_HEDGE_ENABLED_OVERRIDE,
+            "crude_hedge_enabled": _CRUDE_HEDGE_ENABLED_OVERRIDE,
             "straddle_defense_enabled": _STRADDLE_DEFENSE_ENABLED_OVERRIDE,
             "straddle_defense_mode": _STRADDLE_DEFENSE_MODE_OVERRIDE,
             "partial_booking_enabled": _PARTIAL_BOOKING_ENABLED_OVERRIDE,

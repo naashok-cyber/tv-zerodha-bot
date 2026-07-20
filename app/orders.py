@@ -27,6 +27,36 @@ _recent_squareoffs: dict[str, float] = {}
 _RECENT_SQUAREOFF_TTL_SEC = 30.0
 
 
+# ── Quote-bucket throttle ────────────────────────────────────────────────────
+# Kite allows 1 req/sec across quote / ohlc / ltp (kite.trade/docs/connect/v3).
+# Several 1-min crons (delta hedge, paper monitor, partial booking, straddle
+# defense) all fire on the minute boundary in separate scheduler threads, so
+# without a process-wide gate they collectively blow the limit every minute.
+# Callers that skip this helper are NOT covered — route quote/ltp through it.
+_QUOTE_LOCK = threading.Lock()
+_QUOTE_MIN_INTERVAL_SEC = 1.05  # small margin over the published 1/sec
+_last_quote_ts = 0.0
+
+
+def throttled_quote_call(fn: Any, *args: Any, **kwargs: Any) -> Any:
+    """Serialise a quote/ltp/ohlc call process-wide at <= 1 req/sec, with the
+    usual retry/backoff on 429 and network errors.
+
+    Batch instruments into a single call wherever possible — Kite accepts
+    several hundred per request, so one call for N symbols costs the same as
+    one call for one symbol and is the main way to stay under the limit.
+    """
+    global _last_quote_ts
+    with _QUOTE_LOCK:
+        wait = _QUOTE_MIN_INTERVAL_SEC - (time.monotonic() - _last_quote_ts)
+        if wait > 0:
+            time.sleep(wait)
+        try:
+            return backoff_call(fn, *args, **kwargs)
+        finally:
+            _last_quote_ts = time.monotonic()
+
+
 def _is_retryable(exc: BaseException) -> bool:
     if isinstance(exc, NetworkException):
         return True

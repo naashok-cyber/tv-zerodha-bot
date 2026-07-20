@@ -265,8 +265,92 @@ class Settings(BaseSettings):
 
     # ── NATURALGAS delta hedge (5-min cron) ───────────────────────────────────
     NG_DELTA_HEDGE_ENABLED: bool = False
-    NG_DELTA_HEDGE_THRESHOLD: float = 400.0   # mmBtu; sell more lots when |net δ| exceeds this
+    NG_DELTA_HEDGE_THRESHOLD: float = 400.0   # mmBtu; flat band used only when ADX is unavailable
     NG_DELTA_HEDGE_LIMIT_WAIT_SEC: int = 20   # cancel + MARKET escalation after this
+
+    # ── NG hedge band sizing ──────────────────────────────────────────────────
+    # Hedge count scales as gamma²/band², and gamma scales linearly with lots —
+    # so a flat band means 3x the lots costs ~9x the trades. Scaling the band as
+    # lots^(2/3) (Whalley-Wilmott) holds the trade count to ~2x instead.
+    #   band = BASE x (n_lots / REF_LOTS)^EXPONENT x adx_mult x side_mult x escalation
+    # The band base is derived from LIVE front-month futures price each tick:
+    #     band_units = HEDGE_BAND_NOTIONAL_INR / F x vol_factor
+    # The job already fetches F for the delta model, so this is free. A constant
+    # denominated in contract units silently drifts in risk terms whenever the
+    # underlying re-rates (crude 5500 -> 7963 moved it ~45% with nothing to
+    # flag it); a rupee-denominated one self-corrects and is shared by every
+    # underlying. vol_factor is dimensionless and stays put as prices move.
+    HEDGE_BAND_NOTIONAL_INR: float = 96_250.0   # = NG 350 mmBtu x F 275
+    NG_HEDGE_VOL_FACTOR: float = 1.0            # NG is the calibration reference
+    # Crude: 1.0 = notional parity (12.1 bbl), 1.75 = volatility parity (21.2).
+    # 1.32 is the midpoint (16.0 bbl) — see the CRUDEOILM block below.
+    CRUDEOILM_HEDGE_VOL_FACTOR: float = 1.32
+
+    NG_HEDGE_BAND_BASE: float = 350.0         # fallback only: used if F is unusable
+    NG_HEDGE_BAND_REF_LOTS: int = 10          # total short option lots the BASE is calibrated for
+    NG_HEDGE_BAND_EXPONENT: float = 0.667     # 0 = flat band, 1 = linear in lots
+    NG_HEDGE_BAND_MIN: float = 300.0          # mmBtu floor after all multipliers
+    NG_HEDGE_BAND_MAX: float = 2000.0         # mmBtu ceiling after all multipliers
+
+    # Hedge sizing: solve for the lots that land |δ| back inside the band rather
+    # than firing a fixed 1-2 lots and re-triggering on the next tick.
+    NG_HEDGE_RESIDUAL_RATIO: float = 0.4      # aim for |δ| = this x band (0 = hedge to flat)
+    NG_HEDGE_MAX_LOTS_PER_TICK: int = 6       # hard cap on a single rebalance
+
+    # Trend awareness: ADX(10-min) lags ~30 min, so confirm with δ velocity too.
+    NG_HEDGE_VELOCITY_SAMPLES: int = 3        # consecutive same-direction δ samples = trending
+    NG_HEDGE_ADVERSE_MULT: float = 0.7        # tighter band when δ is drifting away from zero
+    NG_HEDGE_FAVOURABLE_MULT: float = 1.5     # wider band when δ is reverting on its own
+
+    # Circuit breakers
+    NG_HEDGE_COOLDOWN_MIN: int = 10           # min gap between hedges (0 disables)
+    NG_HEDGE_COOLDOWN_BYPASS_MULT: float = 2.0   # |δ| above this x band ignores the cooldown
+    NG_HEDGE_ESCALATION_PCT: float = 0.15     # widen band this much per hedge already done today
+    NG_HEDGE_FREEZE_BEFORE_MIN: int = 20      # no new hedges this close to STRADDLE_SQUAREOFF_TIME
+    NG_HEDGE_FREEZE_BYPASS_MULT: float = 3.0  # |δ| above this x band hedges anyway
+
+    # Opt-in: skip hedging entirely while |δ| is shrinking on its own. Largely
+    # subsumed by NG_HEDGE_FAVOURABLE_MULT — enable only to A/B the harder rule.
+    NG_HEDGE_REVERSION_SKIP: bool = False
+    NG_HEDGE_REVERSION_OVERRIDE_MULT: float = 1.8  # |δ| above this x band hedges regardless
+
+    NG_HEDGE_STATE_PATH: str = "data/ng_hedge_state.json"  # per-underlying cooldown + δ history
+
+    # Cadence. The job wakes every minute and each underlying picks its rhythm:
+    # due when (minute % interval) == phase. NG uses odd minutes so it never
+    # lands on :00, the most contended slot in the scheduler.
+    NG_HEDGE_INTERVAL_MIN: int = 2            # :01 :03 :05 … :59
+    NG_HEDGE_PHASE_MIN: int = 1
+
+    # ── CRUDEOILM delta hedge ─────────────────────────────────────────────────
+    # Band bounds are in BARRELS, not mmBtu — CRUDEOILM lots are 10 bbl against
+    # NG's 1250 mmBtu. Calibrated at F_ng=275, F_crude=7963 against NG's 350
+    # mmBtu band (= ₹96,250 of delta-notional):
+    #   notional parity   350 x 275 / 7963      = 12.1 bbl  (same ₹ per 1-unit move)
+    #   volatility parity 12.1 x (3.5% / 2.0%)  = 21.2 bbl  (same daily P&L swing,
+    #                                                        hence similar trade count)
+    # 16.0 is the midpoint (16.6). Notional parity alone would hedge crude more
+    # eagerly than NG relative to how far crude actually moves; volatility parity
+    # alone overshoots on absolute risk.
+    # NOTE: price-dependent. Re-derive if either leg re-rates materially — crude
+    # moving 5500 -> 7963 changes what "16 bbl" means by ~45%, with nothing in the
+    # system to flag it. The vol ratio is an estimate; `iv_snapshots` has the data
+    # to measure it properly.
+    # Crude is the more granular of the two: one ATM lot carries ~5 bbl of delta
+    # against a ~16 bbl band (ratio 3.2), where NG's ATM lot is ~625 mmBtu
+    # against a 350 mmBtu band (ratio 0.56) — so crude can actually land inside
+    # its band, while NG always overshoots slightly.
+    CRUDEOILM_HEDGE_ENABLED: bool = False     # live-toggleable at /control
+    CRUDEOILM_HEDGE_BAND_BASE: float = 16.0   # fallback only: used if F is unusable
+    CRUDEOILM_HEDGE_BAND_REF_LOTS: int = 10
+    # Floor must stay <= base x NG_HEDGE_ADVERSE_MULT (16 x 0.7 = 11.2), or the
+    # clamp silently cancels the trend-tightening at reference size. 11.0 still
+    # clears the granularity rule: 11.0 / (0.5 x 10) = 2.2 >= 2.
+    CRUDEOILM_HEDGE_BAND_MIN: float = 11.0
+    CRUDEOILM_HEDGE_BAND_MAX: float = 90.0
+    CRUDEOILM_HEDGE_INTERVAL_MIN: int = 5     # :02 :07 :12 … :57
+    CRUDEOILM_HEDGE_PHASE_MIN: int = 2
+    CRUDEOILM_HEDGE_VELOCITY_SAMPLES: int = 2  # 2 x 5 min = 10-min trend window
 
     # ── NATURALGAS half-exit (profit-lock; piggybacks on delta-hedge cron) ────
     # Default True here (instead of in .env) so the running container picks it
