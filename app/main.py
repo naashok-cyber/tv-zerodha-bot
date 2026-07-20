@@ -3893,6 +3893,11 @@ async def control_page(
     hedge_label   = "RUNNING" if hedge_enabled else "STOPPED"
     hedge_lbl     = "Stop"    if hedge_enabled else "Start"
     hedge_cls     = "br2"     if hedge_enabled else "bg2"
+    crude_enabled = state.is_crude_hedge_enabled(settings.CRUDEOILM_HEDGE_ENABLED)
+    crude_pill    = "pg" if crude_enabled else "pr"
+    crude_label   = "RUNNING" if crude_enabled else "STOPPED"
+    crude_lbl     = "Stop"    if crude_enabled else "Start"
+    crude_cls     = "br2"     if crude_enabled else "bg2"
     pb_enabled    = state.is_partial_booking_enabled(settings.PARTIAL_BOOKING_ENABLED)
     pb_pill       = "pg" if pb_enabled else "pm"
     pb_label      = "ON" if pb_enabled else "OFF"
@@ -4473,9 +4478,13 @@ async def control_page(
         # background jobs
         "<div class='card'><div class='ct'>Background Jobs</div>"
         + f"<div class='mdr'><div class='mdl'>NG Delta Hedge&ensp;<span class='pill {hedge_pill}'>{hedge_label}</span>"
-        + "<span style='font-size:.70em;color:var(--ink3)'>&ensp;5-min cron &middot; incl. half-exit, BNF SL, straddle ladder</span></div>"
+        + "<span style='font-size:.70em;color:var(--ink3)'>&ensp;every 2 min (odd) &middot; incl. half-exit, BNF SL, straddle ladder</span></div>"
         + "<form method='post' action='/control/ng-hedge/toggle' style='margin:0'>"
         + f"<button class='btn {hedge_cls}' type='submit'>{hedge_lbl}</button></form></div>"
+        + f"<div class='mdr'><div class='mdl'>CRUDEOILM Delta Hedge&ensp;<span class='pill {crude_pill}'>{crude_label}</span>"
+        + "<span style='font-size:.70em;color:var(--ink3)'>&ensp;every 5 min (:02) &middot; band in barrels</span></div>"
+        + "<form method='post' action='/control/crude-hedge/toggle' style='margin:0'>"
+        + f"<button class='btn {crude_cls}' type='submit'>{crude_lbl}</button></form></div>"
         + f"<div class='mdr'><div class='mdl'>Straddle Defense&ensp;<span class='pill {'pg' if sd_enabled else 'pr'}'>{'RUNNING' if sd_enabled else 'STOPPED'}</span>"
         + f"<span class='pill {'pa' if sd_mode != 'ALERT' else 'pm'}'>{sd_mode}</span>"
         + "<span style='font-size:.70em;color:var(--ink3)'>&ensp;1-min monitor &middot; drawdown+IV trigger &middot; wing hedging</span></div>"
@@ -4685,6 +4694,31 @@ async def toggle_ng_hedge(
         )
     except Exception as exc:
         log.warning("NG delta-hedge toggle: telegram notify failed: %s", exc)
+    return Response(status_code=302, headers={"Location": "/control"})
+
+
+@app.post("/control/crude-hedge/toggle")
+async def toggle_crude_hedge(
+    _: None = Depends(_auth_guard),
+    settings: Settings = Depends(get_current_settings),
+) -> Response:
+    """Start/stop CRUDEOILM delta hedging.
+
+    Runs in the same process as the scheduler, so the in-memory override takes
+    effect on the very next due tick (:02, :07, ...) with no restart — and it
+    persists to data/state_overrides.json so it survives one.
+    """
+    from app.commodity_agents.notify import send_telegram
+
+    new_val = state.toggle_crude_hedge_enabled(settings.CRUDEOILM_HEDGE_ENABLED)
+    log.warning("CRUDEOILM delta-hedge toggled to %s via /control", new_val)
+    try:
+        send_telegram(
+            settings,
+            f"⚡ CRUDEOILM Delta Hedge {'STARTED' if new_val else 'STOPPED'} via /control",
+        )
+    except Exception as exc:
+        log.warning("CRUDEOILM delta-hedge toggle: telegram notify failed: %s", exc)
     return Response(status_code=302, headers={"Location": "/control"})
 
 

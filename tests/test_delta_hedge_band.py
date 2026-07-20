@@ -423,3 +423,50 @@ def test_crude_uses_its_own_clamps_not_ngs(both):
     huge, parts = _compute_band(crude_base, 5000, "UNKNOWN", 0, both, crude)
     assert huge == crude.band_max and parts["clamped"]
     assert huge < ng.band_min, "crude must never be clamped into NG's mmBtu range"
+
+
+# ── /control toggle plumbing ─────────────────────────────────────────────────
+
+def test_crude_toggle_flips_and_is_independent_of_ng():
+    """The /control button drives these. They must be separate switches — the
+    dispatcher builds specs from them, so a shared flag would start both books.
+    """
+    from app import state
+
+    ng_before = state.is_ng_hedge_enabled(False)
+    try:
+        assert state.is_crude_hedge_enabled(False) is False
+        assert state.toggle_crude_hedge_enabled(False) is True
+        assert state.is_crude_hedge_enabled(False) is True
+        # NG must be untouched by the crude toggle.
+        assert state.is_ng_hedge_enabled(False) == ng_before
+        assert state.toggle_crude_hedge_enabled(False) is False
+    finally:
+        state.set_crude_hedge_enabled(False)
+
+
+def test_crude_toggle_overrides_the_env_default():
+    """An explicit override must win over .env in both directions, so the
+    dashboard can stop a hedger that .env has switched on."""
+    from app import state
+
+    try:
+        state.set_crude_hedge_enabled(False)
+        assert state.is_crude_hedge_enabled(True) is False   # env says on, override wins
+        state.set_crude_hedge_enabled(True)
+        assert state.is_crude_hedge_enabled(False) is True   # env says off, override wins
+    finally:
+        state.set_crude_hedge_enabled(False)
+
+
+def test_toggled_spec_reaches_the_dispatcher(cfg):
+    """End-to-end: flipping the toggle must change what _build_specs returns,
+    since that is what actually gates order placement."""
+    from app import state
+
+    try:
+        assert [s.name for s in _build_specs(cfg)] == []
+        state.set_crude_hedge_enabled(True)
+        assert [s.name for s in _build_specs(cfg)] == ["CRUDEOILM"]
+    finally:
+        state.set_crude_hedge_enabled(False)
