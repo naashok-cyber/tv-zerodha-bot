@@ -247,9 +247,13 @@ def test_dashboard_returns_200(client) -> None:
     assert "Recent Alerts" in resp.text
 
 
-def test_control_page_renders_dashboard_sections(client) -> None:
-    """Phase-1 /control layout: annunciator strip, Today hero, live-positions
-    card, schedule rail, collapsible risk-params drawer, positions JS."""
+def test_control_page_renders_swipe_carousel(client) -> None:
+    """/control is one page with 4 swipeable panels: home/markets/settings/more.
+
+    Rarely-used pages (Orders/GTTs/History/Alerts/Agents/Desk) live behind
+    the More panel's link-tiles; Performance/scorecard/activity moved to
+    /history so they must NOT appear here anymore.
+    """
     c, _ = client
     with patch("app.main.get_session_manager") as mock_factory:
         mock_factory.return_value.get_token_info.return_value = {
@@ -258,32 +262,82 @@ def test_control_page_renders_dashboard_sections(client) -> None:
         resp = c.get("/control")
     assert resp.status_code == 200
     html = resp.text
-    assert "class='strip'" in html            # annunciator strip
-    assert "hero-pnl" in html                 # Today P&L hero
+    assert "class='strip'" in html             # annunciator strip (from _shell)
+    assert "class='tabbar'" in html            # bottom tab bar
+    assert "id='swipe'" in html                # swipe carousel container
+    for panel_id in ("home", "markets", "settings", "more"):
+        assert f"id='{panel_id}'" in html
+
+    # Home panel: hero, live positions, straddle defense, quick trade
+    assert "hero-pnl" in html
     assert "Open Positions" in html
     assert "id='pos-wrap'" in html
-    assert "Today's Schedule" in html
-    assert "class='rail'" in html
-    assert "<details class='cfgd card'>" in html
     assert "/commodity-agents/portfolio-greeks" in html  # live-greeks fetch
-    # merged nav links to the commodity-agents pages
-    assert "/commodity-agents/dashboard" in html
-    assert "/commodity-agents/desk" in html
-    # phase 2: commodity cards, activity feed, live summary poll (no meta refresh)
-    assert "id='ca-grid'" in html
-    assert "id='feed'" in html
-    assert "/api/control/summary" in html
-    assert "http-equiv='refresh'" not in html
-    # phase 3: performance tiles, equity chart, heatmap, sparkline seed
-    assert "Performance &mdash; 90 days" in html
-    assert "id='eq-chart'" in html
-    assert "class='hm'" in html
-    assert "window.__snaps=" in html
-    # straddle defense: card + toggle + annunciator pill + phase-2 mode cycle
     assert "Straddle Defense" in html
     assert "/control/straddle-defense/toggle" in html
     assert "/control/straddle-defense/mode" in html
     assert "mode ALERT" in html
+
+    # Markets panel: volatility monitor + commodity intelligence
+    assert "id='vm-chart'" in html
+    assert "id='ca-grid'" in html
+
+    # Settings panel: schedule, mode, risk controls, kite session,
+    # background jobs, collapsible risk-params drawer
+    assert "Today's Schedule" in html
+    assert "class='rail'" in html
+    assert "<details class='cfgd card'>" in html
+
+    # More panel: link-tiles to the rarely-used pages
+    assert "class='morelinks'" in html
+    assert "href='/orders'" in html
+    assert "href='/gtts'" in html
+    assert "href='/history'" in html
+    assert "href='/dashboard'" in html
+    assert "href='/commodity-agents/dashboard'" in html
+    assert "href='/commodity-agents/desk'" in html
+
+    # live summary poll (no meta refresh) + sparkline seed
+    assert "/api/control/summary" in html
+    assert "http-equiv='refresh'" not in html
+    assert "window.__snaps=" in html
+
+    # moved off /control onto /history — must not duplicate here
+    assert "Performance &mdash; 90 days" not in html
+    assert "id='eq-chart'" not in html
+    assert "id='feed'" not in html
+
+
+def test_history_page_shows_performance_scorecard_activity(client) -> None:
+    """/history absorbed the review content moved off /control: 90-day
+    performance tiles/equity-curve/heatmap, strategy scorecard, and the
+    48h activity feed, on top of the existing trade-history table."""
+    c, _ = client
+    resp = c.get("/history")
+    assert resp.status_code == 200
+    html = resp.text
+    assert "Performance &mdash; 90 days" in html
+    assert "id='eq-chart'" in html
+    assert "class='hm'" in html
+    assert "Strategies &mdash; 90 days" in html
+    assert "id='feed'" in html
+    assert "window.__perf=" in html
+    assert "Trade History" in html
+
+
+def test_orders_and_gtts_share_book_segmented_control(client) -> None:
+    """Orders and GTTs cross-link via a .seg switcher instead of separate
+    bottom-tab destinations — both are reached from More's link-tiles."""
+    c, _ = client
+    resp = c.get("/orders")
+    assert resp.status_code == 200
+    assert "class='seg'" in resp.text
+    assert "/gtts" in resp.text
+
+    resp = c.get("/gtts")
+    assert resp.status_code == 200
+    assert "class='seg'" in resp.text
+    assert "/orders" in resp.text
 
 
 def test_straddle_defense_mode_cycle_route(client, monkeypatch, tmp_path) -> None:

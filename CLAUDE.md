@@ -72,12 +72,12 @@ terraform/          — GCP infrastructure
 | Method | Path | Purpose |
 |--------|------|---------|
 | POST | `/webhook` | TradingView alert → background `_process_alert` |
-| GET | `/control` | Unified dashboard (overrides, quick trade, voice) |
-| GET | `/dashboard` | Redirect to /control |
-| GET | `/orders` | Open orders page |
-| GET | `/positions` | Alias for /dashboard positions tab |
-| GET | `/history` | Closed trades page |
-| GET | `/gtts` | GTT OCO status page |
+| GET | `/control` | Trade Desk — swipeable 4-tab dashboard, see below |
+| GET | `/dashboard` | Raw TradingView alert log (reached from /control's More tab) |
+| GET | `/orders` | Open orders page (Orders/GTTs segmented control) |
+| GET | `/positions` | Legacy orphan page — not linked from nav |
+| GET | `/history` | Closed trades + 90-day performance/scorecard/activity |
+| GET | `/gtts` | GTT OCO status page (Orders/GTTs segmented control) |
 | POST | `/trade-mode/toggle` | Toggle BUY_OPTIONS ↔ SELL_OPTIONS |
 | POST | `/toggle-paper-mode` | Toggle DRY_RUN override |
 | POST | `/toggle-emergency-stop` | Set/clear emergency stop |
@@ -93,6 +93,24 @@ terraform/          — GCP infrastructure
 | POST | `/voice/cancel` | Discard pending order |
 | GET | `/voice/pending` | List pending orders |
 | POST | `/admin/voice/toggle` | Enable/disable voice channel |
+
+---
+
+## Trade Desk (`/control`) — swipeable 4-tab dashboard
+
+Single page, single request — all 4 tabs are rendered server-side in one response and swiped between client-side (CSS `scroll-snap`, no per-tab network round-trip). Built this way because the page is used almost entirely on an iPhone: a bottom tab bar (`.tabbar`, fixed) plus horizontal swipe between panels replaced the old single long-scrolling page.
+
+| Tab | `#panel` id | Contents |
+|-----|------------|----------|
+| Home | `home` | Today P&L hero + sparkline, risk-guard meters, Open Positions (live greeks), Straddle Defense, Quick Trade panel |
+| Markets | `markets` | Volatility Monitor (ATM-IV chart), Commodity Intelligence |
+| Settings | `settings` | Today's Schedule, Mode switches, Risk Controls (partial booking/entry wings), Kite Session, Background Jobs, Risk Parameters drawer |
+| More | `more` | Link-tiles to the rarely-used pages: Orders, GTTs, History, Alerts, Agents, Desk |
+
+- `_status_strip(settings)` renders the emergency-stop banner + annunciator pill strip; `_shell()` calls it for **every** page (not just /control), so estop/paper/mode/session status is visible everywhere.
+- `_SWIPE_JS`: tab tap gives instant feedback (active class + `#swipe` height + `sessionStorage`/URL-hash persistence all update synchronously, not on scroll-settle) and also drives the native swipe; a `ResizeObserver` on each panel keeps `#swipe`'s height pinned to the active panel even as async content (live positions, commodity cards) changes its size after first paint. The tab bar's `<a href='/control#tab'>` markup must render **before** `.wrap`'s content in `_shell()` — an inline script inside `content` can't see DOM nodes that appear later in the HTML source.
+- Toggle/update POSTs under `/control/*` still redirect to plain `/control` (unchanged); the swiped-to tab survives that reload via `sessionStorage`, not a server-side redirect target.
+- Orders and GTTs cross-link via a `.seg` control (`_book_seg`) instead of being separate tabs; Performance/scorecard/activity-feed content that used to live on /control now lives on `/history` (see `_performance_blocks`/`_scorecard_html`/`_activity_feed_html`, shared helpers next to `_shell`).
 
 ---
 
@@ -222,7 +240,7 @@ Paper mode (env `DRY_RUN` or the /control paper toggle) runs the **full real pip
   - Real squareoff/hedge jobs (`eod_squareoff_job`, scheduled/window straddle squareoffs, straddle defense, delta hedge DB mirrors) filter `Order.dry_run == False` — they must never touch paper positions.
   - Risk guards, today-hero, and P&L snapshot are **mode-scoped** (`ClosedTrade.dry_run == current mode`) — paper losses never consume the live loss budget and vice versa.
   - `compute_portfolio_greeks` is mode-scoped, so straddle defense monitors paper straddles in paper mode and only real ones in live mode.
-  - Performance card on /control is live-only; the Strategies scorecard shows paper and live separately (📝 badge); /history tags paper rows 📝 and excludes them from period P&L.
+  - Performance card on /history is live-only; the Strategies scorecard (same page) shows paper and live separately (📝 badge); /history tags paper rows 📝 and excludes them from period P&L.
 - **Limitations**: fills at LTP (no slippage/spread model), static SL (no trailing — live trailing needs GTT modify calls).
 
 ## Partial Profit Booking (`app/partial_booking.py`)

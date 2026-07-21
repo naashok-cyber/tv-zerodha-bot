@@ -2325,12 +2325,11 @@ _CSS = (
     "white-space:nowrap;padding:6px 4px 6px 10px}"
 
     # ── Layout ───────────────────────────────────────────────────────────────
-    ".wrap{padding:20px 20px 56px;margin:0 auto}"
-    ".wrap-sm{max-width:640px}.wrap-lg{max-width:1024px}.wrap-xl{max-width:1200px}"
-    ".grid2{display:grid;grid-template-columns:minmax(0,7fr) minmax(0,5fr);"
-    "gap:0 20px;align-items:start}"
-    ".gc-main,.gc-rail{min-width:0}"
-    "@media (max-width:980px){.grid2{grid-template-columns:1fr}}"
+    # Bottom padding reserves space for the fixed .tabbar (~50px tall, plus
+    # the home-indicator safe area added below on touch devices) so page
+    # content never sits underneath it.
+    ".wrap{padding:20px 20px 84px;margin:0 auto}"
+    ".wrap-sm{max-width:640px}.wrap-lg{max-width:1024px}"
 
     # ── Cards ────────────────────────────────────────────────────────────────
     ".card{"
@@ -2563,10 +2562,11 @@ _CSS = (
     # ── Segmented control ────────────────────────────────────────────────────
     ".seg{display:inline-flex;gap:2px;background:var(--line-soft);"
     "border:1px solid var(--line-soft);border-radius:9px;padding:2px}"
-    ".seg button{border:0;background:transparent;font-size:12px;font-weight:600;"
+    ".seg button,.seg a{border:0;background:transparent;font-size:12px;font-weight:600;"
     "color:var(--ink2);padding:4px 11px;border-radius:7px;cursor:pointer;"
-    "font-family:inherit;transition:background .15s,color .15s}"
-    ".seg button.on{background:var(--surface);color:var(--ink);"
+    "font-family:inherit;transition:background .15s,color .15s;"
+    "text-decoration:none;display:inline-flex;align-items:center}"
+    ".seg button.on,.seg a.on{background:var(--surface);color:var(--ink);"
     "box-shadow:0 1px 3px rgba(0,0,0,.14)}"
 
     # ── Volatility monitor ───────────────────────────────────────────────────
@@ -2606,6 +2606,45 @@ _CSS = (
     ".vm-legend i{display:inline-block;width:14px;height:3px;border-radius:2px;"
     "margin-right:5px;vertical-align:middle}"
 
+    # ── Bottom tab bar — primary nav (Home/Markets/Settings/More) ─────────────
+    # Fixed on every screen size: the page lives mostly on an iPhone, so this
+    # is the main way to move around; on desktop it just reads as a slim
+    # footer nav. Frosted to match the topbar.
+    ".tabbar{position:fixed;left:0;right:0;bottom:0;z-index:100;"
+    "background:var(--glass);"
+    "backdrop-filter:saturate(180%) blur(20px);"
+    "-webkit-backdrop-filter:saturate(180%) blur(20px);"
+    "border-top:1px solid var(--line-soft);"
+    "padding-bottom:env(safe-area-inset-bottom)}"
+    ".tabbar-in{max-width:640px;margin:0 auto;display:flex}"
+    ".tb-item{flex:1;display:flex;flex-direction:column;align-items:center;"
+    "justify-content:center;gap:2px;padding:7px 4px 6px;min-height:50px;"
+    "color:var(--ink3);text-decoration:none;font-size:10px;font-weight:600;"
+    "letter-spacing:.01em}"
+    ".tb-item svg{width:22px;height:22px;stroke:currentColor;fill:none;"
+    "stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}"
+    ".tb-item.on{color:var(--accent)}"
+
+    # ── Swipe carousel — /control's 4 panels ──────────────────────────────────
+    # align-items:flex-start keeps each panel at its own natural height
+    # instead of being stretched to the tallest sibling; _SWIPE_JS then pins
+    # #swipe's own height to whichever panel is active (animated on change).
+    ".swipe{display:flex;align-items:flex-start;overflow-x:auto;overflow-y:hidden;"
+    "scroll-snap-type:x mandatory;-webkit-overflow-scrolling:touch;"
+    "scrollbar-width:none;transition:height .22s cubic-bezier(.25,.46,.45,.94)}"
+    ".swipe::-webkit-scrollbar{display:none}"
+    ".panel{flex:0 0 100%;min-width:0;scroll-snap-align:start}"
+
+    # ── More panel — link-tiles to the rarely-used pages ──────────────────────
+    ".morelinks{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));"
+    "gap:10px}"
+    ".mltile{background:var(--surface);border:1px solid var(--line-soft);"
+    "border-radius:14px;padding:15px;text-decoration:none;color:var(--ink);"
+    "display:flex;flex-direction:column;gap:4px;box-shadow:var(--shadow)}"
+    ".mltile:active{background:var(--surface2)}"
+    ".mltile b{font-size:14px;font-weight:650}"
+    ".mltile span{font-size:11.5px;color:var(--ink3);line-height:1.4}"
+
     # ── Mobile / touch — this page's primary device is an iPhone ─────────────
     # No visual scaling here (that's the max-width:980px/640px rules above);
     # this is purely about the page behaving like a native app on a touch
@@ -2625,15 +2664,17 @@ _CSS = (
     ".topbar{padding-top:env(safe-area-inset-top)}"
     ".wrap{padding-left:calc(16px + env(safe-area-inset-left));"
     "padding-right:calc(16px + env(safe-area-inset-right));"
-    "padding-bottom:calc(24px + env(safe-area-inset-bottom))}"
+    "padding-bottom:calc(84px + env(safe-area-inset-bottom))}"
 )
 
-# ── /control live script ──────────────────────────────────────────────────────
-# One inline library for the control page: live positions + hero MTM (30s),
-# summary poll → meters/pills/next-job (30s), schedule-rail re-marking,
-# commodity intelligence cards with inline approve/reject (5 min), intraday
-# sparkline + equity curve, and activity-feed filters.
-# The page seeds window.__realized/__estop/__paper/__mode/__snaps/__perf first.
+# ── /control live script — shared by Home/Markets/Settings tabs ──────────────
+# Live positions + hero MTM (30s), summary poll → meters/pills/next-job (30s,
+# also drives the emergency-stop/paper/mode watch-and-reload), schedule-rail
+# re-marking, commodity intelligence cards with inline approve/reject (5 min),
+# and the Home intraday sparkline. Every DOM lookup is null-guarded, so a tab
+# missing some of these elements (e.g. Markets has no #pos-wrap) just no-ops
+# for that piece rather than erroring. The page seeds
+# window.__realized/__estop/__paper/__mode/__snaps first.
 _CONTROL_LIVE_JS = r"""
 <script>
 (function(){
@@ -2830,6 +2871,32 @@ svg+='<text x="'+(lx+7).toFixed(1)+'" y="'+(ly+3.5).toFixed(1)+
 '" style="font-size:10px;fill:'+tok('--ink2')+'">'+inr(lastV)+'</text></svg>';
 box.innerHTML=svg}
 
+loadPositions();setInterval(loadPositions,30000);
+poll();setInterval(poll,30000);
+loadCommodities();setInterval(loadCommodities,300000);
+daySpark();remarkRail();setInterval(remarkRail,60000);
+if(window.matchMedia)
+window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change',
+function(){daySpark()});
+})();
+</script>
+"""
+
+# ── /history live script — equity curve + activity-feed filters ──────────────
+# Split out of _CONTROL_LIVE_JS: these two elements moved to the History tab
+# (Performance/Scorecard/Activity review), so Home no longer needs them and
+# History doesn't need Home's positions/summary-poll/commodity-agents fetches.
+# Page seeds window.__perf first.
+_HISTORY_LIVE_JS = r"""
+<script>
+(function(){
+'use strict';
+function $(i){return document.getElementById(i)}
+function tok(n){return getComputedStyle(document.documentElement).getPropertyValue(n).trim()}
+function inr(x){if(x==null)return '—';
+var s=x>0?'+':(x<0?'−':'');
+return s+'₹'+Math.abs(Math.round(x)).toLocaleString('en-IN')}
+
 /* ── equity curve (Performance card) ── */
 function eqChart(){
 var box=$('eq-chart');if(!box)return;
@@ -2912,13 +2979,9 @@ var f=ch.getAttribute('data-f');
 document.querySelectorAll('#feed li').forEach(function(li){
 li.style.display=(f==='all'||li.getAttribute('data-k')===f)?'':'none'})})});
 
-loadPositions();setInterval(loadPositions,30000);
-poll();setInterval(poll,30000);
-loadCommodities();setInterval(loadCommodities,300000);
-daySpark();eqChart();remarkRail();setInterval(remarkRail,60000);
+eqChart();
 if(window.matchMedia)
-window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change',
-function(){daySpark();eqChart()});
+window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change',function(){eqChart()});
 })();
 </script>
 """
@@ -3449,25 +3512,431 @@ checkChannel();renderLog();loadPendingOrders();
 </script>
 """
 
+# ── Swipe carousel — /control's 4 tabs (Home/Markets/Settings/More) ──────────
+# Panels sit side by side in #swipe (CSS scroll-snap does the touch physics —
+# momentum, rubber-banding, snapping — natively, which feels far better on
+# iOS Safari than a hand-rolled drag handler). Panels differ in height, so
+# JS keeps #swipe's own height pinned to whichever panel is active — on tab
+# click, on swipe-end, and via ResizeObserver (covers async content like the
+# live positions table changing the Home panel's height after first paint).
+# Tab bar links are plain /control#<tab> hrefs (works as a real navigation
+# from any other page); this script only intercepts the click when already
+# on /control, and restores the last-viewed tab from the URL hash or
+# sessionStorage so a toggle's page reload doesn't bounce back to Home.
+_SWIPE_JS = r"""
+<script>
+(function(){
+'use strict';
+var swipe=document.getElementById('swipe');if(!swipe)return;
+var panels=Array.prototype.slice.call(swipe.children);
+var names=panels.map(function(p){return p.id});
+var tabs=Array.prototype.slice.call(document.querySelectorAll('.tb-item[data-tab]'));
 
-def _shell(active: str, content: str, wide: bool = False, refresh: bool = False,
-           live: bool = False, xl: bool = False) -> str:
-    """Wrap page content in the shared topbar / nav / CSS.
+function idxOf(name){var i=names.indexOf(name);return i<0?0:i}
+function activeIdx(){
+  return Math.max(0,Math.min(panels.length-1,Math.round(swipe.scrollLeft/swipe.clientWidth)));
+}
+function setHeight(i){var p=panels[i];if(p)swipe.style.height=p.scrollHeight+'px'}
+function markActive(i){
+  tabs.forEach(function(t){t.classList.toggle('on',t.getAttribute('data-tab')===names[i])});
+}
+function persist(i){
+  try{sessionStorage.setItem('zb_tab',names[i]);}catch(e){}
+  history.replaceState(null,'','#'+names[i]);
+}
+function syncTo(i){markActive(i);setHeight(i);persist(i)}
+function sync(){syncTo(activeIdx())}
+function goTo(i){swipe.scrollTo({left:i*swipe.clientWidth,behavior:'smooth'})}
+
+tabs.forEach(function(t){
+  t.addEventListener('click',function(e){
+    var i=idxOf(t.getAttribute('data-tab'));
+    if(!panels[i])return; // not on /control — let the link navigate there
+    e.preventDefault();
+    // instant feedback — tab/height/persisted-tab update immediately rather
+    // than waiting for the scroll-end handler, so a tap always feels snappy
+    // even if the scroll animation itself is slow or interrupted
+    syncTo(i);
+    goTo(i);
+  });
+});
+
+var scrollTimer=null;
+swipe.addEventListener('scroll',function(){
+  if(scrollTimer)clearTimeout(scrollTimer);
+  scrollTimer=setTimeout(sync,80);
+},{passive:true});
+
+// keep the same panel aligned across orientation change / resize
+var lastW=swipe.clientWidth;
+window.addEventListener('resize',function(){
+  var i=activeIdx();
+  if(swipe.clientWidth!==lastW){lastW=swipe.clientWidth;swipe.scrollLeft=i*swipe.clientWidth;}
+  setHeight(i);
+});
+
+if(window.ResizeObserver){
+  var ro=new ResizeObserver(function(){setHeight(activeIdx())});
+  panels.forEach(function(p){ro.observe(p)});
+}
+
+// restore last-viewed tab: URL hash wins, else last session, else Home
+var start=(location.hash||'').slice(1);
+if(names.indexOf(start)<0){
+  try{start=sessionStorage.getItem('zb_tab')||'';}catch(e){start=''}
+}
+var startIdx=names.indexOf(start)<0?0:idxOf(start);
+swipe.scrollLeft=startIdx*swipe.clientWidth;
+markActive(startIdx);
+setHeight(startIdx);
+})();
+</script>
+"""
+
+
+def _fts(ts: datetime) -> datetime:
+    """Attach IST to a naive timestamp so cross-timezone comparisons are safe."""
+    return ts if ts.tzinfo is not None else ts.replace(tzinfo=IST)
+
+
+def _status_strip(settings: Settings) -> tuple[str, str]:
+    """Emergency-stop banner + annunciator pill strip — shown on every page.
+
+    Pure in-memory state/settings reads (no DB session needed), so _shell()
+    can call this for every route without threading a session through.
+    """
+    from app.voice.config import is_voice_enabled
+
+    estop = state.is_emergency_stop()
+    paper = _dry_run(settings)
+    trade_mode = state.get_trade_mode()
+    overrides = state.get_all_overrides()
+
+    try:
+        sess_valid = bool(get_session_manager().get_token_info()["is_valid"])
+    except Exception:
+        sess_valid = False
+
+    mode_pill = "pg" if trade_mode == "BUY_OPTIONS" else ("pr" if trade_mode == "SELL_OPTIONS" else "pa")
+    paper_pill = "pa" if paper else "pp"
+    paper_label = "PAPER MODE" if paper else "LIVE TRADING"
+    sess_pill = "pg" if sess_valid else "pr"
+
+    def spill(label: str, on: bool) -> str:
+        return (f"<span class='pill {'pg' if on else 'pm'}'><span class='sdot'></span>"
+                f"{label} {'ON' if on else 'OFF'}</span>")
+
+    _ovr_keys = [
+        "max_lots", "max_daily_loss", "sl_pct", "rr_ratio", "daily_profit_target",
+        "sell_options_profit_pct", "entry_window_start", "entry_window_end",
+        "no_entry_on_expiry_day", "max_trades_per_day", "max_open_positions",
+        "capital_per_trade", "consecutive_losses_limit", "adx_threshold",
+    ]
+    n_ovr = sum(1 for k in _ovr_keys if overrides.get(k) is not None)
+
+    strip_html = (
+        "<div class='strip'>"
+        + f"<span class='pill {paper_pill}'><span class='sdot'></span>{paper_label}</span>"
+        + f"<span class='pill {sess_pill}' id='pill-kite'><span class='sdot'></span>Kite {'OK' if sess_valid else 'INVALID'}</span>"
+        + f"<span class='pill {mode_pill}'><span class='sdot'></span>{trade_mode.replace('_', ' ')}</span>"
+        + spill("Trailing", state.is_trailing_enabled())
+        + spill("Window straddle", state.is_window_straddle_enabled())
+        + spill("NG hedge", state.is_ng_hedge_enabled(settings.NG_DELTA_HEDGE_ENABLED))
+        + spill("Defense", state.is_straddle_defense_enabled(settings.STRADDLE_DEFENSE_ENABLED))
+        + spill("Sched. straddle", settings.SCHEDULED_STRADDLE_ENABLED)
+        + spill("Voice", is_voice_enabled())
+        + (f"<span class='pill pa'><span class='sdot'></span>{n_ovr} overrides</span>" if n_ovr else "")
+        + "</div>"
+    )
+    stop_banner = (
+        "<div class='sbanner'>&#x26D4; EMERGENCY STOP ACTIVE &mdash; No new trades will execute</div>"
+        if estop else ""
+    )
+    return stop_banner, strip_html
+
+
+def _activity_feed_html(session: Session) -> str:
+    """Alerts / orders / GTTs / exits / errors in the last 48h — History tab."""
+    feed_cutoff = datetime.now(IST) - timedelta(hours=48)
+
+    def _hesc(s: str | None) -> str:
+        return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+    feed: list[tuple[datetime, str, str]] = []
+    for a in (session.query(Alert).filter(Alert.received_at >= feed_cutoff)
+              .order_by(Alert.received_at.desc()).limit(30)):
+        feed.append((_fts(a.received_at), "alert",
+                     f"{_hesc(a.action)} {_hesc(a.tv_ticker)}"
+                     f" <span class='fdim'>&middot; {_hesc(a.strategy_id)}</span>"))
+    for o in (session.query(Order).filter(Order.placed_at >= feed_cutoff)
+              .order_by(Order.placed_at.desc()).limit(30)):
+        fill = f" @ {o.fill_price:.2f}" if o.fill_price else ""
+        feed.append((_fts(o.placed_at), "order",
+                     f"{_hesc(o.transaction_type)} {_hesc(o.tradingsymbol)} &times;{o.quantity}"
+                     f" <span class='fdim'>&middot; {_hesc(o.status)}{fill}</span>"))
+    for g in (session.query(Gtt).filter(Gtt.placed_at >= feed_cutoff)
+              .order_by(Gtt.placed_at.desc()).limit(30)):
+        feed.append((_fts(g.placed_at), "gtt",
+                     f"OCO {_hesc(g.tradingsymbol)} <span class='fdim'>&middot; "
+                     f"SL {g.sl_trigger:g} / tgt {g.target_trigger:g}"
+                     f" &middot; {_hesc(g.status)}</span>"))
+    for t in (session.query(ClosedTrade).filter(ClosedTrade.closed_at >= feed_cutoff)
+              .order_by(ClosedTrade.closed_at.desc()).limit(30)):
+        t_pnl = t.pnl or 0
+        feed.append((_fts(t.closed_at), "exit",
+                     f"{_hesc(t.tradingsymbol)} closed "
+                     f"<b class='{'ok' if t_pnl >= 0 else 'bd'}'>"
+                     f"{'+' if t_pnl >= 0 else '&minus;'}&#8377;{abs(t_pnl):,.0f}</b>"
+                     f" <span class='fdim'>&middot; {_hesc(t.exit_reason)}</span>"))
+    for e in (session.query(AppError).filter(AppError.occurred_at >= feed_cutoff)
+              .order_by(AppError.occurred_at.desc()).limit(30)):
+        feed.append((_fts(e.occurred_at), "err",
+                     f"{_hesc(e.error_type)} <span class='fdim'>&middot; "
+                     f"{_hesc((e.message or '')[:120])}</span>"))
+    feed.sort(key=lambda it: it[0], reverse=True)
+    feed = feed[:30]
+    _FTAG = {"alert": "ALERT", "order": "ORDER", "gtt": "GTT", "exit": "EXIT", "err": "ERR"}
+    return "".join(
+        f"<li data-k='{kind}'>"
+        f"<span class='ft'>{ts.astimezone(IST).strftime('%d %b %H:%M')}</span>"
+        f"<span class='ftag ft-{kind}'>{_FTAG[kind]}</span>"
+        f"<span class='fe'>{msg}</span></li>"
+        for ts, kind, msg in feed
+    ) or ("<li><span class='fe' style='text-align:center;color:#aaa'>"
+          "No activity in the last 48h</span></li>")
+
+
+def _performance_blocks(session: Session) -> tuple[str, str, list[list]]:
+    """90-day tiles + Mon-Fri P&L heatmap + daily series — History tab.
+
+    Returns (tiles_html, heatmap_html, perf_days) — perf_days seeds the
+    client-side equity-curve chart (window.__perf).
+    """
+    perf_cutoff = datetime.now(IST) - timedelta(days=90)
+    closed_rows = (
+        session.query(ClosedTrade.closed_at, ClosedTrade.pnl)
+        .filter(
+            ClosedTrade.closed_at >= perf_cutoff,
+            ClosedTrade.dry_run == False,  # noqa: E712
+        )
+        .order_by(ClosedTrade.closed_at.asc())
+        .all()
+    )
+    daily_pnl: dict[str, float] = {}
+    pnls: list[float] = []
+    for ts, pnl in closed_rows:
+        if pnl is None:
+            continue
+        day_key = _fts(ts).astimezone(IST).date().isoformat()
+        daily_pnl[day_key] = daily_pnl.get(day_key, 0.0) + pnl
+        pnls.append(pnl)
+    n_trades = len(pnls)
+    wins = [p for p in pnls if p > 0]
+    gross_w = sum(wins)
+    gross_l = abs(sum(p for p in pnls if p < 0))
+    win_rate = len(wins) / n_trades * 100 if n_trades else None
+    profit_factor = gross_w / gross_l if gross_l > 0 else None
+    expectancy = sum(pnls) / n_trades if n_trades else None
+    _cum = _peak = 0.0
+    max_dd = 0.0
+    for p in pnls:
+        _cum += p
+        _peak = max(_peak, _cum)
+        max_dd = min(max_dd, _cum - _peak)
+    perf_days = sorted((k, round(v)) for k, v in daily_pnl.items())
+
+    def _tile(val: str, label: str, cls: str = "") -> str:
+        return (f"<div class='tile'><div class='tv2 {cls}'>{val}</div>"
+                f"<div class='tl2'>{label}</div></div>")
+
+    tiles_html = (
+        _tile(f"{win_rate:.0f}%" if win_rate is not None else "&mdash;", "win rate")
+        + _tile(f"{profit_factor:.2f}" if profit_factor is not None else "&mdash;", "profit factor")
+        + _tile((f"{'+' if expectancy > 0 else ('&minus;' if expectancy < 0 else '')}"
+                 f"&#8377;{abs(expectancy):,.0f}") if expectancy is not None else "&mdash;",
+                "expectancy / trade",
+                "ok" if (expectancy or 0) > 0 else ("bd" if (expectancy or 0) < 0 else ""))
+        + _tile(f"&minus;&#8377;{abs(max_dd):,.0f}" if max_dd < 0 else "&#8377;0",
+                "max drawdown", "bd" if max_dd < 0 else "")
+        + _tile(f"{n_trades}", "closed trades")
+    )
+
+    # P&L calendar: 6 ISO weeks × Mon–Fri, server-rendered cells
+    today_d = datetime.now(IST).date()
+    monday = today_d - timedelta(days=today_d.weekday())
+    hm_weeks = [monday - timedelta(weeks=w) for w in range(5, -1, -1)]
+    hm_max = max((abs(v) for v in daily_pnl.values()), default=0.0)
+    hm_cells: list[str] = []
+    for dow in range(5):
+        for wk in hm_weeks:
+            d = wk + timedelta(days=dow)
+            v = daily_pnl.get(d.isoformat())
+            if d > today_d or v is None:
+                hm_cells.append(f"<div title='{d.strftime('%d %b')}'></div>")
+            else:
+                alpha = 0.2 + 0.8 * min(1.0, abs(v) / hm_max) if hm_max else 0.2
+                colour = (f"rgba(52,199,89,{alpha:.2f})" if v > 0
+                          else (f"rgba(255,59,48,{alpha:.2f})" if v < 0 else ""))
+                style = f" style='background:{colour}'" if colour else ""
+                sign = "+" if v > 0 else ("-" if v < 0 else "")
+                hm_cells.append(
+                    f"<div{style} title='{d.strftime('%d %b')} &middot; "
+                    f"{sign}&#8377;{abs(v):,.0f}'></div>")
+    hm_html = "<div class='hm'>" + "".join(hm_cells) + "</div>"
+    return tiles_html, hm_html, perf_days
+
+
+# The deploy-small-then-scale gate: a strategy earns size only after ~30 live
+# trading days of positive evidence.
+_SCORE_PROVEN_DAYS = 30
+
+
+def _scorecard_html(session: Session) -> str:
+    """Per-strategy stats over 90 days, paper vs live — History tab."""
+    perf_cutoff = datetime.now(IST) - timedelta(days=90)
+
+    def inr_s(v: float) -> str:
+        sign = "+" if v > 0 else ("&minus;" if v < 0 else "")
+        return f"{sign}&#8377;{abs(v):,.0f}"
+    sc_rows = (
+        session.query(
+            ClosedTrade.strategy_id, ClosedTrade.dry_run,
+            ClosedTrade.closed_at, ClosedTrade.pnl,
+        )
+        .filter(ClosedTrade.closed_at >= perf_cutoff)
+        .order_by(ClosedTrade.closed_at.asc())
+        .all()
+    )
+    _sc_groups: dict[tuple[str, bool], dict] = {}
+    for _sid, _sdry, _sts, _spnl in sc_rows:
+        if _spnl is None:
+            continue
+        _key = (_scorecard_group(_sid), bool(_sdry))
+        g = _sc_groups.setdefault(_key, {"pnls": [], "days": set()})
+        g["pnls"].append(_spnl)
+        g["days"].add(_fts(_sts).astimezone(IST).date())
+
+    def _sc_stats(g: dict) -> dict:
+        _pnls = g["pnls"]
+        _n = len(_pnls)
+        _wins = sum(1 for p in _pnls if p > 0)
+        _cum = _pk = 0.0
+        _dd = 0.0
+        for p in _pnls:
+            _cum += p
+            _pk = max(_pk, _cum)
+            _dd = min(_dd, _cum - _pk)
+        return {
+            "n": _n,
+            "win_rate": _wins / _n * 100 if _n else 0.0,
+            "expectancy": sum(_pnls) / _n if _n else 0.0,
+            "total": sum(_pnls),
+            "max_dd": _dd,
+            "days": len(g["days"]),
+        }
+
+    def _sc_name(sid: str) -> str:
+        label = {
+            "tv_webhook": "TV webhook",
+            "voice": "voice",
+            "voice_straddle": "voice straddle",
+            "manual": "manual / other",
+        }.get(sid, sid)
+        if sid.startswith("sched_straddle_"):
+            label = sid.removeprefix("sched_straddle_") + " straddle"
+        elif sid.startswith("ws_"):
+            label = sid.removeprefix("ws_").replace("_", " ") + " window"
+        return label if len(label) <= 28 else label[:27] + "&hellip;"
+
+    _sc_entries = sorted(
+        ((k, _sc_stats(g)) for k, g in _sc_groups.items()),
+        key=lambda kv: (kv[0][1], -kv[1]["total"]),  # live first, then total P&L desc
+    )
+    sc_trs: list[str] = []
+    for (_sid, _sdry), st in _sc_entries:
+        if _sdry:
+            _badge = "<span class='scb scb-p'>&#128221; paper</span>"
+        elif st["days"] >= _SCORE_PROVEN_DAYS and st["total"] > 0:
+            _badge = f"<span class='scb scb-ok'>proven &middot; {st['days']}d</span>"
+        else:
+            _badge = f"<span class='scb scb-wn'>proving &middot; {st['days']}/{_SCORE_PROVEN_DAYS}d</span>"
+        _exp_cls = "ok" if st["expectancy"] > 0 else ("bd" if st["expectancy"] < 0 else "")
+        _tot_cls = "ok" if st["total"] > 0 else ("bd" if st["total"] < 0 else "")
+        sc_trs.append(
+            "<tr>"
+            f"<td class='scn'>{_sc_name(_sid)}</td>"
+            f"<td>{_badge}</td>"
+            f"<td>{st['n']}</td>"
+            f"<td>{st['win_rate']:.0f}%</td>"
+            f"<td class='{_exp_cls}'>{inr_s(st['expectancy'])}</td>"
+            f"<td class='{_tot_cls}'>{inr_s(st['total'])}</td>"
+            f"<td class='bd'>{('&minus;&#8377;' + format(abs(st['max_dd']), ',.0f')) if st['max_dd'] < 0 else '&#8377;0'}</td>"
+            "</tr>"
+        )
+    return (
+        "<div class='sct-wrap'><table class='sct'>"
+        "<tr><th>strategy</th><th></th><th>trades</th><th>win</th>"
+        "<th>expect/tr</th><th>total P&amp;L</th><th>max DD</th></tr>"
+        + "".join(sc_trs)
+        + "</table></div>"
+        if sc_trs else
+        "<div style='color:#aaa;text-align:center;padding:12px 0'>"
+        "No closed trades in the last 90 days</div>"
+    )
+
+
+def _today_snapshots(session: Session) -> list[list]:
+    """Intraday P&L snapshots (today) seeding the Home hero sparkline."""
+    _snap_start = datetime.now(IST).replace(hour=0, minute=0, second=0, microsecond=0)
+    return [
+        [_fts(r.at).astimezone(IST).strftime("%H:%M"),
+         round(r.realized + (r.open_mtm or 0.0))]
+        for r in (session.query(PnlSnapshot)
+                  .filter(PnlSnapshot.at >= _snap_start)
+                  .order_by(PnlSnapshot.at.asc()).all())
+    ]
+
+
+def _book_seg(active_book: str) -> str:
+    """Orders/GTTs switcher — both are reached from the More panel's link-tiles."""
+    return (
+        "<div style='margin-bottom:14px'><span class='seg'>"
+        f"<a href='/orders' class='{'on' if active_book == 'orders' else ''}'>Orders</a>"
+        f"<a href='/gtts' class='{'on' if active_book == 'gtts' else ''}'>GTTs</a>"
+        "</span></div>"
+    )
+
+
+def _shell(active: str, content: str, settings: Settings, wide: bool = False, refresh: bool = False,
+           live: bool = False) -> str:
+    """Wrap page content in the shared topbar / status strip / bottom tab bar / CSS.
 
     refresh=True adds a 120s meta-refresh; live=True shows the updated-at
     stamp without the meta refresh (the page polls its own JSON instead).
-    xl=True widens the content column for multi-column layouts (/control).
+    `active` is one of the 4 tabs (home/markets/settings/more). Home/Markets/
+    Settings are swipeable panels *within* /control (see control_page); the
+    tab bar links there as /control#<tab> so it still works — as a normal
+    page load landing on the right panel — from every other page. More is a
+    real panel too (link-tiles to Orders/GTTs/History/Alerts/Agents/Desk),
+    so those pages (and any other admin/debug page) pass active="more".
     """
-    pages = [("/control","Control","control"),("/orders","Orders","orders"),
-             ("/gtts","GTTs","gtts"),("/history","History","history"),
-             ("/dashboard","Alerts","dashboard"),
-             ("/commodity-agents/dashboard","Agents","agents"),
-             ("/commodity-agents/desk","Desk","desk")]
-    nav = "".join(
-        "<a href='" + href + "'" + (" class='on'" if key == active else "") + ">" + lbl + "</a>"
-        for href, lbl, key in pages
-    )
-    wrap_cls = "wrap wrap-xl" if xl else ("wrap wrap-lg" if wide else "wrap wrap-sm")
+    tabs = [
+        ("/control#home", "Home", "home",
+         "<path d='M4 11.5 12 4l8 7.5'/><path d='M6 10v9h12v-9'/>"),
+        ("/control#markets", "Markets", "markets",
+         "<path d='M4 16l5-5 4 4 7-8'/><path d='M15 7h6v6'/>"),
+        ("/control#settings", "Settings", "settings",
+         "<path d='M4 7h10M18 7h2M4 17h2M8 17h12'/><circle cx='16' cy='7' r='2.3'/><circle cx='6' cy='17' r='2.3'/>"),
+        ("/control#more", "More", "more",
+         "<circle cx='5' cy='12' r='1.8'/><circle cx='12' cy='12' r='1.8'/><circle cx='19' cy='12' r='1.8'/>"),
+    ]
+    tabbar = "<nav class='tabbar' aria-label='Primary'><div class='tabbar-in'>" + "".join(
+        f"<a href='{href}' class='tb-item{' on' if key == active else ''}' data-tab='{key}'>"
+        f"<svg viewBox='0 0 24 24'>{svg}</svg><span>{lbl}</span></a>"
+        for href, lbl, key, svg in tabs
+    ) + "</div></nav>"
+    stop_banner, strip_html = _status_strip(settings)
+    wrap_cls = "wrap wrap-lg" if wide else "wrap wrap-sm"
     refresh_meta = "<meta http-equiv='refresh' content='120'>" if refresh else ""
     lut_html = (
         "<span id='lut' class='tb-lut'></span>"
@@ -3498,11 +3967,16 @@ def _shell(active: str, content: str, wide: bool = False, refresh: bool = False,
         "</head><body>"
         "<header class='topbar'><div class='tb-in'>"
         "<span class='wordmark'><i></i>ZeroBot</span>"
-        "<nav class='tb-nav'>" + nav + "</nav>"
         + lut_html +
         "<a class='tb-out' href='/auth/logout'>Sign out</a>"
         "</div></header>"
-        "<div class='" + wrap_cls + "'>" + content + "</div>"
+        + tabbar +
+        # tabbar renders before .wrap (though fixed-position, so this doesn't
+        # move it visually) so its <a data-tab> elements already exist in the
+        # DOM by the time an inline script inside `content` (_SWIPE_JS) runs
+        # and queries for them — scripts execute as the parser reaches them,
+        # and a script can't see elements that appear later in the HTML.
+        "<div class='" + wrap_cls + "'>" + stop_banner + strip_html + content + "</div>"
         + lut_js +
         "</body></html>"
     )
@@ -3512,6 +3986,7 @@ def _shell(active: str, content: str, wide: bool = False, refresh: bool = False,
 async def dashboard(
     session: Session = Depends(get_db_session),
     _: None = Depends(_auth_guard),
+    settings: Settings = Depends(get_current_settings),
     days: int = Query(default=2, ge=0),
 ) -> Response:
     q = session.query(Alert)
@@ -3534,12 +4009,13 @@ async def dashboard(
         for r in rows
     )
     return Response(
-        content=_shell("dashboard",
+        content=_shell("more",
             filters
             + "<div class='card'><div class='ct'>Recent Alerts</div>"
             "<table><thead><tr><th>ID</th><th>Ticker</th><th>Action</th>"
             "<th>Time</th><th>Processed</th></tr></thead>"
             "<tbody>" + rows_html + "</tbody></table></div>",
+            settings,
             wide=True,
         ),
         media_type="text/html",
@@ -3550,6 +4026,7 @@ async def dashboard(
 async def positions(
     session: Session = Depends(get_db_session),
     _: None = Depends(_auth_guard),
+    settings: Settings = Depends(get_current_settings),
 ) -> Response:
     rows = session.query(Position).all()
     rows_html = "".join(
@@ -3563,6 +4040,7 @@ async def positions(
             "<table><thead><tr><th>ID</th><th>Symbol</th>"
             "<th class='tr'>Qty</th><th class='tr'>Entry Premium</th></tr></thead>"
             "<tbody>" + rows_html + "</tbody></table></div>",
+            settings,
             wide=True,
         ),
         media_type="text/html",
@@ -3573,6 +4051,7 @@ async def positions(
 async def history(
     session: Session = Depends(get_db_session),
     _: None = Depends(_auth_guard),
+    settings: Settings = Depends(get_current_settings),
     days: int = Query(default=1, ge=0),
 ) -> Response:
     q = session.query(ClosedTrade)
@@ -3608,14 +4087,50 @@ async def history(
         f"<td>{r.closed_at.strftime('%m/%d %H:%M') if r.closed_at else '—'}</td></tr>"
         for r in rows
     )
+
+    # ── performance review — moved here from /control so Home stays short ────
+    tiles_html, hm_html, perf_days = _performance_blocks(session)
+    performance_card = (
+        "<div class='card'><div class='ct'>Performance &mdash; 90 days</div>"
+        "<div class='tiles'>" + tiles_html + "</div>"
+        "<div id='eq-chart' style='padding:6px 18px 4px'></div>"
+        "<div class='hmwrap'><div class='hmlbl'>Daily P&amp;L &middot; last 6 weeks"
+        " &middot; rows Mon&rarr;Fri</div>" + hm_html + "</div></div>"
+    )
+    scorecard_card = (
+        "<div class='card'><div class='ct'>Strategies &mdash; 90 days"
+        "<span style='margin-left:auto;text-transform:none;letter-spacing:0;"
+        f"font-weight:400;color:var(--ink3)'>scale after {_SCORE_PROVEN_DAYS} live days</span></div>"
+        + _scorecard_html(session) + "</div>"
+    )
+    activity_card = (
+        "<div class='card'><div class='ct'>Activity &mdash; 48h</div>"
+        "<div class='fchips'>"
+        "<button class='fchip on' data-f='all'>All</button>"
+        "<button class='fchip' data-f='alert'>Alerts</button>"
+        "<button class='fchip' data-f='order'>Orders</button>"
+        "<button class='fchip' data-f='gtt'>GTTs</button>"
+        "<button class='fchip' data-f='exit'>Exits</button>"
+        "<button class='fchip' data-f='err'>Errors</button>"
+        "</div><ul class='feed' id='feed'>" + _activity_feed_html(session) + "</ul></div>"
+    )
+    live_js = (
+        "<script>" + f"window.__perf={json.dumps({'days': perf_days})};" + "</script>"
+        + _HISTORY_LIVE_JS
+    )
+
     return Response(
-        content=_shell("history",
-            filters + summary
+        content=_shell("more",
+            performance_card + scorecard_card + activity_card
+            + filters + summary
             + "<div class='card'><div class='ct'>Trade History</div>"
             "<table><thead><tr><th>ID</th><th>Symbol</th><th class='tr'>PnL</th>"
             "<th>Reason</th><th>Closed</th></tr></thead>"
-            "<tbody>" + rows_html + "</tbody></table></div>",
+            "<tbody>" + rows_html + "</tbody></table></div>"
+            + live_js,
+            settings,
             wide=True,
+            live=True,
         ),
         media_type="text/html",
     )
@@ -3683,8 +4198,9 @@ async def gtts_page(
         + f"<span style='font-size:.78em;color:#aaa'>{len(rows)} row(s)</span></div>"
     )
     return Response(
-        content=_shell("gtts",
-            toggle_bar
+        content=_shell("more",
+            _book_seg("gtts")
+            + toggle_bar
             + "<div class='card'><div class='ct'>GTT / Stop-Loss Orders</div>"
             "<table><thead><tr><th>ID</th><th>Symbol</th><th class='tr'>SL Trigger</th>"
             "<th class='tr'>Target</th><th class='tr'>Entry Price</th><th>DB Status</th>"
@@ -3693,6 +4209,7 @@ async def gtts_page(
             "<p style='font-size:.73em;color:#aaa;margin-top:8px'>"
             "Kite Live: <b>active</b>=SL live | <b>triggered</b>=fired | "
             "<b>N/A</b>=not found (triggered+cleaned up or GTT_FAILED)</p></div>",
+            settings,
             wide=True,
             refresh=True,
         ),
@@ -3812,8 +4329,6 @@ async def control_page(
     _: None = Depends(_auth_guard),
     settings: Settings = Depends(get_current_settings),
 ) -> Response:
-    from app.storage import AppError
-
     # ── live state ────────────────────────────────────────────────────────────
     trade_mode = state.get_trade_mode()
     stock_mode = state.get_stock_mode()
@@ -3943,238 +4458,7 @@ async def control_page(
         sess_pill  = "pr"
         sess_label = f"Invalid &mdash; {sess_reason}" if sess_reason else "Invalid"
 
-    # ── activity feed: alerts / orders / GTTs / exits / errors, last 48 h ────
-    feed_cutoff = datetime.now(IST) - timedelta(hours=48)
-
-    def _fts(ts: datetime) -> datetime:
-        return ts if ts.tzinfo is not None else ts.replace(tzinfo=IST)
-
-    def _hesc(s: str | None) -> str:
-        return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
-    feed: list[tuple[datetime, str, str]] = []
-    for a in (session.query(Alert).filter(Alert.received_at >= feed_cutoff)
-              .order_by(Alert.received_at.desc()).limit(30)):
-        feed.append((_fts(a.received_at), "alert",
-                     f"{_hesc(a.action)} {_hesc(a.tv_ticker)}"
-                     f" <span class='fdim'>&middot; {_hesc(a.strategy_id)}</span>"))
-    for o in (session.query(Order).filter(Order.placed_at >= feed_cutoff)
-              .order_by(Order.placed_at.desc()).limit(30)):
-        fill = f" @ {o.fill_price:.2f}" if o.fill_price else ""
-        feed.append((_fts(o.placed_at), "order",
-                     f"{_hesc(o.transaction_type)} {_hesc(o.tradingsymbol)} &times;{o.quantity}"
-                     f" <span class='fdim'>&middot; {_hesc(o.status)}{fill}</span>"))
-    for g in (session.query(Gtt).filter(Gtt.placed_at >= feed_cutoff)
-              .order_by(Gtt.placed_at.desc()).limit(30)):
-        feed.append((_fts(g.placed_at), "gtt",
-                     f"OCO {_hesc(g.tradingsymbol)} <span class='fdim'>&middot; "
-                     f"SL {g.sl_trigger:g} / tgt {g.target_trigger:g}"
-                     f" &middot; {_hesc(g.status)}</span>"))
-    for t in (session.query(ClosedTrade).filter(ClosedTrade.closed_at >= feed_cutoff)
-              .order_by(ClosedTrade.closed_at.desc()).limit(30)):
-        t_pnl = t.pnl or 0
-        feed.append((_fts(t.closed_at), "exit",
-                     f"{_hesc(t.tradingsymbol)} closed "
-                     f"<b class='{'ok' if t_pnl >= 0 else 'bd'}'>"
-                     f"{'+' if t_pnl >= 0 else '&minus;'}&#8377;{abs(t_pnl):,.0f}</b>"
-                     f" <span class='fdim'>&middot; {_hesc(t.exit_reason)}</span>"))
-    for e in (session.query(AppError).filter(AppError.occurred_at >= feed_cutoff)
-              .order_by(AppError.occurred_at.desc()).limit(30)):
-        feed.append((_fts(e.occurred_at), "err",
-                     f"{_hesc(e.error_type)} <span class='fdim'>&middot; "
-                     f"{_hesc((e.message or '')[:120])}</span>"))
-    feed.sort(key=lambda it: it[0], reverse=True)
-    feed = feed[:30]
-    _FTAG = {"alert": "ALERT", "order": "ORDER", "gtt": "GTT", "exit": "EXIT", "err": "ERR"}
-    feed_html = "".join(
-        f"<li data-k='{kind}'>"
-        f"<span class='ft'>{ts.astimezone(IST).strftime('%d %b %H:%M')}</span>"
-        f"<span class='ftag ft-{kind}'>{_FTAG[kind]}</span>"
-        f"<span class='fe'>{msg}</span></li>"
-        for ts, kind, msg in feed
-    ) or ("<li><span class='fe' style='text-align:center;color:#aaa'>"
-          "No activity in the last 48h</span></li>")
-
-    # ── performance: last 90 days of closed trades (live only) ───────────────
-    perf_cutoff = datetime.now(IST) - timedelta(days=90)
-    closed_rows = (
-        session.query(ClosedTrade.closed_at, ClosedTrade.pnl)
-        .filter(
-            ClosedTrade.closed_at >= perf_cutoff,
-            ClosedTrade.dry_run == False,  # noqa: E712
-        )
-        .order_by(ClosedTrade.closed_at.asc())
-        .all()
-    )
-    daily_pnl: dict[str, float] = {}
-    pnls: list[float] = []
-    for ts, pnl in closed_rows:
-        if pnl is None:
-            continue
-        day_key = _fts(ts).astimezone(IST).date().isoformat()
-        daily_pnl[day_key] = daily_pnl.get(day_key, 0.0) + pnl
-        pnls.append(pnl)
-    n_trades = len(pnls)
-    wins = [p for p in pnls if p > 0]
-    gross_w = sum(wins)
-    gross_l = abs(sum(p for p in pnls if p < 0))
-    win_rate = len(wins) / n_trades * 100 if n_trades else None
-    profit_factor = gross_w / gross_l if gross_l > 0 else None
-    expectancy = sum(pnls) / n_trades if n_trades else None
-    _cum = _peak = 0.0
-    max_dd = 0.0
-    for p in pnls:
-        _cum += p
-        _peak = max(_peak, _cum)
-        max_dd = min(max_dd, _cum - _peak)
-    perf_days = sorted((k, round(v)) for k, v in daily_pnl.items())
-
-    def _tile(val: str, label: str, cls: str = "") -> str:
-        return (f"<div class='tile'><div class='tv2 {cls}'>{val}</div>"
-                f"<div class='tl2'>{label}</div></div>")
-
-    tiles_html = (
-        _tile(f"{win_rate:.0f}%" if win_rate is not None else "&mdash;", "win rate")
-        + _tile(f"{profit_factor:.2f}" if profit_factor is not None else "&mdash;", "profit factor")
-        + _tile((f"{'+' if expectancy > 0 else ('&minus;' if expectancy < 0 else '')}"
-                 f"&#8377;{abs(expectancy):,.0f}") if expectancy is not None else "&mdash;",
-                "expectancy / trade",
-                "ok" if (expectancy or 0) > 0 else ("bd" if (expectancy or 0) < 0 else ""))
-        + _tile(f"&minus;&#8377;{abs(max_dd):,.0f}" if max_dd < 0 else "&#8377;0",
-                "max drawdown", "bd" if max_dd < 0 else "")
-        + _tile(f"{n_trades}", "closed trades")
-    )
-
-    # P&L calendar: 6 ISO weeks × Mon–Fri, server-rendered cells
-    today_d = datetime.now(IST).date()
-    monday = today_d - timedelta(days=today_d.weekday())
-    hm_weeks = [monday - timedelta(weeks=w) for w in range(5, -1, -1)]
-    hm_max = max((abs(v) for v in daily_pnl.values()), default=0.0)
-    hm_cells: list[str] = []
-    for dow in range(5):
-        for wk in hm_weeks:
-            d = wk + timedelta(days=dow)
-            v = daily_pnl.get(d.isoformat())
-            if d > today_d or v is None:
-                hm_cells.append(f"<div title='{d.strftime('%d %b')}'></div>")
-            else:
-                alpha = 0.2 + 0.8 * min(1.0, abs(v) / hm_max) if hm_max else 0.2
-                colour = (f"rgba(52,199,89,{alpha:.2f})" if v > 0
-                          else (f"rgba(255,59,48,{alpha:.2f})" if v < 0 else ""))
-                style = f" style='background:{colour}'" if colour else ""
-                sign = "+" if v > 0 else ("-" if v < 0 else "")
-                hm_cells.append(
-                    f"<div{style} title='{d.strftime('%d %b')} &middot; "
-                    f"{sign}&#8377;{abs(v):,.0f}'></div>")
-    hm_html = "<div class='hm'>" + "".join(hm_cells) + "</div>"
-
-    # ── strategy scorecard: per-strategy stats over 90 days, paper vs live ────
-    # The deploy-small-then-scale gate: a strategy earns size only after
-    # ~30 live trading days of positive evidence.
-    _SCORE_PROVEN_DAYS = 30
-
-    def inr_s(v: float) -> str:
-        sign = "+" if v > 0 else ("&minus;" if v < 0 else "")
-        return f"{sign}&#8377;{abs(v):,.0f}"
-    sc_rows = (
-        session.query(
-            ClosedTrade.strategy_id, ClosedTrade.dry_run,
-            ClosedTrade.closed_at, ClosedTrade.pnl,
-        )
-        .filter(ClosedTrade.closed_at >= perf_cutoff)
-        .order_by(ClosedTrade.closed_at.asc())
-        .all()
-    )
-    _sc_groups: dict[tuple[str, bool], dict] = {}
-    for _sid, _sdry, _sts, _spnl in sc_rows:
-        if _spnl is None:
-            continue
-        _key = (_scorecard_group(_sid), bool(_sdry))
-        g = _sc_groups.setdefault(_key, {"pnls": [], "days": set()})
-        g["pnls"].append(_spnl)
-        g["days"].add(_fts(_sts).astimezone(IST).date())
-
-    def _sc_stats(g: dict) -> dict:
-        _pnls = g["pnls"]
-        _n = len(_pnls)
-        _wins = sum(1 for p in _pnls if p > 0)
-        _cum = _pk = 0.0
-        _dd = 0.0
-        for p in _pnls:
-            _cum += p
-            _pk = max(_pk, _cum)
-            _dd = min(_dd, _cum - _pk)
-        return {
-            "n": _n,
-            "win_rate": _wins / _n * 100 if _n else 0.0,
-            "expectancy": sum(_pnls) / _n if _n else 0.0,
-            "total": sum(_pnls),
-            "max_dd": _dd,
-            "days": len(g["days"]),
-        }
-
-    def _sc_name(sid: str) -> str:
-        label = {
-            "tv_webhook": "TV webhook",
-            "voice": "voice",
-            "voice_straddle": "voice straddle",
-            "manual": "manual / other",
-        }.get(sid, sid)
-        if sid.startswith("sched_straddle_"):
-            label = sid.removeprefix("sched_straddle_") + " straddle"
-        elif sid.startswith("ws_"):
-            label = sid.removeprefix("ws_").replace("_", " ") + " window"
-        return label if len(label) <= 28 else label[:27] + "&hellip;"
-
-    _sc_entries = sorted(
-        ((k, _sc_stats(g)) for k, g in _sc_groups.items()),
-        key=lambda kv: (kv[0][1], -kv[1]["total"]),  # live first, then total P&L desc
-    )
-    sc_trs: list[str] = []
-    for (_sid, _sdry), st in _sc_entries:
-        if _sdry:
-            _badge = "<span class='scb scb-p'>&#128221; paper</span>"
-        elif st["days"] >= _SCORE_PROVEN_DAYS and st["total"] > 0:
-            _badge = f"<span class='scb scb-ok'>proven &middot; {st['days']}d</span>"
-        else:
-            _badge = f"<span class='scb scb-wn'>proving &middot; {st['days']}/{_SCORE_PROVEN_DAYS}d</span>"
-        _exp_cls = "ok" if st["expectancy"] > 0 else ("bd" if st["expectancy"] < 0 else "")
-        _tot_cls = "ok" if st["total"] > 0 else ("bd" if st["total"] < 0 else "")
-        sc_trs.append(
-            "<tr>"
-            f"<td class='scn'>{_sc_name(_sid)}</td>"
-            f"<td>{_badge}</td>"
-            f"<td>{st['n']}</td>"
-            f"<td>{st['win_rate']:.0f}%</td>"
-            f"<td class='{_exp_cls}'>{inr_s(st['expectancy'])}</td>"
-            f"<td class='{_tot_cls}'>{inr_s(st['total'])}</td>"
-            f"<td class='bd'>{('&minus;&#8377;' + format(abs(st['max_dd']), ',.0f')) if st['max_dd'] < 0 else '&#8377;0'}</td>"
-            "</tr>"
-        )
-    scorecard_html = (
-        "<div class='sct-wrap'><table class='sct'>"
-        "<tr><th>strategy</th><th></th><th>trades</th><th>win</th>"
-        "<th>expect/tr</th><th>total P&amp;L</th><th>max DD</th></tr>"
-        + "".join(sc_trs)
-        + "</table></div>"
-        if sc_trs else
-        "<div style='color:#aaa;text-align:center;padding:12px 0'>"
-        "No closed trades in the last 90 days</div>"
-    )
-
-    # ── intraday P&L snapshots (today) for the hero sparkline ────────────────
-    _snap_start = datetime.now(IST).replace(hour=0, minute=0, second=0, microsecond=0)
-    snaps = [
-        [_fts(r.at).astimezone(IST).strftime("%H:%M"),
-         round(r.realized + (r.open_mtm or 0.0))]
-        for r in (session.query(PnlSnapshot)
-                  .filter(PnlSnapshot.at >= _snap_start)
-                  .order_by(PnlSnapshot.at.asc()).all())
-    ]
-
-    # ── today hero / annunciator / schedule rail ──────────────────────────────
-    from app.voice.config import is_voice_enabled
-
+    # ── today hero + schedule ─────────────────────────────────────────────────
     def inr(v: float) -> str:
         sign = "+" if v > 0 else ("&minus;" if v < 0 else "")
         return f"{sign}&#8377;{abs(v):,.0f}"
@@ -4182,8 +4466,8 @@ async def control_page(
     realized = _realised_pnl_today(session, paper=paper)
     realized_cls = "ok" if realized > 0 else ("bd" if realized < 0 else "")
     loss_headroom = max(eff_max_loss - today_loss, 0)
-    voice_on = is_voice_enabled()
     rail_html, next_label = _todays_schedule(settings)
+    snaps = _today_snapshots(session)
 
     _ovr_keys = [
         "max_lots", "max_daily_loss", "sl_pct", "rr_ratio", "daily_profit_target",
@@ -4193,26 +4477,7 @@ async def control_page(
     ]
     n_ovr = sum(1 for k in _ovr_keys if overrides.get(k) is not None)
 
-    def spill(label: str, on: bool) -> str:
-        return (f"<span class='pill {'pg' if on else 'pm'}'><span class='sdot'></span>"
-                f"{label} {'ON' if on else 'OFF'}</span>")
-
     sd_enabled = state.is_straddle_defense_enabled(settings.STRADDLE_DEFENSE_ENABLED)
-
-    strip_html = (
-        "<div class='strip'>"
-        + f"<span class='pill {paper_pill}'><span class='sdot'></span>{paper_label}</span>"
-        + f"<span class='pill {sess_pill}' id='pill-kite'><span class='sdot'></span>Kite {'OK' if sess_valid else 'INVALID'}</span>"
-        + f"<span class='pill {mode_pill}'><span class='sdot'></span>{mode_display}</span>"
-        + spill("Trailing", eff_trailing)
-        + spill("Window straddle", ws_enabled)
-        + spill("NG hedge", hedge_enabled)
-        + spill("Defense", sd_enabled)
-        + spill("Sched. straddle", settings.SCHEDULED_STRADDLE_ENABLED)
-        + spill("Voice", voice_on)
-        + (f"<span class='pill pa'><span class='sdot'></span>{n_ovr} overrides</span>" if n_ovr else "")
-        + "</div>"
-    )
 
     # ── straddle defense card ────────────────────────────────────────────────
     sd_trigger = settings.STRADDLE_DEFENSE_DRAWDOWN_TRIGGER
@@ -4349,15 +4614,11 @@ async def control_page(
         "</span></div></div>"
     )
 
-    # ── monitoring column ────────────────────────────────────────────────────
-    # Order below is the mobile priority order: this is what stacks top-to-
-    # bottom on a phone (iPhone is the primary device this page is read on),
-    # so the cards you act on during the evening session come first and the
-    # cards you only check occasionally (performance/scorecard/activity) sit
-    # at the bottom. The desktop two-column split reuses the same HTML.
-    main_col = (
+    # ── Home panel — act now: hero, risk meters, positions, defense, trade ────
+    home_panel = (
+        "<section class='panel' id='home'>"
         # today hero — realised is server-rendered; MTM/theta filled by JS
-        "<div class='card'><div class='ct'>Today</div>"
+        + "<div class='card'><div class='ct'>Today</div>"
         + f"<div class='hero-pnl {realized_cls}' id='hero-net'>{inr(realized)}</div>"
         + "<div class='hero-sub'>"
         + f"<span>Realized <b id='hero-real' class='{realized_cls}'>{inr(realized)}</b></span>"
@@ -4384,8 +4645,6 @@ async def control_page(
         + f"<div class='mv {consec_vc}' id='m-consec-v'>{consec}&thinsp;/&thinsp;{eff_consec_limit}</div></div>"
         + "</div>"
 
-        + vol_card
-
         # open positions — filled by _CONTROL_LIVE_JS from /commodity-agents/portfolio-greeks
         + "<div class='card'><div class='ct'>Open Positions &mdash; Live Greeks</div>"
         + "<div id='pos-wrap' style='overflow-x:auto'>"
@@ -4393,10 +4652,28 @@ async def control_page(
         + "Loading live positions&hellip;</div></div></div>"
 
         + sd_card
-
         + _QUICK_TRADE_PANEL
+        + "</section>"
+    )
 
-        # today's schedule rail
+    # ── Markets panel — volatility + commodity intelligence ──────────────────
+    markets_panel = (
+        "<section class='panel' id='markets'>"
+        + vol_card
+        # commodity intelligence — filled by _CONTROL_LIVE_JS
+        + "<div class='card'><div class='ct'>Commodity Intelligence"
+        + "<span id='ca-msg' style='margin-left:auto;text-transform:none;letter-spacing:0;"
+        + "color:var(--ink2)'></span></div>"
+        + "<div class='cagrid' id='ca-grid'>"
+        + "<div style='font-size:.78em;color:var(--ink3)'>Loading commodity data&hellip;</div>"
+        + "</div></div>"
+        + "</section>"
+    )
+
+    # ── Settings panel — configuration, checked occasionally ─────────────────
+    settings_panel = (
+        "<section class='panel' id='settings'>"
+        # today's schedule
         + "<div class='card'><div class='ct'>Today's Schedule"
         + f"<span id='next-job' style='margin-left:auto;text-transform:none;letter-spacing:0;"
         + f"color:var(--accent)'>{('next: ' + next_label) if next_label else ''}</span>"
@@ -4448,35 +4725,8 @@ async def control_page(
         + "<a href='/kite/login' class='btn bn' style='text-decoration:none'>Re-login</a></div>"
         + "</div>"
 
-        # performance — 90 days
-        + "<div class='card'><div class='ct'>Performance &mdash; 90 days</div>"
-        + "<div class='tiles'>" + tiles_html + "</div>"
-        + "<div id='eq-chart' style='padding:6px 18px 4px'></div>"
-        + "<div class='hmwrap'><div class='hmlbl'>Daily P&amp;L &middot; last 6 weeks"
-        + " &middot; rows Mon&rarr;Fri</div>" + hm_html + "</div></div>"
-
-        # strategy scorecard — the deploy-small-then-scale gate
-        + "<div class='card'><div class='ct'>Strategies &mdash; 90 days"
-        + "<span style='margin-left:auto;text-transform:none;letter-spacing:0;"
-        + f"font-weight:400;color:var(--ink3)'>scale after {_SCORE_PROVEN_DAYS} live days</span></div>"
-        + scorecard_html + "</div>"
-
-        # activity feed
-        + "<div class='card'><div class='ct'>Activity &mdash; 48h</div>"
-        + "<div class='fchips'>"
-        + "<button class='fchip on' data-f='all'>All</button>"
-        + "<button class='fchip' data-f='alert'>Alerts</button>"
-        + "<button class='fchip' data-f='order'>Orders</button>"
-        + "<button class='fchip' data-f='gtt'>GTTs</button>"
-        + "<button class='fchip' data-f='exit'>Exits</button>"
-        + "<button class='fchip' data-f='err'>Errors</button>"
-        + "</div><ul class='feed' id='feed'>" + feed_html + "</ul></div>"
-    )
-
-    # ── secondary rail — configuration checked occasionally, not every session ─
-    rail_col = (
         # background jobs
-        "<div class='card'><div class='ct'>Background Jobs</div>"
+        + "<div class='card'><div class='ct'>Background Jobs</div>"
         + f"<div class='mdr'><div class='mdl'>NG Delta Hedge&ensp;<span class='pill {hedge_pill}'>{hedge_label}</span>"
         + "<span style='font-size:.70em;color:var(--ink3)'>&ensp;every 2 min (odd) &middot; incl. half-exit, BNF SL, straddle ladder</span></div>"
         + "<form method='post' action='/control/ng-hedge/toggle' style='margin:0'>"
@@ -4556,24 +4806,35 @@ async def control_page(
         + "<button class='btn bp' type='submit' style='flex:1'>Apply</button>"
         + "<button class='btn bm' type='submit' name='reset' value='1' style='flex:1'>Reset to defaults</button>"
         + "</div></form></details>"
+        + "</section>"
+    )
 
-        # commodity intelligence — filled by _CONTROL_LIVE_JS
-        + "<div class='card'><div class='ct'>Commodity Intelligence"
-        + "<span id='ca-msg' style='margin-left:auto;text-transform:none;letter-spacing:0;"
-        + "color:var(--ink2)'></span></div>"
-        + "<div class='cagrid' id='ca-grid'>"
-        + "<div style='font-size:.78em;color:var(--ink3)'>Loading commodity data&hellip;</div>"
-        + "</div></div>"
+    # ── More panel — everything rarely used, one hop away ────────────────────
+    _more_links = [
+        ("/orders", "Orders", "Placed trades, fills, live P&amp;L per order"),
+        ("/gtts", "GTTs", "Live stop-loss / target OCO orders"),
+        ("/history", "History", "Closed trades, performance, scorecard"),
+        ("/dashboard", "Alerts", "Raw TradingView webhook log"),
+        ("/commodity-agents/dashboard", "Agents", "Commodity AI recommendations"),
+        ("/commodity-agents/desk", "Desk", "Commodity agents trading desk"),
+    ]
+    more_panel = (
+        "<section class='panel' id='more'>"
+        + "<div class='morelinks'>" + "".join(
+            f"<a class='mltile' href='{href}'><b>{label}</b><span>{desc}</span></a>"
+            for href, label, desc in _more_links
+        ) + "</div>"
+        + "</section>"
+    )
+
+    swipe_html = (
+        "<div class='swipe' id='swipe'>"
+        + home_panel + markets_panel + settings_panel + more_panel
+        + "</div>"
     )
 
     body = (
-        stop_banner
-        + strip_html
-        + "<div class='grid2'>"
-        + "<div class='gc-main'>" + main_col + "</div>"
-        + "<aside class='gc-rail'>" + rail_col + "</aside>"
-        + "</div>"
-
+        swipe_html
         # seed the live script, then load it
         + "<script>"
         + f"window.__realized={realized:.0f};"
@@ -4581,12 +4842,12 @@ async def control_page(
         + f"window.__paper={'true' if paper else 'false'};"
         + f"window.__mode={json.dumps(trade_mode)};"
         + f"window.__snaps={json.dumps(snaps)};"
-        + f"window.__perf={json.dumps({'days': perf_days})};"
         + "</script>"
         + _CONTROL_LIVE_JS
         + _VOL_MONITOR_JS
+        + _SWIPE_JS
     )
-    return Response(content=_shell("control", body, live=True, xl=True), media_type="text/html")
+    return Response(content=_shell("home", body, settings, live=True), media_type="text/html")
 
 
 @app.get("/api/control/summary")
@@ -5071,6 +5332,7 @@ async def vp_cancel_order(
 async def orders_page(
     session: Session = Depends(get_db_session),
     _: None = Depends(_auth_guard),
+    settings: Settings = Depends(get_current_settings),
     days: int = Query(default=1, ge=0),
 ) -> Response:
     q = (
@@ -5146,13 +5408,15 @@ async def orders_page(
         )
 
     return Response(
-        content=_shell("orders",
-            filters + summary
+        content=_shell("more",
+            _book_seg("orders")
+            + filters + summary
             + "<div class='card'><div class='ct'>Orders</div>"
             "<table><thead><tr><th>Time</th><th>Symbol</th><th>Side</th><th class='tr'>Lots</th>"
             "<th class='tr'>Entry</th><th class='tr'>SL</th><th class='tr'>Target</th>"
             "<th class='tr'>P&amp;L</th><th>Status</th></tr></thead>"
             "<tbody>" + rows_html + "</tbody></table></div>",
+            settings,
             wide=True,
             refresh=True,
         ),
