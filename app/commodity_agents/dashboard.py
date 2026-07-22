@@ -54,7 +54,8 @@ padding:5px;font-size:12px;margin-bottom:12px}
 </head>
 <body>
 <h1>Commodity Agents
-  <span><button onclick="location.href='/commodity-agents/analyze'">Analyze</button>
+  <span><button onclick="location.href='/control'" title="Back to Control">&#8249; Control</button>
+  <button onclick="location.href='/commodity-agents/analyze'">Analyze</button>
   <button onclick="location.href='/commodity-agents/desk'">Desk</button>
   <button onclick="runNow()">Run now</button>
   <button onclick="location.href='/auth/logout'" title="Sign out">&#8618;</button></span></h1>
@@ -194,7 +195,8 @@ details summary{cursor:pointer;color:var(--blue);font-size:13.5px;margin-top:8px
 </head>
 <body>
 <h1>Analyze a ticker
-  <span><button onclick="location.href='/commodity-agents/dashboard'">Dashboard</button>
+  <span><button onclick="location.href='/control'" title="Back to Control">&#8249; Control</button>
+  <button onclick="location.href='/commodity-agents/dashboard'">Dashboard</button>
   <button onclick="location.href='/commodity-agents/desk'">Desk</button></span></h1>
 
 <div class="card">
@@ -430,7 +432,8 @@ border:1px solid var(--border);padding:9px 16px;border-radius:10px;font-size:13.
 </head>
 <body>
 <h1>Desk
-  <span><button onclick="location.href='/commodity-agents/dashboard'">Dashboard</button>
+  <span><button onclick="location.href='/control'" title="Back to Control">&#8249; Control</button>
+  <button onclick="location.href='/commodity-agents/dashboard'">Dashboard</button>
   <button onclick="location.href='/commodity-agents/analyze'">Analyze</button>
   <button onclick="loadAll()">&#8635;</button>
   <button onclick="location.href='/auth/logout'" title="Sign out">&#8618;</button></span></h1>
