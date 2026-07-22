@@ -370,6 +370,67 @@ class TestOrchestrator:
             assert run.error
 
 
+class TestIvSample:
+    """run_iv_sample: the LLM-free deterministic snapshot that feeds the
+    Volatility Monitor chart on a faster cadence than the debate pipeline."""
+
+    def test_populates_atm_iv_without_debate(self, db_factory, ca_settings):
+        from app.commodity_agents.orchestrator import run_iv_sample
+        with db_factory() as s:
+            _seed_instruments(s)
+        now = datetime(2026, 7, 5, 12, 0, tzinfo=IST)
+        run_id = run_iv_sample("GOLD", db_factory, ca_settings, _mk_kite(), now=now)
+        assert run_id is not None
+        with db_factory() as s:
+            run = s.get(AgentRun, run_id)
+            assert run.status == "IV_SAMPLE"
+            assert run.atm_iv is not None
+            assert run.regime_json
+            assert run.analytics_json
+            # no debate round for a bare IV sample
+            assert run.judge_json is None
+            assert run.trend_json is None
+            assert s.query(CommodityRecommendation).filter_by(run_pk=run.id).count() == 0
+
+    def test_failure_recorded_not_raised(self, db_factory, ca_settings):
+        from app.commodity_agents.orchestrator import run_iv_sample
+        kite = MagicMock()
+        kite.historical_data.side_effect = RuntimeError("kite down")
+        now = datetime(2026, 7, 5, 12, 0, tzinfo=IST)
+        run_id = run_iv_sample("GOLD", db_factory, ca_settings, kite, now=now)
+        with db_factory() as s:
+            run = s.get(AgentRun, run_id)
+            assert run.status == "FAILED"
+            assert run.error
+
+    def test_feeds_iv_history_between_debate_cycles(self, db_factory, ca_settings):
+        """The whole point: a sample taken between two debate runs shows up
+        in _iv_history, giving the chart real resolution instead of one
+        point per (cost-throttled) 120-min debate cycle."""
+        from app.commodity_agents.orchestrator import _iv_history, run_iv_sample
+        with db_factory() as s:
+            _seed_instruments(s)
+        now = datetime(2026, 7, 5, 12, 0, tzinfo=IST)
+        run_iv_sample("GOLD", db_factory, ca_settings, _mk_kite(), now=now)
+        with db_factory() as s:
+            hist = _iv_history(s, "GOLD")
+        assert len(hist) == 1
+
+    def test_run_all_skips_closed_markets(self, db_factory, ca_settings, monkeypatch):
+        from app.commodity_agents import orchestrator
+        with db_factory() as s:
+            _seed_instruments(s)
+        calls: list[str] = []
+        monkeypatch.setattr(orchestrator, "run_iv_sample",
+                             lambda commodity, *a, **k: calls.append(commodity))
+        monkeypatch.setattr(orchestrator, "market_open",
+                             lambda commodity, now: commodity == "GOLD")
+        monkeypatch.setattr("app.kite_session.get_session_manager",
+                            lambda: MagicMock(get_kite=lambda: MagicMock()))
+        orchestrator.run_all_iv_samples(db_factory, ca_settings)
+        assert calls == ["GOLD"]
+
+
 # ── index underlyings (NIFTY / BANKNIFTY) ────────────────────────────────────
 
 class TestIndexSupport:

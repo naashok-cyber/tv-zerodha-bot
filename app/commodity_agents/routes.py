@@ -333,7 +333,7 @@ def iv_history(
             session.query(AgentRun)
             .filter(AgentRun.commodity == commodity, AgentRun.atm_iv != None)  # noqa: E711
             .order_by(AgentRun.started_at.desc())
-            .limit(min(limit, 500))
+            .limit(min(limit, 2000))
             .all()
         )
         points = []

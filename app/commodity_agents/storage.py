@@ -25,7 +25,9 @@ class AgentRun(Base):
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     status: Mapped[str] = mapped_column(String(24), nullable=False, default="RUNNING")
-    # RUNNING / COMPLETED / SKIPPED_REGIME / FAILED
+    # RUNNING / COMPLETED / SKIPPED_REGIME / FAILED / IV_SAMPLE
+    # IV_SAMPLE = LLM-free deterministic snapshot only (run_iv_sample) — no
+    # debate, no judge_json/risk_json, no CommodityRecommendation row.
 
     regime_json: Mapped[str | None] = mapped_column(Text)
     events_json: Mapped[str | None] = mapped_column(Text)

@@ -6,6 +6,11 @@ completes, so a crash mid-run still leaves an auditable partial trail.
 Cost control: the LLM round is skipped entirely (status SKIPPED_REGIME) when
 the deterministic regime classifier says high-vol-expansion — there is nothing
 to debate about selling premium into a vol blowout.
+
+The deterministic stages (candles/price/strikes/ATM IV/regime/vol analytics)
+involve no LLM calls at all, so they're also run standalone on a much faster
+cadence (`run_iv_sample`, status IV_SAMPLE) than the full debate pipeline —
+the paid-LLM round stays throttled by cost, the IV chart doesn't have to.
 """
 from __future__ import annotations
 
@@ -29,6 +34,7 @@ from app.commodity_agents.models import (
 )
 from app.commodity_agents.storage import AgentRun, CommodityRecommendation
 from app.config import IST
+from app.orders import throttled_quote_call
 from app.storage import Position
 
 log = logging.getLogger(__name__)
@@ -59,7 +65,10 @@ def _periods_per_year(underlying: str) -> float:
 # Short-premium worst-case heuristic: assume exit at SL = 100% of collected
 # premium (premium doubles). est_max_loss/lot = combined ATM premium × units.
 _SL_MULTIPLE = 1.0
-_IV_HISTORY_LIMIT = 500
+# 500 was sized for the old ~2/day debate cadence (≈70 days of history). The
+# 5-min IV_SAMPLE job is ~24x denser, so the same row count now covers only a
+# few days — raised to keep a multi-week lookback for iv_percentile/IV trend.
+_IV_HISTORY_LIMIT = 2000
 
 
 def _fetch_candles(kite: Any, session: Any, commodity: str, now: datetime) -> list[dict] | None:
@@ -81,14 +90,14 @@ def _underlying_price(kite: Any, session: Any, commodity: str, now: datetime) ->
         if fut is None:
             return None
         key = f"MCX:{fut.tradingsymbol}"
-    data = kite.ltp([key])
+    data = throttled_quote_call(kite.ltp, [key])
     lp = (data.get(key) or {}).get("last_price")
     return float(lp) if lp else None
 
 
 def _india_vix(kite: Any) -> float | None:
     try:
-        data = kite.ltp(["NSE:INDIA VIX"])
+        data = throttled_quote_call(kite.ltp, ["NSE:INDIA VIX"])
         lp = (data.get("NSE:INDIA VIX") or {}).get("last_price")
         return float(lp) if lp else None
     except Exception:
@@ -223,10 +232,50 @@ def run_commodity_pipeline(
     return run_id
 
 
-def _run_stages(
-    run: AgentRun, session: Any, settings: Any, kite: Any,
-    llm: LlmClient | None, commodity: str, now: datetime,
-) -> None:
+def run_iv_sample(
+    commodity: str, session_factory: Any, settings: Any, kite: Any,
+    now: datetime | None = None,
+) -> int | None:
+    """LLM-free IV/regime sample — no debate round, no recommendation.
+
+    Feeds the Volatility Monitor chart at a much faster cadence
+    (COMMODITY_AGENTS_IV_SAMPLE_MIN) than the full debate pipeline, which
+    stays throttled by the paid-LLM cost budget. Never raises — failures land
+    in run.error, same contract as run_commodity_pipeline.
+    """
+    now = now or datetime.now(IST)
+    run = AgentRun(run_id=str(uuid.uuid4()), commodity=commodity,
+                   started_at=now, status="RUNNING")
+
+    with session_factory() as session:
+        session.add(run)
+        session.commit()
+        run_id = run.id
+        try:
+            _compute_deterministic_snapshot(run, session, settings, kite, commodity, now)
+            run.status = "IV_SAMPLE"
+        except Exception as exc:
+            log.warning("[commodity_agents] %s IV sample failed: %s", commodity, exc)
+            run.status = "FAILED"
+            run.error = str(exc)
+        run.finished_at = datetime.now(IST)
+        session.commit()
+    return run_id
+
+
+def _compute_deterministic_snapshot(
+    run: AgentRun, session: Any, settings: Any, kite: Any, commodity: str, now: datetime,
+) -> tuple[list, Any, list, float, list, dict, dict]:
+    """Stages 1-4b: events/blackout, market data, strikes+ATM IV, regime, vol
+    analytics. No LLM calls — shared by the full debate pipeline and the fast
+    LLM-free IV sampler (`run_iv_sample`). Raises RuntimeError if candles/price
+    can't be fetched; caller marks the run FAILED.
+
+    Returns (events, blackout, candles, future_price, strike_candidates,
+    regime_snapshot, vol_analytics) for callers that continue into the debate
+    round; the IV sampler only needs atm_iv/regime_snapshot, already persisted
+    onto `run` by this function.
+    """
     pre_h = settings.COMMODITY_BLACKOUT_PRE_HOURS
     post_h = settings.COMMODITY_BLACKOUT_POST_HOURS
 
@@ -250,7 +299,7 @@ def _run_stages(
 
     # 3. Strike candidates + ATM IV + chain positioning (OI) in one quote round
     cands, positioning = strikes.build_chain_snapshot(
-        session, kite.quote, commodity, fut_price, now)
+        session, lambda keys: throttled_quote_call(kite.quote, keys), commodity, fut_price, now)
     run.strikes_json = json.dumps([c.to_dict() for c in cands])
     atm_iv = strikes.atm_iv_from_candidates(cands)
     run.atm_iv = atm_iv
@@ -284,7 +333,8 @@ def _run_stages(
         try:
             near_exp = datetime.strptime(cands[0].expiry, "%Y-%m-%d").date()
             next_iv = strikes.next_expiry_atm_iv(
-                session, kite.quote, commodity, fut_price, near_exp, now=now)
+                session, lambda keys: throttled_quote_call(kite.quote, keys),
+                commodity, fut_price, near_exp, now=now)
         except Exception as exc:
             log.debug("[commodity_agents] next-expiry IV unavailable for %s: %s",
                       commodity, exc)
@@ -303,6 +353,16 @@ def _run_stages(
     )
     run.analytics_json = json.dumps(quant)
     session.commit()
+
+    return evs, blackout, candles, fut_price, cands, snap, quant
+
+
+def _run_stages(
+    run: AgentRun, session: Any, settings: Any, kite: Any,
+    llm: LlmClient | None, commodity: str, now: datetime,
+) -> None:
+    evs, blackout, candles, fut_price, cands, snap, quant = _compute_deterministic_snapshot(
+        run, session, settings, kite, commodity, now)
 
     # 5. Regime gate — skip the (paid) LLM round when there's nothing to debate
     if snap.label == HIGH_VOL_EXPANSION:
@@ -525,6 +585,22 @@ def run_all_commodities(session_factory: Any, settings: Any) -> None:
         run_commodity_pipeline(commodity, session_factory, settings, kite, llm)
 
 
+def run_all_iv_samples(session_factory: Any, settings: Any) -> None:
+    """Fast, LLM-free companion to run_all_commodities — same per-commodity
+    market-hours gating, but samples IV/regime only (no debate, no cost)."""
+    from app.kite_session import get_session_manager
+    try:
+        kite = get_session_manager().get_kite()
+    except Exception as exc:
+        log.debug("[commodity_agents] no Kite session, skipping IV sample cycle: %s", exc)
+        return
+    now = datetime.now(IST)
+    for commodity in settings.COMMODITY_AGENTS_COMMODITIES:
+        if not market_open(commodity, now):
+            continue
+        run_iv_sample(commodity, session_factory, settings, kite, now)
+
+
 def _make_llm(settings: Any) -> LlmClient | None:
     if not settings.ANTHROPIC_API_KEY:
         return None
@@ -561,6 +637,22 @@ def register_jobs(scheduler: Any, settings: Any, session_factory: Any) -> None:
         id="commodity_agents_cycle",
         misfire_grace_time=300,
         **cadence,
+    )
+    # LLM-free IV/regime sampler — independent of the (cost-throttled) debate
+    # cadence above, so the Volatility Monitor chart isn't held to the same
+    # cadence as the paid LLM round. second=25 avoids the exact-second
+    # collision with the four other 1-min crons on the quote/ltp bucket
+    # (hedge :05, paper :20, partial :35, defense :50) — throttled_quote_call
+    # is the real protection regardless, this just spreads the load out.
+    scheduler.add_job(
+        run_all_iv_samples,
+        trigger="cron",
+        args=[session_factory, settings],
+        id="commodity_agents_iv_sample",
+        misfire_grace_time=120,
+        hour="9-23",
+        minute=f"*/{settings.COMMODITY_AGENTS_IV_SAMPLE_MIN}",
+        second="25",
     )
     scheduler.add_job(
         run_commodity_pipeline_by_name, trigger="cron", day_of_week="thu",
@@ -612,8 +704,9 @@ def register_jobs(scheduler: Any, settings: Any, session_factory: Any) -> None:
         id="commodity_agents_weekly_report", misfire_grace_time=3600,
     )
     log.info("[commodity_agents] jobs registered: pipeline every %d min 09-23 IST, "
-             "EIA off-cycle, delta watch, journal, calibration, briefing, "
-             "calendar refresh", interval)
+             "IV sample every %d min 09-23 IST, EIA off-cycle, delta watch, "
+             "journal, calibration, briefing, calendar refresh",
+             interval, settings.COMMODITY_AGENTS_IV_SAMPLE_MIN)
 
 
 def run_commodity_pipeline_by_name(commodity: str, session_factory: Any, settings: Any) -> None:

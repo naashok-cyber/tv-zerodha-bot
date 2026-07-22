@@ -2987,9 +2987,11 @@ window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change',func
 """
 
 # ── Volatility monitor — big trend-coloured ATM-IV chart on /control ─────────
-# Data: /commodity-agents/{scrip}/iv-history (30-min agent samples). The line
-# is coloured by an EMA-slope hysteresis: red while IV expands (hurts short
-# straddles), green while it contracts. Scrip + range persist in localStorage.
+# Data: /commodity-agents/{scrip}/iv-history — LLM-free IV_SAMPLE runs every
+# COMMODITY_AGENTS_IV_SAMPLE_MIN (5 min default) during market hours, plus one
+# richer sample per full debate cycle. The line is coloured by an EMA-slope
+# hysteresis: red while IV expands (hurts short straddles), green while it
+# contracts. Scrip + range persist in localStorage.
 _VOL_MONITOR_JS = r"""
 <script>
 (function(){
@@ -3009,7 +3011,7 @@ function msg(t){var e=$('vm-msg');if(e)e.textContent=t||''}
 function fetchSeries(scrip,cb){
 var c=cache[scrip];
 if(c&&Date.now()-c.at<240000){cb(c.pts);return}
-fetch(CA+'/'+scrip+'/iv-history?limit=500')
+fetch(CA+'/'+scrip+'/iv-history?limit=2000')
 .then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.json()})
 .then(function(d){
 var pts=(d.points||[]).map(function(p){return{

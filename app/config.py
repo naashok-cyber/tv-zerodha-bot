@@ -403,6 +403,7 @@ class Settings(BaseSettings):
         "NATURALGAS", "CRUDEOIL", "GOLD", "SILVER", "NIFTY", "BANKNIFTY",
     ]
     COMMODITY_AGENTS_INTERVAL_MIN: int = 30
+    COMMODITY_AGENTS_IV_SAMPLE_MIN: int = 5   # LLM-free IV/regime sample cadence
     COMMODITY_AGENTS_LIVE: bool = False   # Phase-6 live-execution gate (not implemented)
     COMMODITY_AGENTS_WEB_SEARCH: bool = True
     COMMODITY_AGENT_MODEL_TREND: str = "claude-sonnet-5"
