@@ -319,6 +319,11 @@ class Settings(BaseSettings):
     NG_HEDGE_ADVERSE_MULT: float = 0.7        # tighter band when δ is drifting away from zero
     NG_HEDGE_FAVOURABLE_MULT: float = 1.5     # wider band when δ is reverting on its own
 
+    # Expiry-day skip: hedge is bypassed when time-to-expiry is below this.
+    # Default = 1 day (avoid paying round-trip spread on premium that will evaporate).
+    # Set to 0.0 to allow hedging up to the moment of expiry (accepts higher gamma risk).
+    NG_HEDGE_MIN_T_YEARS: float = 1.0 / 365
+
     # Circuit breakers
     NG_HEDGE_COOLDOWN_MIN: int = 10           # min gap between hedges (0 disables)
     NG_HEDGE_COOLDOWN_BYPASS_MULT: float = 2.0   # |δ| above this x band ignores the cooldown
@@ -444,6 +449,13 @@ class Settings(BaseSettings):
     COMMODITY_AGENT_MAX_LOTS: int = 5
     COMMODITY_NOTIFY_MIN_CONFIDENCE: float = 0.6   # Telegram push threshold
     COMMODITY_DELTA_ALERT_THRESHOLD: float = 0.20  # straddle net delta/lot drift alert
+
+    # ── Trade-review notifier (post-hoc LLM review; read-only, Telegram push) ─
+    # Fires once per real ClosedTrade via a SQLAlchemy after_commit listener.
+    # No trading side-effects; the review path never imports orders/state setters.
+    TRADE_REVIEW_ENABLED: bool = False
+    TRADE_REVIEW_MODEL: str = "claude-fable-5"
+    TRADE_REVIEW_MAX_TOKENS: int = 400
 
 
 @lru_cache(maxsize=1)

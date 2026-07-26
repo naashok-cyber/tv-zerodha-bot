@@ -1080,8 +1080,12 @@ def _process_underlying(
         exp_h, exp_m = (int(x) for x in settings.SESSION_CLOSE_MCX.split(":"))
         expiry_dt = datetime.combine(opt_expiry, dtime(exp_h, exp_m), tzinfo=IST)
         T = (expiry_dt - now).total_seconds() / 31_557_600.0
-        if T <= (1.0 / 365):  # < 1 day: don't add naked premium so close to expiry
-            log.info("%s T=%.4fy (<1d) — skipping hedge near expiry", spec.prefix, T)
+        min_t = float(getattr(settings, "NG_HEDGE_MIN_T_YEARS", 1.0 / 365))
+        if T <= min_t:
+            log.info(
+                "%s T=%.4fy (<%.4fy min) — skipping hedge near expiry",
+                spec.prefix, T, min_t,
+            )
             return "IDLE"
 
         lot_mult = spec.lot_units

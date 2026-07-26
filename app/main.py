@@ -1155,6 +1155,8 @@ async def lifespan(app: FastAPI):
         engine = init_db(get_settings().DATABASE_URL)
         _SessionFactory = sessionmaker(bind=engine, expire_on_commit=False)
         _register_factory(_SessionFactory)
+        from app.trade_review import register_hook as _register_trade_review
+        _register_trade_review(_SessionFactory, get_settings())
     from app.trailing import TrailingSlManager
     _trailing_manager = TrailingSlManager(
         session_factory=_SessionFactory,
