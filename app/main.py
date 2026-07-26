@@ -3004,6 +3004,7 @@ var MO=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
 var cache={};
 var cur=localStorage.getItem('vm-scrip')||'NATURALGAS';
 var rangeDays=parseInt(localStorage.getItem('vm-range')||'7',10);
+var zoomRange=null; /* {i0,i1} absolute indices into the range-filtered series, or null = full range */
 var view={pts:[],X:null,Y:null,padL:46,w:0};
 function $(i){return document.getElementById(i)}
 function tok(n){return getComputedStyle(document.documentElement).getPropertyValue(n).trim()}
@@ -3045,21 +3046,32 @@ var dpr=window.devicePixelRatio||1;
 var W=wrap.clientWidth,H=canvas.clientHeight||240;
 canvas.width=W*dpr;canvas.height=H*dpr;
 ctx.setTransform(dpr,0,0,dpr,0,0);ctx.clearRect(0,0,W,H);
-var pts=visible(all);
+/* basePts = range-filtered (trading-hours-only, no calendar gaps to plot);
+   pts = basePts further sliced to the active drag-zoom window, if any. The
+   header stats always read basePts (below) so zooming into an older window
+   never makes the "current IV" reading look stale. */
+var basePts=visible(all);
+var pts=basePts;
+if(zoomRange){
+var zi0=Math.max(0,Math.min(zoomRange.i0,basePts.length-1));
+var zi1=Math.max(zi0,Math.min(zoomRange.i1,basePts.length-1));
+pts=basePts.slice(zi0,zi1+1);
+}
 view={pts:pts,X:null,Y:null,padL:46,w:W};
 if(pts.length<2){
 ctx.font='600 12px -apple-system,sans-serif';ctx.fillStyle=tok('--ink3');
 ctx.textAlign='center';ctx.fillText('Not enough IV samples yet',W/2,H/2);
-updateStats(all,pts,[]);return}
+updateStats(all,basePts,[]);return}
 var st=trendStates(pts);
 var pad={l:46,r:14,t:12,b:24};
 var iw=W-pad.l-pad.r,ih=H-pad.t-pad.b;
 var lo=Infinity,hi=-Infinity;
 pts.forEach(function(p){if(p.iv<lo)lo=p.iv;if(p.iv>hi)hi=p.iv});
 var span=Math.max(.6,hi-lo);lo-=span*.1;hi+=span*.1;
-var t0=pts[0].t.getTime(),t1=pts[pts.length-1].t.getTime();
-if(t1===t0)t1=t0+1;
-var X=function(i){return pad.l+(pts[i].t.getTime()-t0)/(t1-t0)*iw};
+/* index-based (not calendar-time-based) x-axis: every point gets equal
+   width regardless of the real gap before it, so overnight/weekend gaps
+   between trading sessions don't eat most of the chart's width. */
+var X=function(i){return pts.length>1?pad.l+i/(pts.length-1)*iw:pad.l+iw/2};
 var Y=function(v){return pad.t+(1-(v-lo)/(hi-lo))*ih};
 view.X=X;view.Y=Y;
 var cGrid=tok('--line-soft'),cInk3=tok('--ink3');
@@ -3079,7 +3091,18 @@ ctx.textAlign='center';ctx.textBaseline='top';ctx.fillStyle=cInk3;
 if(rangeDays<=1){
 var step=Math.max(1,Math.floor(pts.length/6));
 for(var i2=0;i2<pts.length;i2+=step)
-ctx.fillText(fmtHM(pts[i2].t),X(i2),H-pad.b+7)}
+ctx.fillText(fmtHM(pts[i2].t),X(i2),H-pad.b+7);
+/* session-break marker: a "1D" window can still straddle two trading
+   sessions (e.g. late yesterday + early today) since there's no
+   overnight data to separate them visually otherwise */
+var lastDay1=pts[0].t.getFullYear()+'-'+pts[0].t.getMonth()+'-'+pts[0].t.getDate();
+for(var i5=1;i5<pts.length;i5++){
+var dk1=pts[i5].t.getFullYear()+'-'+pts[i5].t.getMonth()+'-'+pts[i5].t.getDate();
+if(dk1!==lastDay1){
+lastDay1=dk1;
+ctx.save();ctx.strokeStyle=cGrid;ctx.setLineDash([3,3]);
+ctx.beginPath();ctx.moveTo(X(i5),pad.t);ctx.lineTo(X(i5),H-pad.b);ctx.stroke();
+ctx.restore()}}}
 else{
 var lastDay=null,dayIdx=0;
 var skip=rangeDays>=99?2:1;
@@ -3113,7 +3136,10 @@ ctx.globalAlpha=.22;
 ctx.beginPath();ctx.arc(lx,ly,8,0,Math.PI*2);ctx.fillStyle=lc;ctx.fill();
 ctx.globalAlpha=1;
 ctx.beginPath();ctx.arc(lx,ly,3.5,0,Math.PI*2);ctx.fillStyle=lc;ctx.fill();
-updateStats(all,pts,st)}
+/* header stats always reflect the full (unzoomed) range so "current IV"
+   never reads as stale just because the chart is zoomed into an older
+   window */
+updateStats(all,basePts,trendStates(basePts))}
 function updateStats(all,pts,st){
 var now=$('vm-now'),stEl=$('vm-state');
 if(!pts.length){
@@ -3142,27 +3168,71 @@ if(stEl){
 if(s===1){stEl.className='vm-state vm-exp';stEl.textContent='Expanding · '+dTxt}
 else if(s===-1){stEl.className='vm-state vm-con';stEl.textContent='Contracting · '+dTxt}
 else{stEl.className='vm-state vm-std';stEl.textContent='Steady · '+dTxt}}}
-/* hover readout */
-canvas.addEventListener('pointermove',function(ev){
-if(!view.pts.length||!view.X)return;
-var r=canvas.getBoundingClientRect();
-var mx=ev.clientX-r.left;
+/* hover/tap readout + drag-to-zoom, unified on one pointer gesture:
+   small movement (or none) = tap/hover -> tooltip, as before; movement past
+   a small threshold = drag-select -> zoom into that index window on release.
+   touch-action:none stops the swipeable-tab carousel from also claiming a
+   horizontal drag that starts on the chart. */
+canvas.style.touchAction='none';
+var drag=null; /* {x0,x1,moved} while a pointer is down on the canvas */
+var ZOOM_MIN_PX=10;
+function nearestIdx(mx){
 var best=0,bd=Infinity;
 for(var i=0;i<view.pts.length;i++){
 var d=Math.abs(view.X(i)-mx);if(d<bd){bd=d;best=i}}
-var p=view.pts[best];
+return best}
+function showTip(mx){
+if(!view.pts.length||!view.X)return;
+var idx=nearestIdx(mx),p=view.pts[idx];
 tip.style.display='block';
-tip.style.left=view.X(best)+'px';
+tip.style.left=view.X(idx)+'px';
 tip.style.top=view.Y(p.iv)+'px';
-tip.textContent=p.t.getDate()+' '+MO[p.t.getMonth()]+' '+fmtHM(p.t)+' · '+p.iv.toFixed(1)+'%'});
-canvas.addEventListener('pointerleave',function(){tip.style.display='none'});
+tip.textContent=p.t.getDate()+' '+MO[p.t.getMonth()]+' '+fmtHM(p.t)+' · '+p.iv.toFixed(1)+'%'}
+function updateZoomReset(){
+var b=$('vm-zoom-reset');if(b)b.style.display=zoomRange?'inline-flex':'none'}
+function paintDragBand(x0,x1){
+var c=cache[cur];if(!c)return;
+draw(c.pts);
+var H=canvas.clientHeight||240,lo=Math.min(x0,x1),hi=Math.max(x0,x1);
+ctx.fillStyle=tok('--accent');ctx.globalAlpha=.14;ctx.fillRect(lo,0,hi-lo,H);ctx.globalAlpha=1;
+ctx.strokeStyle=tok('--accent');ctx.lineWidth=1;ctx.setLineDash([4,3]);
+ctx.beginPath();ctx.moveTo(lo,0);ctx.lineTo(lo,H);ctx.moveTo(hi,0);ctx.lineTo(hi,H);ctx.stroke();
+ctx.setLineDash([])}
+canvas.addEventListener('pointerdown',function(ev){
+var r=canvas.getBoundingClientRect();
+drag={x0:ev.clientX-r.left,x1:ev.clientX-r.left,moved:false};
+try{canvas.setPointerCapture(ev.pointerId)}catch(e){}});
+canvas.addEventListener('pointermove',function(ev){
+var r=canvas.getBoundingClientRect();
+var mx=ev.clientX-r.left;
+if(drag){
+drag.x1=mx;
+if(Math.abs(drag.x1-drag.x0)>ZOOM_MIN_PX){
+drag.moved=true;tip.style.display='none';paintDragBand(drag.x0,drag.x1);return}}
+showTip(mx)});
+function endDrag(){
+if(drag&&drag.moved&&view.pts.length>3){
+var i0=nearestIdx(Math.min(drag.x0,drag.x1));
+var i1=nearestIdx(Math.max(drag.x0,drag.x1));
+if(i1-i0>=2){
+var base=zoomRange?zoomRange.i0:0;
+zoomRange={i0:base+i0,i1:base+i1};
+updateZoomReset()}}
+drag=null;redraw()}
+canvas.addEventListener('pointerup',endDrag);
+canvas.addEventListener('pointercancel',endDrag);
+canvas.addEventListener('pointerleave',function(){if(!drag)tip.style.display='none'});
 /* controls */
+var zoomBtn=$('vm-zoom-reset');
+if(zoomBtn)zoomBtn.addEventListener('click',function(){
+zoomRange=null;updateZoomReset();redraw()});
 var sel=$('vm-scrip');
 if(sel){
 sel.value=cur;
 if(sel.value!==cur){cur='NATURALGAS';sel.value=cur}
 sel.addEventListener('change',function(){
-cur=sel.value;localStorage.setItem('vm-scrip',cur);load()})}
+cur=sel.value;localStorage.setItem('vm-scrip',cur);
+zoomRange=null;updateZoomReset();load()})}
 var seg=$('vm-range');
 if(seg){
 seg.querySelectorAll('button').forEach(function(b){
@@ -3173,6 +3243,7 @@ seg.querySelectorAll('button').forEach(function(x){x.classList.remove('on')});
 b.classList.add('on');
 rangeDays=parseInt(b.getAttribute('data-d'),10);
 localStorage.setItem('vm-range',String(rangeDays));
+zoomRange=null;updateZoomReset();
 load()})}
 function load(){fetchSeries(cur,draw)}
 var raf=null;
@@ -4599,12 +4670,18 @@ async def control_page(
         "<span class='seg' id='vm-range' role='group' aria-label='Range'>"
         "<button data-d='1'>1D</button><button data-d='3'>3D</button>"
         "<button data-d='7' class='on'>7D</button><button data-d='99'>All</button>"
-        "</span></div>"
+        "</span>"
+        "<button id='vm-zoom-reset' class='btn bn' type='button' "
+        "style='display:none;font-size:.72em;padding:5px 10px;margin-left:6px;white-space:nowrap'>"
+        "&#8617; Reset zoom</button>"
+        "</div>"
         "<div class='vm-hero'><div class='vm-now' id='vm-now'>&mdash;</div>"
         "<span class='vm-state vm-std' id='vm-state'>loading&hellip;</span></div>"
         "</div>"
         "<div class='vm-chartwrap'><canvas id='vm-chart'></canvas>"
         "<div class='vm-tip' id='vm-tip'></div></div>"
+        "<div style='margin:2px 18px 0;font-size:.7em;color:var(--ink3)'>"
+        "Drag to zoom in &middot; tap a point to inspect &middot; only trading-hours samples are plotted</div>"
         "<div class='vm-foot'>"
         "<span>24h ago <b id='vm-open'>&mdash;</b></span>"
         "<span>Range <b id='vm-rangev'>&mdash;</b></span>"
