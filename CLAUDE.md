@@ -45,6 +45,7 @@ app/
   paper_trading.py   — Paper-mode fill/exit simulation: 1-min monitor closes paper positions on GTT band breach or EOD
   partial_booking.py — 1-min monitor: books part of a winning position past a target% threshold, re-arms GTT on the remainder at breakeven
   entry_wings.py     — Defined-risk straddles: buys protective wings BEFORE the short legs, records an ACTIVE HedgeAction(trigger="entry")
+  ema_analyzer.py    — 1-min EMA-fast/slow crossover + slope trend filter → buys long CE/PE via _process_alert with a fixed ₹ SL/target GTT band
   auto_login.py      — Headless Kite login: password + TOTP → access_token (PYOTP_AUTO_LOGIN)
   delta_hedge.py     — Multi-underlying delta-hedge dispatcher (NATURALGAS + CRUDEOILM); also hosts NG half-exit, straddle ladder, BNF stop-loss
   scheduled_straddle.py — Automated short straddle jobs for CRUDEOILM + NATURALGAS
@@ -85,6 +86,7 @@ terraform/          — GCP infrastructure
 | POST | `/update-risk` | Update capital/lot/loss overrides |
 | POST | `/control/partial-booking/toggle` | Enable/disable partial profit booking |
 | POST | `/control/entry-wings/toggle` | Enable/disable defined-risk wings at straddle entry |
+| POST | `/control/ema-analyzer/toggle` | Enable/disable the 1-min EMA crossover analyzer |
 | GET | `/kite/login` | Start Kite OAuth flow |
 | GET | `/kite/callback` | Exchange request_token → access_token |
 | GET | `/healthz` | Health check (returns session status) |
@@ -167,6 +169,7 @@ Blocks new entries if any of:
 | `paper_monitor_job` | every 1 min at `:20s`, Mon–Fri 09–23 | APScheduler cron |
 | `partial_booking_job` | every 1 min at `:35s`, Mon–Fri 09–23 | APScheduler cron |
 | `straddle_defense_job` | every 1 min at `:50s`, Mon–Fri 09–23 | APScheduler cron |
+| `run_ema_analyzer_job` | every 1 min at `:15s`, Mon–Fri 09–23 | APScheduler cron |
 | Scheduled straddle squareoff | `STRADDLE_SQUAREOFF_TIME` (23:20) | APScheduler cron |
 
 `_PreciseTimer`: dedicated daemon thread that busy-waits the final 10 s before target to fire within ~100 ms. Used for straddle entries where exact timing matters.
@@ -263,6 +266,17 @@ Paper mode (env `DRY_RUN` or the /control paper toggle) runs the **full real pip
 - **Bookkeeping**: wings are Order + Position rows (no GTT — their loss is bounded by the premium paid) plus a `HedgeAction(trigger="entry", status=ACTIVE)`. That trigger value is what stops `straddle_defense` from proposing a *second* hedge on the same straddle, and what excludes it from the defense's timed unwinds (`_maybe_unwind_scheduled` filters `trigger != "entry"`) — entry wings stay on until the straddle itself is squared off.
 - **Failure handling**: a half-filled wing pair is reversed immediately; if the short legs then fail to fill, the wings are reversed too (`reverse_entry_wings`).
 
+## EMA Analyzer (`app/ema_analyzer.py`)
+
+`EMA_ANALYZER_ENABLED` (env + live /control toggle, default off). `run_ema_analyzer_job` (1-min cron at `:15s`, Mon–Fri 09–23 IST) is a **momentum long-options** strategy: it reads 1-min candles for each `EMA_ANALYZER_UNDERLYINGS` symbol (NSE index spot / MCX near-fut) and buys a long option on a confirmed EMA crossover.
+
+- **Signal** (pure, in `compute_signal`, unit-tested): EMA-fast (`EMA_ANALYZER_FAST`=9) crosses EMA-slow (`EMA_ANALYZER_SLOW`=39) between the last two *completed* bars, AND the slow-EMA % change over `EMA_ANALYZER_SLOPE_LOOKBACK` bars exceeds `EMA_ANALYZER_SLOPE_MIN_PCT` in the cross direction (the trend filter that suppresses chop). Bullish cross + rising slope → BUY; bearish + falling → SELL. `ema_series` seeds with SMA(first period) to match TradingView's `ta.ema`.
+- **Execution**: BUY → **long CE**, SELL → **long PE**, always bought (never written) regardless of global trade mode — routed as an `AlertPayload(action="BUY", option_type=CE/PE)` through `_process_alert`, reusing risk guards, strike selection (delta), sizing, GTT and paper/live handling. One position at a time per underlying (per mode); the always-buy side means the global BUY/SELL trade-mode is bypassed.
+- **Fixed ₹ exits**: the payload carries `sl_inr`/`target_inr` (`EMA_ANALYZER_SL_INR`=3000, `EMA_ANALYZER_TARGET_INR`=6000). `_on_entry_filled` converts each to a premium-point distance (`₹ / (fill_qty × mcx_units)`) so **loss at SL / gain at target equals the ₹ amount regardless of size**; those become the GTT OCO triggers. Paper exits fire off those triggers in `paper_monitor_job` like any other position.
+- **`EMA_ANALYZER_EXIT_ON_OPPOSITE`** (default false): when true, an opposite crossover closes the open leg (EXIT via `_process_alert`) and the fresh signal reverses. Off by default → exits are the ₹ SL/target GTT only. **Caveat**: the EXIT routes the option tradingsymbol through `AlertPayload.symbol`, capped at 20 chars — fine for NIFTY, but longer symbols (BANKNIFTY monthly) would fail validation.
+- **`EMA_ANALYZER_SKIP_EXPIRY_DAY`** (default true): no new long-option entries on NSE expiry day (theta/pin risk). Signal generation still respects the `_process_alert` entry window (09:30–15:00 NSE).
+- Paper-first: scorecard/analytics group under `strategy_id="ema_analyzer_<UNDERLYING>"`.
+
 ## Trade Mode & Options Direction
 
 Controlled by `state.get_trade_mode()` (persisted to `data/state_overrides.json`):
@@ -334,6 +348,13 @@ Relationships: Alert → [Order] → Position → ClosedTrade; Order → Gtt
 - `PARTIAL_BOOKING_ENABLED=false` — live-overridable at /control
 - `PARTIAL_BOOK_TRIGGER_PCT=0.60`, `PARTIAL_BOOK_QTY_PCT=0.50`
 - `PARTIAL_BOOK_MOVE_SL_TO_BREAKEVEN=true`
+
+**EMA analyzer** (`app/ema_analyzer.py`)
+- `EMA_ANALYZER_ENABLED=false` — live-overridable at /control
+- `EMA_ANALYZER_UNDERLYINGS=["NIFTY"]`, `EMA_ANALYZER_FAST=9`, `EMA_ANALYZER_SLOW=39`
+- `EMA_ANALYZER_SLOPE_LOOKBACK=5`, `EMA_ANALYZER_SLOPE_MIN_PCT=0.0003`, `EMA_ANALYZER_CANDLE_INTERVAL=minute`
+- `EMA_ANALYZER_SL_INR=3000`, `EMA_ANALYZER_TARGET_INR=6000` — fixed ₹ GTT band per position
+- `EMA_ANALYZER_EXIT_ON_OPPOSITE=false`, `EMA_ANALYZER_SKIP_EXPIRY_DAY=true`
 
 **Delta hedge — multi-underlying dispatcher** (`app/delta_hedge.py`)
 
@@ -437,6 +458,7 @@ All access via getter/setter with `_lock`. Persistent overrides survive restarts
 | `get_sl_pct(env_default)` | `_SL_PCT_OVERRIDE` | SL% override |
 | `get_rr_ratio(env_default)` | `_RR_RATIO` | Target/SL ratio |
 | `get_trade_mode()` | persisted | BUY_OPTIONS / SELL_OPTIONS |
+| `is_ema_analyzer_enabled(env_default)` | `_EMA_ANALYZER_ENABLED_OVERRIDE` | None = use .env EMA_ANALYZER_ENABLED |
 | `get_session_invalid()` | in-memory only | Set by daily_session_check |
 
 Orange dot on /control UI = active override present.

@@ -604,6 +604,32 @@ def make_scheduler(
             settings.STRADDLE_DEFENSE_IV_SAMPLES,
             settings.STRADDLE_DEFENSE_ENABLED,
         )
+        # Always registered; the job checks state.is_ema_analyzer_enabled() each
+        # tick so it can be started/stopped live from /control. second=15 keeps
+        # it clear of the paper/partial/defense quote-bucket slots.
+        from app.ema_analyzer import run_ema_analyzer_job
+        scheduler.add_job(
+            run_ema_analyzer_job,
+            trigger="cron",
+            day_of_week="mon-fri",
+            hour="9-23",
+            minute="*",
+            second=15,
+            kwargs={"settings": settings, "session_factory": session_factory},
+            id="ema_analyzer",
+            misfire_grace_time=30,
+            max_instances=1,
+        )
+        log.info(
+            "[scheduler] EMA analyzer: every 1 min, Mon-Fri 09-23 IST "
+            "(EMA%d/%d + slope on %s, underlyings=%s, enabled=%s via .env default, "
+            "live-controllable at /control)",
+            settings.EMA_ANALYZER_FAST,
+            settings.EMA_ANALYZER_SLOW,
+            settings.EMA_ANALYZER_CANDLE_INTERVAL,
+            settings.EMA_ANALYZER_UNDERLYINGS,
+            settings.EMA_ANALYZER_ENABLED,
+        )
         log.info(
             "[scheduler] NG delta-hedge cron: every 1 min IST, "
             "Mon-Fri 09-23 (threshold=±%.0f mmBtu, limit_wait=%ds, enabled=%s via .env default, "

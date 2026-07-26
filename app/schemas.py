@@ -20,6 +20,8 @@ class AlertPayload(BaseModel):
     limit_price: Decimal | None = None             # manual trades only: LIMIT entry price; None = MARKET
     sl_price: Decimal | None = None                 # explicit SL trigger price for GTT; None = auto-calculate
     target_price: Decimal | None = None             # explicit profit-target price for GTT; None = auto-calculate
+    sl_inr: Decimal | None = None                   # fixed ₹ SL band (loss at SL); options only. None = %-based
+    target_inr: Decimal | None = None               # fixed ₹ target band (gain at target); options only. None = %-based
     option_type: Literal["CE", "PE"] | None = None # voice commands only: explicit option type
     strike: float | None = None                    # voice commands only: explicit strike price; None = ATM
     adx: float | None = None                       # RANGE_SELL mode: ADX value from Pine Script; trade skipped when >= ADX_THRESHOLD
@@ -63,6 +65,13 @@ class AlertPayload(BaseModel):
     def target_price_positive(cls, v: Decimal | None) -> Decimal | None:
         if v is not None and v <= 0:
             raise ValueError("target_price must be > 0")
+        return v
+
+    @field_validator("sl_inr", "target_inr")
+    @classmethod
+    def inr_band_positive(cls, v: Decimal | None) -> Decimal | None:
+        if v is not None and v <= 0:
+            raise ValueError("INR bands must be > 0")
         return v
 
     @field_validator("alert_id")

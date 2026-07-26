@@ -337,11 +337,23 @@ def _on_entry_filled(event: EntryFilledEvent) -> None:
                 if order.exchange == "MCX" else 1
             )
             _eff_qty = qty * _mcx_units
-            _MIN_GTT_LOSS_INR = 1000.0
-            min_loss_dist = _MIN_GTT_LOSS_INR / _eff_qty if _eff_qty > 0 else sl_risk_pct
-            sl_distance = max(sl_risk_pct, min_loss_dist, 1.0)
-            # Target keeps original %-based distance (preserves R:R intent) with ₹1 floor.
-            target_distance = max(rr * sl_risk_pct, 1.0)
+
+            # Fixed ₹ bands (e.g. EMA analyzer): translate the rupee SL/target into
+            # premium-point distances so max loss/gain at the GTT triggers is the
+            # requested ₹ amount. Falls back to the %-based bands when absent.
+            _sl_inr = meta.get("sl_inr")
+            _target_inr = meta.get("target_inr")
+            _fixed_bands = bool(_sl_inr and _target_inr and _eff_qty > 0)
+            if _fixed_bands:
+                sl_distance = max(_sl_inr / _eff_qty, 1.0)
+                target_distance = max(_target_inr / _eff_qty, 1.0)
+            else:
+                # Ensure the SL band is wide enough that max INR loss >= ₹1000.
+                _MIN_GTT_LOSS_INR = 1000.0
+                min_loss_dist = _MIN_GTT_LOSS_INR / _eff_qty if _eff_qty > 0 else sl_risk_pct
+                sl_distance = max(sl_risk_pct, min_loss_dist, 1.0)
+                # Target keeps original %-based distance (preserves R:R intent) with ₹1 floor.
+                target_distance = max(rr * sl_risk_pct, 1.0)
 
             if entry_side == "BUY":
                 # Long: SL when premium falls, target when it rises
@@ -350,21 +362,24 @@ def _on_entry_filled(event: EntryFilledEvent) -> None:
             else:
                 # Short (written option): SL when premium rises, target when it falls
                 sl_price = fill_price + sl_distance
-                # Formula target: % drops as premium rises (quicker exit on expensive options).
-                # /control override takes priority when explicitly set.
-                _manual_pct = state.get_sell_options_profit_pct(None)
-                if _manual_pct is not None:
-                    _profit_pct = _manual_pct
+                if _fixed_bands:
+                    target_price = max(fill_price - target_distance, 0.05)
                 else:
-                    _profit_pct = max(
-                        settings.SELL_OPTIONS_PROFIT_FLOOR,
-                        settings.SELL_OPTIONS_PROFIT_BASE - fill_price * settings.SELL_OPTIONS_PROFIT_SLOPE,
+                    # Formula target: % drops as premium rises (quicker exit on expensive options).
+                    # /control override takes priority when explicitly set.
+                    _manual_pct = state.get_sell_options_profit_pct(None)
+                    if _manual_pct is not None:
+                        _profit_pct = _manual_pct
+                    else:
+                        _profit_pct = max(
+                            settings.SELL_OPTIONS_PROFIT_FLOOR,
+                            settings.SELL_OPTIONS_PROFIT_BASE - fill_price * settings.SELL_OPTIONS_PROFIT_SLOPE,
+                        )
+                    target_price = max(fill_price * (1.0 - _profit_pct), 0.05)
+                    log.info(
+                        "_on_entry_filled: %s fill=%.2f profit_target=%.0f%% → target=%.2f",
+                        order.tradingsymbol, fill_price, _profit_pct * 100, target_price,
                     )
-                target_price = max(fill_price * (1.0 - _profit_pct), 0.05)
-                log.info(
-                    "_on_entry_filled: %s fill=%.2f profit_target=%.0f%% → target=%.2f",
-                    order.tradingsymbol, fill_price, _profit_pct * 100, target_price,
-                )
 
         # Round SL and target to the instrument's minimum tick size so GTT
         # trigger prices are always valid tradeable prices (MCX tick: 0.05–0.10).
@@ -2012,6 +2027,9 @@ def _process_alert(alert_id: int, alert_data: AlertPayload, settings: Settings) 
                 "underlying": underlying.name,
                 "entry_side": entry_side,
                 "dry_run": _paper,
+                # Fixed ₹ GTT bands (e.g. EMA analyzer); None ⇒ %-based bands.
+                "sl_inr": float(alert_data.sl_inr) if alert_data.sl_inr else None,
+                "target_inr": float(alert_data.target_inr) if alert_data.target_inr else None,
             }
 
         order = Order(
@@ -4496,6 +4514,11 @@ async def control_page(
     ew_label      = "ON" if ew_enabled else "OFF"
     ew_lbl        = "Disable" if ew_enabled else "Enable"
     ew_cls        = "ba" if ew_enabled else "bg2"
+    ema_enabled   = state.is_ema_analyzer_enabled(settings.EMA_ANALYZER_ENABLED)
+    ema_pill      = "pg" if ema_enabled else "pm"
+    ema_label     = "ON" if ema_enabled else "OFF"
+    ema_lbl       = "Disable" if ema_enabled else "Enable"
+    ema_cls       = "ba" if ema_enabled else "bg2"
 
     def src(key: str) -> str:
         return (
@@ -4795,6 +4818,11 @@ async def control_page(
         + f"OTM before every new short straddle{' (required)' if settings.STRADDLE_ENTRY_WINGS_REQUIRED else ''}</span></div>"
         + "<form method='post' action='/control/entry-wings/toggle' style='margin:0'>"
         + f"<button class='btn {ew_cls}' type='submit'>{ew_lbl}</button></form></div>"
+        + f"<div class='mdr'><div class='mdl'>EMA Analyzer&ensp;<span class='pill {ema_pill}'>{ema_label}</span>"
+        + f"<span style='font-size:.70em;color:var(--ink3)'>&ensp;1-min EMA{settings.EMA_ANALYZER_FAST}/{settings.EMA_ANALYZER_SLOW} cross + slope → long "
+        + f"CE/PE on {', '.join(settings.EMA_ANALYZER_UNDERLYINGS)}, ₹{settings.EMA_ANALYZER_SL_INR:.0f} SL / ₹{settings.EMA_ANALYZER_TARGET_INR:.0f} target</span></div>"
+        + "<form method='post' action='/control/ema-analyzer/toggle' style='margin:0'>"
+        + f"<button class='btn {ema_cls}' type='submit'>{ema_lbl}</button></form></div>"
         + "</div>"
 
         # kite session
@@ -5015,6 +5043,16 @@ async def toggle_entry_wings(
 ) -> Response:
     new_val = state.toggle_entry_wings_enabled(settings.STRADDLE_ENTRY_WINGS_ENABLED)
     log.info("Straddle entry wings toggled to %s", new_val)
+    return Response(status_code=302, headers={"Location": "/control"})
+
+
+@app.post("/control/ema-analyzer/toggle")
+async def toggle_ema_analyzer(
+    _: None = Depends(_auth_guard),
+    settings: Settings = Depends(get_current_settings),
+) -> Response:
+    new_val = state.toggle_ema_analyzer_enabled(settings.EMA_ANALYZER_ENABLED)
+    log.info("EMA analyzer toggled to %s", new_val)
     return Response(status_code=302, headers={"Location": "/control"})
 
 

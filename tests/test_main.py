@@ -467,6 +467,45 @@ def test_on_entry_filled_creates_position_and_gtt(monkeypatch) -> None:
     assert mock_kite.place_gtt.call_count == 1
 
 
+def test_on_entry_filled_fixed_inr_bands(monkeypatch) -> None:
+    """Fixed ₹ SL/target bands (EMA analyzer) → GTT triggers give exactly that loss/gain.
+
+    At qty=75, fill=300: SL band ₹3000 ⇒ 40-pt distance ⇒ sl=260 (loss 40*75=3000);
+    target band ₹6000 ⇒ 80-pt distance ⇒ target=380 (gain 80*75=6000). The %-based
+    SL_PREMIUM_PCT/RR settings must be ignored when the ₹ bands are present.
+    """
+    factory = _make_session_factory()
+    monkeypatch.setattr(main_module, "_SessionFactory", factory)
+    _seed_alert_order_instrument(factory)
+
+    mock_kite = MagicMock()
+    mock_kite.place_gtt.return_value = {"trigger_id": 77}
+    mock_kite.ltp.return_value = {"NFO:NIFTY2651923400CE": {"last_price": 300.0}}
+    mock_mgr = MagicMock()
+    mock_mgr.get_kite.return_value = mock_kite
+    monkeypatch.setattr(main_module, "get_session_manager", lambda: mock_mgr)
+    monkeypatch.setattr(main_module, "_pending_order_meta",
+                        {"ORD001": {"instrument_type": "CE", "underlying": "NIFTY",
+                                    "entry_side": "BUY", "sl_inr": 3000.0, "target_inr": 6000.0}})
+
+    # Deliberately unrelated %-based knobs — the fixed bands must win.
+    settings = _test_settings(DRY_RUN=False, SL_PREMIUM_PCT=0.15, RR_RATIO=2.0)
+    monkeypatch.setattr(main_module, "get_settings", lambda: settings)
+
+    from app.main import _on_entry_filled
+    _on_entry_filled(EntryFilledEvent(kite_order_id="ORD001", fill_price=300.0, fill_qty=75))
+
+    with factory() as s:
+        position = s.query(Position).one()
+        gtt = s.query(Gtt).one()
+
+    assert gtt.sl_trigger == pytest.approx(260.0)
+    assert gtt.target_trigger == pytest.approx(380.0)
+    assert (300.0 - gtt.sl_trigger) * 75 == pytest.approx(3000.0)      # loss at SL
+    assert (gtt.target_trigger - 300.0) * 75 == pytest.approx(6000.0)  # gain at target
+    assert position.current_sl == pytest.approx(260.0)
+
+
 def test_on_entry_filled_gtt_failure_saves_position_and_logs_error(monkeypatch) -> None:
     """GTT placement fails → Position is still committed, AppError written, Gtt marked GTT_FAILED."""
     factory = _make_session_factory()

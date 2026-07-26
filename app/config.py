@@ -263,6 +263,23 @@ class Settings(BaseSettings):
     ADX_PERIOD: int = 14
     ADX_CANDLE_INTERVAL: str = "10minute"     # Kite interval string for historical candles
 
+    # ── EMA trend/crossover analyzer (1-min cron) ─────────────────────────────
+    # Monitors 1-min candles for an EMA-fast/EMA-slow crossover confirmed by the
+    # slow-EMA slope; on agreement, buys a long CE (bullish) or long PE (bearish)
+    # through the normal alert pipeline with a fixed ₹ SL / ₹ target GTT band.
+    # Default OFF and paper-first — enable at /control after a paper track record.
+    EMA_ANALYZER_ENABLED: bool = False               # live-toggleable at /control
+    EMA_ANALYZER_UNDERLYINGS: list[str] = ["NIFTY"]  # spot/near-fut chart driving the signal
+    EMA_ANALYZER_FAST: int = 9                        # fast EMA period
+    EMA_ANALYZER_SLOW: int = 39                       # slow EMA period
+    EMA_ANALYZER_SLOPE_LOOKBACK: int = 5             # bars over which slow-EMA slope is measured
+    EMA_ANALYZER_SLOPE_MIN_PCT: float = 0.0003       # min |slow-EMA % change| over lookback to call a trend
+    EMA_ANALYZER_CANDLE_INTERVAL: str = "minute"     # Kite historical interval
+    EMA_ANALYZER_SL_INR: float = 3000.0              # fixed ₹ stop-loss band per position
+    EMA_ANALYZER_TARGET_INR: float = 6000.0          # fixed ₹ target band per position
+    EMA_ANALYZER_EXIT_ON_OPPOSITE: bool = False      # True = close open leg on an opposite crossover
+    EMA_ANALYZER_SKIP_EXPIRY_DAY: bool = True        # skip new long-option entries on expiry day (theta/pin risk)
+
     # ── NATURALGAS delta hedge (5-min cron) ───────────────────────────────────
     NG_DELTA_HEDGE_ENABLED: bool = False
     NG_DELTA_HEDGE_THRESHOLD: float = 400.0   # mmBtu; flat band used only when ADX is unavailable
