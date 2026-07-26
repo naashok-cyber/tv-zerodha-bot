@@ -661,7 +661,7 @@ def register_jobs(scheduler: Any, settings: Any, session_factory: Any) -> None:
     )
     scheduler.add_job(
         run_commodity_pipeline_by_name, trigger="cron", day_of_week="wed",
-        hour=20, minute=5, args=["CRUDEOIL", session_factory, settings],
+        hour=20, minute=5, args=["CRUDEOILM", session_factory, settings],
         id="commodity_agents_eia_crude", misfire_grace_time=300,
     )
 

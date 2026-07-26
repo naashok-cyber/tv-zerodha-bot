@@ -417,7 +417,7 @@ class Settings(BaseSettings):
     # ── Commodity debate agents (decision-support; no auto-execution) ─────────
     COMMODITY_AGENTS_ENABLED: bool = False
     COMMODITY_AGENTS_COMMODITIES: list[str] = [
-        "NATURALGAS", "CRUDEOIL", "GOLD", "SILVER", "NIFTY", "BANKNIFTY",
+        "NATURALGAS", "CRUDEOILM", "GOLDM", "SILVERM", "NIFTY", "BANKNIFTY",
     ]
     COMMODITY_AGENTS_INTERVAL_MIN: int = 30
     COMMODITY_AGENTS_IV_SAMPLE_MIN: int = 5   # LLM-free IV/regime sample cadence

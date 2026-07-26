@@ -32,20 +32,23 @@ COMMODITY_PROFILES = {
         "storage report (Thursdays). Highest short-premium risk of the four — "
         "storage surprises can move NG 10%+ intraday. Thin liquidity far OTM."
     ),
-    "CRUDEOIL": (
+    "CRUDEOILM": (
         "High IV, gap-prone around OPEC+ meetings, weekly EIA crude inventory "
         "(Wednesdays), and geopolitical supply shocks. Better telegraphed than "
-        "NG (OPEC calendar is public). Good option liquidity."
+        "NG (OPEC calendar is public). Mini contract — good liquidity, cleaner "
+        "IV readings than the thinly-traded full-size CRUDEOIL contract."
     ),
-    "GOLD": (
+    "GOLDM": (
         "Lowest IV of the four; trends persist longer and technicals are "
         "cleaner. Drivers: US real yields, USD strength (DXY), Fed policy, "
-        "safe-haven flows. Calmest short-premium candidate in quiet regimes."
+        "safe-haven flows. Calmest short-premium candidate in quiet regimes. "
+        "Mini contract — better liquidity than full-size GOLD."
     ),
-    "SILVER": (
+    "SILVERM": (
         "Correlated to gold but higher beta, plus industrial demand (solar, "
         "electronics, China PMI). Thinner OTM liquidity than gold — wider "
-        "bid-ask on adjustments; slippage matters."
+        "bid-ask on adjustments; slippage matters. Mini contract — better "
+        "liquidity than full-size SILVER."
     ),
     "NIFTY": (
         "NSE index options (NFO), the deepest option market in India — "

@@ -53,7 +53,7 @@ class TestEvents:
 
     def test_eia_ng_irrelevant_to_gold(self):
         now = datetime(2026, 7, 8, 12, 0, tzinfo=IST)
-        evs = events.upcoming_events("GOLD", now, horizon_hours=96)
+        evs = events.upcoming_events("GOLDM", now, horizon_hours=96)
         assert not any("Natural Gas" in e.name for e in evs)
 
     def test_blackout_active_inside_window(self):
@@ -68,7 +68,7 @@ class TestEvents:
 
     def test_fomc_hits_gold_not_ng(self):
         now = datetime(2026, 7, 28, 12, 0, tzinfo=IST)   # day before Jul-29 FOMC
-        gold = events.upcoming_events("GOLD", now, horizon_hours=48)
+        gold = events.upcoming_events("GOLDM", now, horizon_hours=48)
         ng = events.upcoming_events("NATURALGAS", now, horizon_hours=48)
         assert any("FOMC" in e.name for e in gold)
         assert not any("FOMC" in e.name for e in ng)
@@ -129,7 +129,7 @@ def _limits(**kw):
 
 
 def _inp(**kw):
-    base = dict(commodity="GOLD", strategy_type="short_straddle", lots=1,
+    base = dict(commodity="GOLDM", strategy_type="short_straddle", lots=1,
                 est_max_loss_per_lot=8000.0, daily_realized_pnl=0.0,
                 open_commodity_count=0, margin_available=500000.0,
                 margin_required=None, blackout=None)
@@ -208,7 +208,7 @@ class TestGapRiskGate:
 
 # ── strike engine ────────────────────────────────────────────────────────────
 
-def _seed_instruments(session, underlying="GOLD", fut_price=72000.0,
+def _seed_instruments(session, underlying="GOLDM", fut_price=72000.0,
                       expiry=date(2026, 7, 28), step=100.0, n=8):
     token = 1000
     session.add(Instrument(
@@ -258,7 +258,7 @@ class TestStrikes:
             now = datetime(2026, 7, 5, 12, 0, tzinfo=IST)
             cands = strikes.build_strike_candidates(
                 session, _synthetic_quote_fn(72000.0, 0.15, expiry),
-                "GOLD", 72000.0, now=now,
+                "GOLDM", 72000.0, now=now,
             )
             sides = {c.instrument_type for c in cands}
             assert sides == {"CE", "PE"}
@@ -275,7 +275,7 @@ class TestStrikes:
             now = datetime(2026, 7, 5, 12, 0, tzinfo=IST)
             cands = strikes.build_strike_candidates(
                 session, _synthetic_quote_fn(72000.0, 0.15, expiry),
-                "GOLD", 72000.0, now=now,
+                "GOLDM", 72000.0, now=now,
             )
             iv = strikes.atm_iv_from_candidates(cands)
             assert iv is not None and abs(iv - 0.15) < 0.03
@@ -284,7 +284,7 @@ class TestStrikes:
         with db_factory() as session:
             now = datetime(2026, 7, 5, 12, 0, tzinfo=IST)
             assert strikes.build_strike_candidates(
-                session, lambda keys: {}, "SILVER", 90000.0, now=now) == []
+                session, lambda keys: {}, "SILVERM", 90000.0, now=now) == []
 
 
 # ── orchestrator end-to-end with fake LLM ────────────────────────────────────
@@ -298,7 +298,7 @@ class FakeLlm:
     def run(self, role, system, user):
         if role == "judge":
             return {"direction": "SELL", "strategy_type": "short_straddle",
-                    "strikes": ["GOLD26JUL72000CE", "GOLD26JUL72000PE"],
+                    "strikes": ["GOLDM26JUL72000CE", "GOLDM26JUL72000PE"],
                     "confidence": 0.8, "reasoning_summary": "IV rich, range-bound",
                     "dissenting_views": ["trend agent worried about breakout"]}
         flag = self.gap_risk if role == "event" else "low"
@@ -310,7 +310,7 @@ def _mk_kite(fut_price=72000.0, expiry=date(2026, 7, 28)):
     kite = MagicMock()
     closes = [72000.0 + (i % 7) * 3 for i in range(60)]
     kite.historical_data.return_value = _mk_candles(closes, spread=5.0)
-    kite.ltp.return_value = {"MCX:GOLD26JULFUT": {"last_price": fut_price}}
+    kite.ltp.return_value = {"MCX:GOLDM26JULFUT": {"last_price": fut_price}}
     kite.quote.side_effect = _synthetic_quote_fn(fut_price, 0.15, expiry)
     kite.margins.return_value = {"commodity": {"net": 800000.0}}
     return kite
@@ -318,7 +318,7 @@ def _mk_kite(fut_price=72000.0, expiry=date(2026, 7, 28)):
 
 @pytest.fixture
 def ca_settings():
-    # Raise the per-lot loss cap: a GOLD ATM straddle at 100 units/lot has an
+    # Raise the per-lot loss cap: a GOLDM ATM straddle at 100 units/lot has an
     # est. worst case ≈ ₹2.2L, which the default ₹15k cap correctly vetoes.
     from app.config import get_settings
     return get_settings().model_copy(update={"COMMODITY_MAX_LOSS_PER_LOT": 400000.0})
@@ -331,7 +331,7 @@ class TestOrchestrator:
             _seed_instruments(s)
         now = datetime(2026, 7, 5, 12, 0, tzinfo=IST)   # Sunday, no blackout
         run_id = run_commodity_pipeline(
-            "GOLD", db_factory, ca_settings, _mk_kite(), FakeLlm(), now=now)
+            "GOLDM", db_factory, ca_settings, _mk_kite(), FakeLlm(), now=now)
         assert run_id is not None
         with db_factory() as s:
             run = s.get(AgentRun, run_id)
@@ -351,7 +351,7 @@ class TestOrchestrator:
             _seed_instruments(s)
         now = datetime(2026, 7, 5, 12, 0, tzinfo=IST)
         run_id = run_commodity_pipeline(
-            "GOLD", db_factory, ca_settings, _mk_kite(), FakeLlm(gap_risk="high"), now=now)
+            "GOLDM", db_factory, ca_settings, _mk_kite(), FakeLlm(gap_risk="high"), now=now)
         with db_factory() as s:
             rec = s.query(CommodityRecommendation).one()
             assert rec.direction == "NO_TRADE"
@@ -363,7 +363,7 @@ class TestOrchestrator:
         kite.historical_data.side_effect = RuntimeError("kite down")
         now = datetime(2026, 7, 5, 12, 0, tzinfo=IST)
         run_id = run_commodity_pipeline(
-            "GOLD", db_factory, ca_settings, kite, FakeLlm(), now=now)
+            "GOLDM", db_factory, ca_settings, kite, FakeLlm(), now=now)
         with db_factory() as s:
             run = s.get(AgentRun, run_id)
             assert run.status == "FAILED"
@@ -379,7 +379,7 @@ class TestIvSample:
         with db_factory() as s:
             _seed_instruments(s)
         now = datetime(2026, 7, 5, 12, 0, tzinfo=IST)
-        run_id = run_iv_sample("GOLD", db_factory, ca_settings, _mk_kite(), now=now)
+        run_id = run_iv_sample("GOLDM", db_factory, ca_settings, _mk_kite(), now=now)
         assert run_id is not None
         with db_factory() as s:
             run = s.get(AgentRun, run_id)
@@ -397,7 +397,7 @@ class TestIvSample:
         kite = MagicMock()
         kite.historical_data.side_effect = RuntimeError("kite down")
         now = datetime(2026, 7, 5, 12, 0, tzinfo=IST)
-        run_id = run_iv_sample("GOLD", db_factory, ca_settings, kite, now=now)
+        run_id = run_iv_sample("GOLDM", db_factory, ca_settings, kite, now=now)
         with db_factory() as s:
             run = s.get(AgentRun, run_id)
             assert run.status == "FAILED"
@@ -411,9 +411,9 @@ class TestIvSample:
         with db_factory() as s:
             _seed_instruments(s)
         now = datetime(2026, 7, 5, 12, 0, tzinfo=IST)
-        run_iv_sample("GOLD", db_factory, ca_settings, _mk_kite(), now=now)
+        run_iv_sample("GOLDM", db_factory, ca_settings, _mk_kite(), now=now)
         with db_factory() as s:
-            hist = _iv_history(s, "GOLD")
+            hist = _iv_history(s, "GOLDM")
         assert len(hist) == 1
 
     def test_run_all_skips_closed_markets(self, db_factory, ca_settings, monkeypatch):
@@ -424,11 +424,11 @@ class TestIvSample:
         monkeypatch.setattr(orchestrator, "run_iv_sample",
                              lambda commodity, *a, **k: calls.append(commodity))
         monkeypatch.setattr(orchestrator, "market_open",
-                             lambda commodity, now: commodity == "GOLD")
+                             lambda commodity, now: commodity == "GOLDM")
         monkeypatch.setattr("app.kite_session.get_session_manager",
                             lambda: MagicMock(get_kite=lambda: MagicMock()))
         orchestrator.run_all_iv_samples(db_factory, ca_settings)
-        assert calls == ["GOLD"]
+        assert calls == ["GOLDM"]
 
 
 # ── index underlyings (NIFTY / BANKNIFTY) ────────────────────────────────────
@@ -438,13 +438,13 @@ class TestIndexSupport:
         from app.commodity_agents.models import exchange_for
         assert exchange_for("NIFTY") == "NFO"
         assert exchange_for("BANKNIFTY") == "NFO"
-        assert exchange_for("GOLD") == "MCX"
+        assert exchange_for("GOLDM") == "MCX"
 
     def test_rbi_hits_indices_not_commodities(self):
         from app.commodity_agents import events as ev
         now = datetime(2026, 2, 5, 12, 0, tzinfo=IST)   # day before Feb-6 RBI MPC
         nifty = ev.upcoming_events("NIFTY", now, horizon_hours=48)
-        gold = ev.upcoming_events("GOLD", now, horizon_hours=48)
+        gold = ev.upcoming_events("GOLDM", now, horizon_hours=48)
         assert any("RBI" in e.name for e in nifty)
         assert not any("RBI" in e.name for e in gold)
 
@@ -461,8 +461,8 @@ class TestIndexSupport:
         sat_11am = datetime(2026, 7, 11, 11, 0, tzinfo=IST)
         assert market_open("NIFTY", tue_11am) is True
         assert market_open("NIFTY", tue_10pm) is False      # NSE closed by 15:30
-        assert market_open("CRUDEOIL", tue_10pm) is True    # MCX evening session
-        assert market_open("CRUDEOIL", sat_11am) is False   # weekend
+        assert market_open("CRUDEOILM", tue_10pm) is True    # MCX evening session
+        assert market_open("CRUDEOILM", sat_11am) is False   # weekend
 
     def test_debate_profiles_exist(self):
         from app.commodity_agents.debate import COMMODITY_PROFILES
@@ -567,7 +567,7 @@ class TestAnalytics:
                   lot_units=100, expiry="2026-07-28"):
         from app.commodity_agents.models import StrikeCandidate
         mk = lambda side, ltp: StrikeCandidate(
-            tradingsymbol=f"GOLD26JUL72000{side}", instrument_type=side,
+            tradingsymbol=f"GOLDM26JUL72000{side}", instrument_type=side,
             strike=F, expiry=expiry, ltp=ltp, iv=iv, delta=0.5 if side == "CE" else -0.5,
             target_delta=0.50, lot_units=lot_units,
         )
@@ -586,7 +586,7 @@ class TestAnalytics:
         from app.commodity_agents.analytics import compute_analytics
         now = datetime(2026, 7, 5, 12, 0, tzinfo=IST)
         out = compute_analytics(
-            "GOLD", self._atm_pair(), atm_iv=0.15, realized_vol=0.10,
+            "GOLDM", self._atm_pair(), atm_iv=0.15, realized_vol=0.10,
             future_price=72000.0, now=now, iv_history_asc=[0.15] * 3,
         )
         assert out["vrp"]["vrp_pts"] == 5.0
@@ -601,7 +601,7 @@ class TestAnalytics:
         from app.commodity_agents.analytics import compute_analytics
         now = datetime(2026, 7, 5, 12, 0, tzinfo=IST)
         out = compute_analytics(
-            "GOLD", self._atm_pair(), atm_iv=0.15, realized_vol=0.10,
+            "GOLDM", self._atm_pair(), atm_iv=0.15, realized_vol=0.10,
             future_price=72000.0, now=now, iv_history_asc=[],
         )
         rows = out["stress"]["rows"]
@@ -619,7 +619,7 @@ class TestAnalytics:
         from app.commodity_agents.analytics import compute_analytics
         now = datetime(2026, 7, 5, 12, 0, tzinfo=IST)
         out = compute_analytics(
-            "GOLD", [], atm_iv=None, realized_vol=None,
+            "GOLDM", [], atm_iv=None, realized_vol=None,
             future_price=None, now=now, iv_history_asc=[],
         )
         assert "vrp" not in out and "expected_move" not in out
@@ -631,7 +631,7 @@ class TestAnalytics:
             _seed_instruments(s)
         now = datetime(2026, 7, 5, 12, 0, tzinfo=IST)
         run_id = run_commodity_pipeline(
-            "GOLD", db_factory, ca_settings, _mk_kite(), FakeLlm(), now=now)
+            "GOLDM", db_factory, ca_settings, _mk_kite(), FakeLlm(), now=now)
         with db_factory() as s:
             run = s.get(AgentRun, run_id)
             quant = json.loads(run.analytics_json)
@@ -641,13 +641,13 @@ class TestAnalytics:
     def test_margin_required_basket(self):
         from app.commodity_agents.orchestrator import _margin_required_basket
         from app.commodity_agents.models import StrikeCandidate
-        ce = StrikeCandidate("GOLD26JUL72000CE", "CE", 72000.0, "2026-07-28",
+        ce = StrikeCandidate("GOLDM26JUL72000CE", "CE", 72000.0, "2026-07-28",
                              800.0, 0.15, 0.5, 0.50, 100)
-        pe = StrikeCandidate("GOLD26JUL72000PE", "PE", 72000.0, "2026-07-28",
+        pe = StrikeCandidate("GOLDM26JUL72000PE", "PE", 72000.0, "2026-07-28",
                              780.0, 0.15, -0.5, 0.50, 100)
         kite = MagicMock()
         kite.basket_order_margins.return_value = {"final": {"total": 123456.0}}
-        assert _margin_required_basket(kite, "GOLD", ce, pe) == 123456.0
+        assert _margin_required_basket(kite, "GOLDM", ce, pe) == 123456.0
         legs = kite.basket_order_margins.call_args[0][0]
         assert all(l["transaction_type"] == "SELL" for l in legs)
         assert legs[0]["quantity"] == 1          # MCX: quantity = lots
@@ -661,7 +661,7 @@ class TestAnalytics:
         assert kite.basket_order_margins.call_args[0][0][0]["quantity"] == 75
         # broker failure → None (risk guard then skips the margin check)
         kite.basket_order_margins.side_effect = RuntimeError("api down")
-        assert _margin_required_basket(kite, "GOLD", ce, pe) is None
+        assert _margin_required_basket(kite, "GOLDM", ce, pe) is None
 
 
 # ── chain positioning (OI), skew, term structure, iron fly, correlation ─────
@@ -688,7 +688,7 @@ class TestChainPositioning:
 
             now = datetime(2026, 7, 5, 12, 0, tzinfo=IST)
             cands, pos = strikes.build_chain_snapshot(
-                session, quote_with_oi, "GOLD", 72000.0, now=now)
+                session, quote_with_oi, "GOLDM", 72000.0, now=now)
             assert cands
             assert pos["call_wall"] == 72500.0
             assert pos["put_wall"] == 71500.0
@@ -702,14 +702,14 @@ class TestChainPositioning:
             now = datetime(2026, 7, 5, 12, 0, tzinfo=IST)
             _, pos = strikes.build_chain_snapshot(
                 session, _synthetic_quote_fn(72000.0, 0.15, expiry),
-                "GOLD", 72000.0, now=now)
+                "GOLDM", 72000.0, now=now)
             assert pos == {}
 
 
 class TestSkewTermIronFly:
     def _cand(self, side, strike, ltp, iv, td, lot_units=100):
         from app.commodity_agents.models import StrikeCandidate
-        return StrikeCandidate(f"GOLD26JUL{int(strike)}{side}", side, strike,
+        return StrikeCandidate(f"GOLDM26JUL{int(strike)}{side}", side, strike,
                                "2026-07-28", ltp, iv, 0.25 if td == 0.25 else 0.5,
                                td, lot_units)
 
@@ -753,7 +753,7 @@ class TestCorrelationGuard:
             max_concurrent_commodities=5, max_margin_util_pct=60, max_lots=5)
 
     def _inp(self, **kw):
-        base = dict(commodity="CRUDEOIL", strategy_type="short_straddle", lots=1,
+        base = dict(commodity="CRUDEOILM", strategy_type="short_straddle", lots=1,
                     est_max_loss_per_lot=1000.0, daily_realized_pnl=0.0,
                     open_commodity_count=0, margin_available=None,
                     margin_required=None, blackout=None)
@@ -775,7 +775,7 @@ class TestCorrelationGuard:
     def test_group_mapping(self):
         from app.commodity_agents.models import group_for
         assert group_for("NATURALGAS") == "energy"
-        assert group_for("SILVER") == "metals"
+        assert group_for("SILVERM") == "metals"
         assert group_for("BANKNIFTY") == "indices"
         assert group_for("UNKNOWN") is None
 
@@ -800,14 +800,14 @@ class TestCalendarRefresh:
         monkeypatch.setattr(events_mod, "EVENTS_OVERRIDE_PATH", path)
         # pre-existing manual entry must survive the refresh
         (tmp_path / "commodity_events.json").write_text(json.dumps(
-            {"extra_events": [{"name": "manual CPI", "commodities": ["GOLD"],
+            {"extra_events": [{"name": "manual CPI", "commodities": ["GOLDM"],
                                "datetime_ist": "2026-07-14T18:00", "impact": "high"}]}))
 
         class FakeLlm:
             def __init__(self, **kw): pass
             def run(self, role, system, user):
                 return {"events": [
-                    {"name": "OPEC+ meeting", "commodities": ["CRUDEOIL"],
+                    {"name": "OPEC+ meeting", "commodities": ["CRUDEOILM"],
                      "datetime_ist": "2026-07-20T17:30", "impact": "high"},
                     {"name": "garbage", "commodities": ["DOGE"],
                      "datetime_ist": "2026-07-20T17:30", "impact": "high"},
@@ -821,9 +821,9 @@ class TestCalendarRefresh:
         data = json.loads((tmp_path / "commodity_events.json").read_text())
         assert len(data["auto_events"]) == 1
         assert data["extra_events"][0]["name"] == "manual CPI"   # preserved
-        evs = events_mod.upcoming_events("CRUDEOIL", now, horizon_hours=400)
+        evs = events_mod.upcoming_events("CRUDEOILM", now, horizon_hours=400)
         assert any(e.name == "OPEC+ meeting" for e in evs)
-        gold = events_mod.upcoming_events("GOLD", now, horizon_hours=400)
+        gold = events_mod.upcoming_events("GOLDM", now, horizon_hours=400)
         assert any(e.name == "manual CPI" for e in gold)
 
 

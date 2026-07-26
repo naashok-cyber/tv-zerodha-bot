@@ -8,7 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 
-COMMODITIES = ("NATURALGAS", "CRUDEOIL", "GOLD", "SILVER", "NIFTY", "BANKNIFTY")
+COMMODITIES = ("NATURALGAS", "CRUDEOILM", "GOLDM", "SILVERM", "NIFTY", "BANKNIFTY")
 
 # NSE index underlyings trade NFO options priced off index spot (BSM);
 # everything else here is MCX options priced off the future (Black-76).

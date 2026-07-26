@@ -201,7 +201,7 @@ details summary{cursor:pointer;color:var(--blue);font-size:13.5px;margin-top:8px
 
 <div class="card">
   <div class="row" id="chips"></div>
-  <div style="margin-top:10px"><input id="ticker" placeholder="or type: NIFTY, BANKNIFTY, GOLD, SILVER, CRUDEOIL, NATURALGAS (aliases: NG, BN, CRUDE)"
+  <div style="margin-top:10px"><input id="ticker" placeholder="or type: NIFTY, BANKNIFTY, GOLDM, SILVERM, CRUDEOILM, NATURALGAS (aliases: NG, BN, CRUDE, GOLD, SILVER)"
     onkeydown="if(event.key==='Enter')analyze()"></div>
   <button class="go" id="goBtn" onclick="analyze()">Analyze</button>
 </div>
@@ -216,9 +216,10 @@ details summary{cursor:pointer;color:var(--blue);font-size:13.5px;margin-top:8px
 
 <script>
 const API='/commodity-agents';
-const TICKERS=['NIFTY','BANKNIFTY','NATURALGAS','CRUDEOIL','GOLD','SILVER'];
-const ALIASES={NG:'NATURALGAS',NATGAS:'NATURALGAS',CRUDE:'CRUDEOIL',OIL:'CRUDEOIL',
-BN:'BANKNIFTY',BNF:'BANKNIFTY',NF:'NIFTY',AU:'GOLD',AG:'SILVER'};
+const TICKERS=['NIFTY','BANKNIFTY','NATURALGAS','CRUDEOILM','GOLDM','SILVERM'];
+const ALIASES={NG:'NATURALGAS',NATGAS:'NATURALGAS',CRUDE:'CRUDEOILM',OIL:'CRUDEOILM',
+BN:'BANKNIFTY',BNF:'BANKNIFTY',NF:'NIFTY',AU:'GOLDM',AG:'SILVERM',GOLD:'GOLDM',SILVER:'SILVERM',
+CRUDEOIL:'CRUDEOILM'};
 let sel=null,poller=null,pendingConfirm=null,runStartedAt=null,recLots={};
 localStorage.removeItem('ca_token'); // legacy token storage — now cookie-session auth
 function hdrs(){return {'Content-Type':'application/json'}}
@@ -391,7 +392,7 @@ box.innerHTML='<button class="confirm" onclick="decide('+id+',\\''+action+'\\')"
 action.toUpperCase()+' ('+(recLots[id]||1)+' lot'+((recLots[id]||1)===1?'':'s')+')'+
 '</button><button onclick="pendingConfirm=null;location.reload()">Cancel</button>'}
 renderChips();
-// deep link: /analyze?t=GOLD preselects the ticker (from Desk drift chips)
+// deep link: /analyze?t=GOLDM preselects the ticker (from Desk drift chips)
 const _q=(new URLSearchParams(location.search).get('t')||'').toUpperCase();
 if(TICKERS.includes(ALIASES[_q]||_q))pick(ALIASES[_q]||_q);
 if('serviceWorker' in navigator)navigator.serviceWorker.register('/commodity-agents/sw.js');

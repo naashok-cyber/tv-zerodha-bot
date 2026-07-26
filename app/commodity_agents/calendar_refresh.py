@@ -32,10 +32,10 @@ _PROMPT = """Verify the scheduled high-impact macro events for Indian commodity 
 index options over the next {days} days (today is {today} IST). Use web search to
 confirm EXACT dates for:
 - RBI Monetary Policy Committee decision days (affects NIFTY, BANKNIFTY)
-- US FOMC rate decision days (affects GOLD, SILVER, NIFTY, BANKNIFTY)
-- US CPI release dates (affects GOLD, SILVER)
-- OPEC+ meeting dates (affects CRUDEOIL)
-- Any EIA report date shifted by a US holiday (affects CRUDEOIL, NATURALGAS)
+- US FOMC rate decision days (affects GOLDM, SILVERM, NIFTY, BANKNIFTY)
+- US CPI release dates (affects GOLDM, SILVERM)
+- OPEC+ meeting dates (affects CRUDEOILM)
+- Any EIA report date shifted by a US holiday (affects CRUDEOILM, NATURALGAS)
 
 Convert all times to IST. Return ONLY a JSON object, no prose:
 {{"events": [{{"name": "<event name>", "commodities": [<subset of {commodities}>],

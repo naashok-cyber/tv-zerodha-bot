@@ -4676,8 +4676,8 @@ async def control_page(
     # ── volatility monitor card (chart drawn by _VOL_MONITOR_JS) ─────────────
     vol_options = "".join(
         f"<option value='{c}'>{n}</option>" for c, n in [
-            ("NATURALGAS", "Natural Gas"), ("CRUDEOIL", "Crude Oil"),
-            ("GOLD", "Gold"), ("SILVER", "Silver"),
+            ("NATURALGAS", "Natural Gas"), ("CRUDEOILM", "Crude Oil"),
+            ("GOLDM", "Gold"), ("SILVERM", "Silver"),
             ("NIFTY", "Nifty"), ("BANKNIFTY", "Bank Nifty"),
         ]
     )

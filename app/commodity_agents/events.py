@@ -8,7 +8,7 @@ Recurring rules (EIA weekly reports, NFP first-Friday) are generated
 programmatically. Date-specific events (FOMC, CPI) live in static lists below
 and can be overridden/extended via data/commodity_events.json:
 
-    {"extra_events": [{"name": "US CPI", "commodities": ["GOLD", "SILVER"],
+    {"extra_events": [{"name": "US CPI", "commodities": ["GOLDM", "SILVERM"],
                        "datetime_ist": "2026-08-12T18:00"}]}
 """
 from __future__ import annotations
@@ -32,15 +32,15 @@ _WEEKLY_EVENTS = [
     {"name": "EIA Natural Gas Storage Report", "commodity": "NATURALGAS",
      "weekday": 3, "hhmm": (20, 0), "impact": "high"},
     # EIA Weekly Petroleum Status — Wednesdays 10:30 ET ≈ 20:00 IST
-    {"name": "EIA Crude Oil Inventory", "commodity": "CRUDEOIL",
+    {"name": "EIA Crude Oil Inventory", "commodity": "CRUDEOILM",
      "weekday": 2, "hhmm": (20, 0), "impact": "high"},
     # Baker Hughes rig count — Fridays 13:00 ET ≈ 22:30 IST (medium impact)
-    {"name": "Baker Hughes Rig Count", "commodity": "CRUDEOIL",
+    {"name": "Baker Hughes Rig Count", "commodity": "CRUDEOILM",
      "weekday": 4, "hhmm": (22, 30), "impact": "medium"},
 ]
 
 # US Non-Farm Payrolls: first Friday of the month, 08:30 ET ≈ 18:00 IST.
-_NFP_COMMODITIES = ("GOLD", "SILVER")
+_NFP_COMMODITIES = ("GOLDM", "SILVERM")
 _NFP_HHMM = (18, 0)
 
 # ── Date-specific events ─────────────────────────────────────────────────────
@@ -53,7 +53,7 @@ _FOMC_DATES_2026 = [
     (2026, 1, 28), (2026, 3, 18), (2026, 4, 29), (2026, 6, 17),
     (2026, 7, 29), (2026, 9, 16), (2026, 10, 28), (2026, 12, 9),
 ]
-_FOMC_COMMODITIES = ("GOLD", "SILVER", "NIFTY", "BANKNIFTY")
+_FOMC_COMMODITIES = ("GOLDM", "SILVERM", "NIFTY", "BANKNIFTY")
 _FOMC_HHMM = (23, 30)
 
 # RBI MPC 2026 policy announcement days, ~10:00 IST. APPROXIMATE — the RBI

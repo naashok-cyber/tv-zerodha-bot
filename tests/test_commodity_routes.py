@@ -55,15 +55,15 @@ def settings_live(monkeypatch):
 
 
 def _seed_rec(factory, strategy="short_straddle", direction="SELL",
-              strikes=("GOLD26JUL72000CE", "GOLD26JUL72000PE"),
+              strikes=("GOLDM26JUL72000CE", "GOLDM26JUL72000PE"),
               vetoed=False, status="PROPOSED") -> int:
     now = datetime.now(IST)
     with factory() as s:
-        run = AgentRun(run_id="r-1", commodity="GOLD", started_at=now, status="COMPLETED")
+        run = AgentRun(run_id="r-1", commodity="GOLDM", started_at=now, status="COMPLETED")
         s.add(run)
         s.commit()
         rec = CommodityRecommendation(
-            run_pk=run.id, commodity="GOLD", created_at=now,
+            run_pk=run.id, commodity="GOLDM", created_at=now,
             direction=direction, strategy_type=strategy,
             strikes_json=json.dumps(list(strikes)), confidence=0.8,
             reasoning_summary="test", dissent_json="[]",
@@ -103,7 +103,7 @@ class TestNotify:
     def test_no_trade_not_pushed(self):
         with patch.object(notify.requests, "post") as mock_post:
             out = notify.notify_recommendation(self._settings(), {
-                "commodity": "GOLD", "direction": "NO_TRADE",
+                "commodity": "GOLDM", "direction": "NO_TRADE",
                 "strategy_type": "none", "confidence": 0.99,
             })
             assert out is False
@@ -112,7 +112,7 @@ class TestNotify:
     def test_low_confidence_not_pushed(self):
         with patch.object(notify.requests, "post") as mock_post:
             out = notify.notify_recommendation(self._settings(), {
-                "commodity": "GOLD", "direction": "SELL",
+                "commodity": "GOLDM", "direction": "SELL",
                 "strategy_type": "short_straddle", "confidence": 0.3,
             })
             assert out is False
@@ -122,13 +122,13 @@ class TestNotify:
         with patch.object(notify.requests, "post") as mock_post:
             mock_post.return_value.status_code = 200
             out = notify.notify_recommendation(self._settings(), {
-                "id": 7, "commodity": "GOLD", "direction": "SELL",
+                "id": 7, "commodity": "GOLDM", "direction": "SELL",
                 "strategy_type": "short_straddle", "confidence": 0.8,
                 "strikes": ["A", "B"], "reasoning_summary": "iv rich",
             })
             assert out is True
             payload = mock_post.call_args.kwargs["json"]
-            assert "GOLD" in payload["text"] and "SELL" in payload["text"]
+            assert "GOLDM" in payload["text"] and "SELL" in payload["text"]
 
 
 # ── dashboard assets ─────────────────────────────────────────────────────────
@@ -233,7 +233,7 @@ class TestExecutionGate:
 
     def test_live_non_straddle_not_executed(self, db_factory, settings_live):
         rec_id = _seed_rec(db_factory, strategy="long_call",
-                           strikes=("GOLD26JUL73000CE",))
+                           strikes=("GOLDM26JUL73000CE",))
         result, bg = _two_step(rec_id, "approve")
         assert result["executed"] is False
         assert "manually" in result["note"]
@@ -254,7 +254,7 @@ class TestBacktest:
             {"high": 101.0, "low": 99.0, "close": 100.5},
             {"high": 103.0, "low": 100.0, "close": 102.0},   # 3% spike up
         ]
-        row = replay_day(upto, after, "GOLD",
+        row = replay_day(upto, after, "GOLDM",
                          datetime(2026, 7, 6, 21, 0, tzinfo=IST), 3.0, 1.0)
         assert row is not None
         assert row["adverse_move_pct"] == pytest.approx(3.0)
@@ -263,7 +263,7 @@ class TestBacktest:
 
     def test_replay_day_insufficient_data(self):
         from app.commodity_agents.backtest import replay_day
-        assert replay_day([], [], "GOLD",
+        assert replay_day([], [], "GOLDM",
                           datetime(2026, 7, 6, 21, 0, tzinfo=IST), 3, 1) is None
 
     def test_summarize_groups_by_regime(self):
@@ -303,7 +303,7 @@ class TestAnalyzeSupport:
 
     def test_latest_run_includes_recommendation_when_done(self, db_factory, settings_paper):
         rec_id = _seed_rec(db_factory)   # seeds run r-1 + PROPOSED rec
-        out = routes.latest_run("GOLD", x_admin_auth_token=TOKEN)
+        out = routes.latest_run("GOLDM", x_admin_auth_token=TOKEN)
         assert out["run"]["recommendation"]["id"] == rec_id
 
     def test_latest_run_unknown_ticker(self, db_factory, settings_paper):
@@ -314,7 +314,7 @@ class TestAnalyzeSupport:
     def test_run_cooldown_is_per_ticker(self, db_factory, settings_paper, monkeypatch):
         monkeypatch.setattr(routes, "_last_manual_run", {})
         bg = BackgroundTasks()
-        r1 = routes.trigger_run(routes.RunRequest(commodity="GOLD"), bg,
+        r1 = routes.trigger_run(routes.RunRequest(commodity="GOLDM"), bg,
                                 x_admin_auth_token=TOKEN)
         assert r1["status"] == "started"
         # different ticker immediately: allowed
@@ -323,7 +323,7 @@ class TestAnalyzeSupport:
         assert r2["status"] == "started"
         # same ticker immediately: blocked
         with pytest.raises(HTTPException) as e:
-            routes.trigger_run(routes.RunRequest(commodity="GOLD"), bg,
+            routes.trigger_run(routes.RunRequest(commodity="GOLDM"), bg,
                                x_admin_auth_token=TOKEN)
         assert e.value.status_code == 429
 
@@ -336,7 +336,7 @@ class TestIvHistory:
         with factory() as s:
             for i in range(n):
                 s.add(AgentRun(
-                    run_id=f"ivh-{i}", commodity="GOLD",
+                    run_id=f"ivh-{i}", commodity="GOLDM",
                     started_at=base + timedelta(hours=i), status="COMPLETED",
                     atm_iv=0.15 + i * 0.01,
                     regime_json=json.dumps({"realized_vol": 0.10}),
@@ -345,13 +345,13 @@ class TestIvHistory:
                                       "samples": n}}),
                 ))
             # a run with no IV must be excluded from the series
-            s.add(AgentRun(run_id="ivh-null", commodity="GOLD",
+            s.add(AgentRun(run_id="ivh-null", commodity="GOLDM",
                            started_at=base + timedelta(hours=n), status="FAILED"))
             s.commit()
 
     def test_series_ascending_with_vrp(self, db_factory, settings_paper):
         self._seed_runs(db_factory)
-        out = routes.iv_history("GOLD", x_admin_auth_token=TOKEN)
+        out = routes.iv_history("GOLDM", x_admin_auth_token=TOKEN)
         pts = out["points"]
         assert len(pts) == 3
         assert pts[0]["iv"] == 0.15                              # oldest → newest
@@ -402,7 +402,7 @@ def _mk_order(s, alert_id, sym, txn="SELL", straddle_id=None, exch="MCX"):
     return o
 
 
-def _mk_position(s, order, underlying="GOLD", itype="CE", entry=800.0, exch="MCX"):
+def _mk_position(s, order, underlying="GOLDM", itype="CE", entry=800.0, exch="MCX"):
     now = datetime.now(IST)
     p = Position(order_id=order.id, exchange=exch, tradingsymbol=order.tradingsymbol,
                  underlying=underlying, instrument_type=itype, entry_premium=entry,
@@ -436,10 +436,10 @@ class TestJournal:
         rec_id = _seed_rec(db_factory)
         with db_factory() as s:
             s.add(CommodityTradeJournal(
-                recommendation_id=rec_id, commodity="GOLD", mode="live",
+                recommendation_id=rec_id, commodity="GOLDM", mode="live",
                 alert_id=777, entered_at=now, entry_context_json="{}", lots=1))
-            o1 = _mk_order(s, 777, "GOLD26JUL72000CE")
-            o2 = _mk_order(s, 777, "GOLD26JUL72000PE")
+            o1 = _mk_order(s, 777, "GOLDM26JUL72000CE")
+            o2 = _mk_order(s, 777, "GOLDM26JUL72000PE")
             p1 = _mk_position(s, o1, itype="CE")
             p2 = _mk_position(s, o2, itype="PE")
             for pos, pnl in ((p1, 5000.0), (p2, -1200.0)):
@@ -460,9 +460,9 @@ class TestJournal:
         rec_id = _seed_rec(db_factory)
         with db_factory() as s:
             s.add(CommodityTradeJournal(
-                recommendation_id=rec_id, commodity="GOLD", mode="live",
+                recommendation_id=rec_id, commodity="GOLDM", mode="live",
                 alert_id=888, entered_at=now, entry_context_json="{}", lots=1))
-            o1 = _mk_order(s, 888, "GOLD26JUL72000CE")
+            o1 = _mk_order(s, 888, "GOLDM26JUL72000CE")
             _mk_position(s, o1)          # position open, no ClosedTrade yet
             s.commit()
         assert sync_closed_trades(db_factory) == 0
@@ -475,7 +475,7 @@ class TestJournal:
             for regime, pnl in (("range-bound", 4000.0), ("range-bound", -1000.0),
                                 ("trending", -2500.0)):
                 s.add(CommodityTradeJournal(
-                    recommendation_id=rec_id, commodity="GOLD", mode="live",
+                    recommendation_id=rec_id, commodity="GOLDM", mode="live",
                     alert_id=None, entered_at=now,
                     entry_context_json=json.dumps({"regime": regime}),
                     lots=1, realized_pnl=pnl))
@@ -523,26 +523,26 @@ class TestCalibration:
 
     def test_win_and_avoided_outcomes(self, db_factory, settings_paper):
         from app.commodity_agents.calibration import calibration_stats, evaluate_pending
-        # GOLD short straddle, tiny realized move -> WIN
-        self._seed_scored_setup(db_factory, "GOLD", "short_straddle", "SELL",
+        # GOLDM short straddle, tiny realized move -> WIN
+        self._seed_scored_setup(db_factory, "GOLDM", "short_straddle", "SELL",
                                 implied_pct=2.0, ref_price=72000.0)
-        # SILVER NO_TRADE, huge realized move -> AVOIDED
-        self._seed_scored_setup(db_factory, "SILVER", "none", "NO_TRADE",
+        # SILVERM NO_TRADE, huge realized move -> AVOIDED
+        self._seed_scored_setup(db_factory, "SILVERM", "none", "NO_TRADE",
                                 implied_pct=2.0, ref_price=90000.0,
                                 risk_flags=("high", "high", "high"))
         with db_factory() as s:
-            self._mk_fut(s, "GOLD", 9001)
-            self._mk_fut(s, "SILVER", 9002)
+            self._mk_fut(s, "GOLDM", 9001)
+            self._mk_fut(s, "SILVERM", 9002)
             s.commit()
         kite = MagicMock()
-        prices = {"MCX:GOLD26AUGFUT": 72100.0, "MCX:SILVER26AUGFUT": 97000.0}
+        prices = {"MCX:GOLDM26AUGFUT": 72100.0, "MCX:SILVERM26AUGFUT": 97000.0}
         kite.ltp.side_effect = lambda keys: {keys[0]: {"last_price": prices[keys[0]]}}
         assert evaluate_pending(db_factory, kite) == 2
         with db_factory() as s:
             outcomes = {r.commodity: r.outcome
                         for r in s.query(CommodityRecommendation).all()}
-            assert outcomes["GOLD"] == "WIN"
-            assert outcomes["SILVER"] == "AVOIDED"
+            assert outcomes["GOLDM"] == "WIN"
+            assert outcomes["SILVERM"] == "AVOIDED"
             stats = calibration_stats(s)
         assert stats["judge"]["actionable_recs"] == 1
         assert stats["judge"]["win_rate_pct"] == 100.0
@@ -555,12 +555,12 @@ class TestCalibration:
         from app.commodity_agents.calibration import evaluate_pending
         now = datetime.now(IST)
         with db_factory() as s:
-            run = AgentRun(run_id="cal-noq", commodity="GOLD",
+            run = AgentRun(run_id="cal-noq", commodity="GOLDM",
                            started_at=now - timedelta(hours=30), status="COMPLETED")
             s.add(run)
             s.commit()
             s.add(CommodityRecommendation(
-                run_pk=run.id, commodity="GOLD", created_at=now - timedelta(hours=30),
+                run_pk=run.id, commodity="GOLDM", created_at=now - timedelta(hours=30),
                 direction="SELL", strategy_type="short_straddle", strikes_json="[]",
                 confidence=0.8, reasoning_summary="t", dissent_json="[]",
                 risk_vetoed=False, status="PROPOSED"))
@@ -578,18 +578,18 @@ class TestPortfolioGreeks:
         expiry = now.date() + timedelta(days=21)
         with db_factory() as s:
             s.add(Instrument(instrument_token=9100, exchange_token=9100,
-                             tradingsymbol="GOLD26JULFUT", name="GOLD",
+                             tradingsymbol="GOLDM26JULFUT", name="GOLDM",
                              expiry=now.date() + timedelta(days=24), strike=None,
                              tick_size=1.0, lot_size=1, instrument_type="FUT",
                              segment="MCX", exchange="MCX"))
-            for i, (sym, itype) in enumerate((("GOLD26JUL72000CE", "CE"),
-                                              ("GOLD26JUL72000PE", "PE"))):
+            for i, (sym, itype) in enumerate((("GOLDM26JUL72000CE", "CE"),
+                                              ("GOLDM26JUL72000PE", "PE"))):
                 s.add(Instrument(instrument_token=9101 + i, exchange_token=9101 + i,
-                                 tradingsymbol=sym, name="GOLD", expiry=expiry,
+                                 tradingsymbol=sym, name="GOLDM", expiry=expiry,
                                  strike=72000.0, tick_size=0.5, lot_size=1,
                                  instrument_type=itype, segment="MCX", exchange="MCX"))
-            o1 = _mk_order(s, 1, "GOLD26JUL72000CE", straddle_id="st-1")
-            o2 = _mk_order(s, 1, "GOLD26JUL72000PE", straddle_id="st-1")
+            o1 = _mk_order(s, 1, "GOLDM26JUL72000CE", straddle_id="st-1")
+            o2 = _mk_order(s, 1, "GOLDM26JUL72000PE", straddle_id="st-1")
             _mk_position(s, o1, itype="CE")
             _mk_position(s, o2, itype="PE")
             s.commit()
@@ -597,12 +597,12 @@ class TestPortfolioGreeks:
         t = 21 / 365.25
         kite = MagicMock()
         kite.quote.return_value = {
-            "MCX:GOLD26JUL72000CE": {"last_price": round(
+            "MCX:GOLDM26JUL72000CE": {"last_price": round(
                 b76_price("c", 72000.0, 72000.0, t, 0.07, 0.15), 2)},
-            "MCX:GOLD26JUL72000PE": {"last_price": round(
+            "MCX:GOLDM26JUL72000PE": {"last_price": round(
                 b76_price("p", 72000.0, 72000.0, t, 0.07, 0.15), 2)},
         }
-        kite.ltp.return_value = {"MCX:GOLD26JULFUT": {"last_price": 72000.0}}
+        kite.ltp.return_value = {"MCX:GOLDM26JULFUT": {"last_price": 72000.0}}
         with db_factory() as s:
             book = compute_portfolio_greeks(s, kite, settings_paper, now=now)
         assert len(book["positions"]) == 2
@@ -620,15 +620,15 @@ class TestBriefing:
         from app.commodity_agents.briefing import build_briefing
         now = datetime.now(IST)
         settings = settings_paper.model_copy(
-            update={"COMMODITY_AGENTS_COMMODITIES": ["GOLD"]})
+            update={"COMMODITY_AGENTS_COMMODITIES": ["GOLDM"]})
         with db_factory() as s:
             s.add(Instrument(instrument_token=9200, exchange_token=9200,
-                             tradingsymbol="GOLD26JULFUT", name="GOLD",
+                             tradingsymbol="GOLDM26JULFUT", name="GOLDM",
                              expiry=now.date() + timedelta(days=24), strike=None,
                              tick_size=1.0, lot_size=1, instrument_type="FUT",
                              segment="MCX", exchange="MCX"))
             s.add(AgentRun(
-                run_id="brief-1", commodity="GOLD", started_at=now,
+                run_id="brief-1", commodity="GOLDM", started_at=now,
                 status="COMPLETED",
                 regime_json=json.dumps({"label": "range-bound"}),
                 analytics_json=json.dumps({
@@ -636,10 +636,10 @@ class TestBriefing:
                     "iv_trend": {"direction": "contracting"}})))
             s.commit()
             kite = MagicMock()
-            kite.quote.return_value = {"MCX:GOLD26JULFUT": {
+            kite.quote.return_value = {"MCX:GOLDM26JULFUT": {
                 "last_price": 72720.0, "ohlc": {"close": 72000.0}}}
             text = build_briefing(s, kite, settings, now=now)
-        assert "GOLD" in text
+        assert "GOLDM" in text
         assert "+1.00%" in text
         assert "VRP +6.4" in text
         assert "range-bound" in text
@@ -733,18 +733,18 @@ class TestSuggestedLots:
     def test_suggested_lots_persisted_and_served(self, db_factory, settings_paper):
         now = datetime.now(IST)
         with db_factory() as s:
-            run = AgentRun(run_id="sl-1", commodity="GOLD", started_at=now,
+            run = AgentRun(run_id="sl-1", commodity="GOLDM", started_at=now,
                            status="COMPLETED")
             s.add(run)
             s.commit()
             s.add(CommodityRecommendation(
-                run_pk=run.id, commodity="GOLD", created_at=now, direction="SELL",
+                run_pk=run.id, commodity="GOLDM", created_at=now, direction="SELL",
                 strategy_type="short_straddle", strikes_json="[]", confidence=0.8,
                 reasoning_summary="t", dissent_json="[]", risk_vetoed=False,
                 status="PROPOSED", suggested_lots=3))
             s.commit()
         out = routes.latest_recommendations(x_admin_auth_token=TOKEN)
-        assert out["recommendations"]["GOLD"]["suggested_lots"] == 3
+        assert out["recommendations"]["GOLDM"]["suggested_lots"] == 3
 
     def test_ui_prefills_lots(self):
         from app.commodity_agents.dashboard import ANALYZE_HTML, DASHBOARD_HTML
@@ -757,10 +757,10 @@ class TestRegimeFlipAlert:
     def _seed_prev_run_and_short(self, factory, label="range-bound"):
         now = datetime.now(IST)
         with factory() as s:
-            s.add(AgentRun(run_id="rf-prev", commodity="GOLD",
+            s.add(AgentRun(run_id="rf-prev", commodity="GOLDM",
                            started_at=now - timedelta(minutes=30), status="COMPLETED",
                            regime_json=json.dumps({"label": label})))
-            o = _mk_order(s, 1, "GOLD26JUL72000CE")
+            o = _mk_order(s, 1, "GOLDM26JUL72000CE")
             _mk_position(s, o, itype="CE")
             s.commit()
 
@@ -768,13 +768,13 @@ class TestRegimeFlipAlert:
         from app.commodity_agents.orchestrator import _regime_flip_alert
         self._seed_prev_run_and_short(db_factory)
         with db_factory() as s:
-            cur = AgentRun(run_id="rf-cur", commodity="GOLD",
+            cur = AgentRun(run_id="rf-cur", commodity="GOLDM",
                            started_at=datetime.now(IST), status="RUNNING",
                            regime_json=json.dumps({"label": "trending"}))
             s.add(cur)
             s.commit()
             with patch("app.commodity_agents.notify.send_telegram") as tg:
-                _regime_flip_alert(s, settings_paper, cur, "GOLD", "trending")
+                _regime_flip_alert(s, settings_paper, cur, "GOLDM", "trending")
                 assert tg.called
                 assert "REGIME FLIP" in tg.call_args[0][1]
 
@@ -782,26 +782,26 @@ class TestRegimeFlipAlert:
         from app.commodity_agents.orchestrator import _regime_flip_alert
         now = datetime.now(IST)
         with db_factory() as s:
-            s.add(AgentRun(run_id="rf-p2", commodity="SILVER",
+            s.add(AgentRun(run_id="rf-p2", commodity="SILVERM",
                            started_at=now - timedelta(minutes=30), status="COMPLETED",
                            regime_json=json.dumps({"label": "range-bound"})))
-            cur = AgentRun(run_id="rf-c2", commodity="SILVER", started_at=now,
+            cur = AgentRun(run_id="rf-c2", commodity="SILVERM", started_at=now,
                            status="RUNNING")
             s.add(cur)
             s.commit()
             with patch("app.commodity_agents.notify.send_telegram") as tg:
-                _regime_flip_alert(s, settings_paper, cur, "SILVER", "trending")
+                _regime_flip_alert(s, settings_paper, cur, "SILVERM", "trending")
                 assert not tg.called
 
     def test_no_alert_on_benign_label(self, db_factory, settings_paper):
         from app.commodity_agents.orchestrator import _regime_flip_alert
         with db_factory() as s:
-            cur = AgentRun(run_id="rf-c3", commodity="GOLD",
+            cur = AgentRun(run_id="rf-c3", commodity="GOLDM",
                            started_at=datetime.now(IST), status="RUNNING")
             s.add(cur)
             s.commit()
             with patch("app.commodity_agents.notify.send_telegram") as tg:
-                _regime_flip_alert(s, settings_paper, cur, "GOLD", "range-bound")
+                _regime_flip_alert(s, settings_paper, cur, "GOLDM", "range-bound")
                 assert not tg.called
 
 
@@ -811,26 +811,26 @@ class TestSlippageAndExcursions:
         now = datetime.now(IST)
         with db_factory() as s:
             run = AgentRun(
-                run_id="slip-run", commodity="GOLD", started_at=now,
+                run_id="slip-run", commodity="GOLDM", started_at=now,
                 status="COMPLETED",
                 strikes_json=json.dumps([
-                    {"tradingsymbol": "GOLD26JUL72000CE", "ltp": 800.0},
-                    {"tradingsymbol": "GOLD26JUL72000PE", "ltp": 800.0}]))
+                    {"tradingsymbol": "GOLDM26JUL72000CE", "ltp": 800.0},
+                    {"tradingsymbol": "GOLDM26JUL72000PE", "ltp": 800.0}]))
             s.add(run)
             s.commit()
             rec = CommodityRecommendation(
-                run_pk=run.id, commodity="GOLD", created_at=now, direction="SELL",
+                run_pk=run.id, commodity="GOLDM", created_at=now, direction="SELL",
                 strategy_type="short_straddle", strikes_json="[]", confidence=0.8,
                 reasoning_summary="t", dissent_json="[]", risk_vetoed=False,
                 status="APPROVED")
             s.add(rec)
             s.commit()
             s.add(CommodityTradeJournal(
-                recommendation_id=rec.id, commodity="GOLD", mode="live",
+                recommendation_id=rec.id, commodity="GOLDM", mode="live",
                 alert_id=555, entered_at=now, entry_context_json="{}", lots=1))
             for sym, itype, fill, worst, best in (
-                    ("GOLD26JUL72000CE", "CE", 792.0, 1050.0, 700.0),
-                    ("GOLD26JUL72000PE", "PE", 796.0, 900.0, 500.0)):
+                    ("GOLDM26JUL72000CE", "CE", 792.0, 1050.0, 700.0),
+                    ("GOLDM26JUL72000PE", "PE", 796.0, 900.0, 500.0)):
                 o = _mk_order(s, 555, sym)
                 o.fill_price = fill
                 p = _mk_position(s, o, itype=itype, entry=fill)
@@ -874,9 +874,9 @@ class TestWeeklyReport:
         from app.commodity_agents.weekly_report import build_weekly_report
         now = datetime.now(IST)
         settings = settings_paper.model_copy(
-            update={"COMMODITY_AGENTS_COMMODITIES": ["GOLD"]})
+            update={"COMMODITY_AGENTS_COMMODITIES": ["GOLDM"]})
         with db_factory() as s:
-            run = AgentRun(run_id="wr-1", commodity="GOLD", started_at=now,
+            run = AgentRun(run_id="wr-1", commodity="GOLDM", started_at=now,
                            status="COMPLETED",
                            regime_json=json.dumps({"label": "range-bound",
                                                    "atm_iv": 0.32,
@@ -884,14 +884,14 @@ class TestWeeklyReport:
             s.add(run)
             s.commit()
             rec = CommodityRecommendation(
-                run_pk=run.id, commodity="GOLD", created_at=now, direction="SELL",
+                run_pk=run.id, commodity="GOLDM", created_at=now, direction="SELL",
                 strategy_type="short_straddle", strikes_json="[]", confidence=0.8,
                 reasoning_summary="t", dissent_json="[]", risk_vetoed=False,
                 status="APPROVED")
             s.add(rec)
             s.commit()
             s.add(CommodityTradeJournal(
-                recommendation_id=rec.id, commodity="GOLD", mode="live",
+                recommendation_id=rec.id, commodity="GOLDM", mode="live",
                 alert_id=None, entered_at=now - timedelta(days=2),
                 entry_context_json=json.dumps({"regime": "range-bound"}),
                 lots=1, realized_pnl=5200.0, slippage_pct=-0.4, mae_pct=28.0))
@@ -919,11 +919,11 @@ class TestDeskEnhancements:
     def test_recommendations_include_last_runs(self, db_factory, settings_paper):
         now = datetime.now(IST)
         with db_factory() as s:
-            s.add(AgentRun(run_id="lr-f", commodity="CRUDEOIL", started_at=now,
+            s.add(AgentRun(run_id="lr-f", commodity="CRUDEOILM", started_at=now,
                            status="FAILED", error="no text content for role event"))
             s.commit()
         out = routes.latest_recommendations(x_admin_auth_token=TOKEN)
-        lr = out["last_runs"]["CRUDEOIL"]
+        lr = out["last_runs"]["CRUDEOILM"]
         assert lr["status"] == "FAILED"
         assert "no text content" in lr["error"]
-        assert out["last_runs"]["GOLD"] is None
+        assert out["last_runs"]["GOLDM"] is None
