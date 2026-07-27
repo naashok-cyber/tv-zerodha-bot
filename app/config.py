@@ -457,6 +457,19 @@ class Settings(BaseSettings):
     TRADE_REVIEW_MODEL: str = "claude-fable-5"
     TRADE_REVIEW_MAX_TOKENS: int = 400
 
+    # ── BANKNIFTY delta hedge (NSE hours, 1-lot fixed, SELL-first) ───────────
+    # Band ≥ 15 required (1 ATM BNF lot = 0.50 × 30 = 15 δ units); default 25
+    # leaves ~10 units residual after hedge (40% of band, matches NG design).
+    BNF_HEDGE_ENABLED: bool = False
+    BNF_HEDGE_BAND_UNITS: float = 25.0
+    BNF_HEDGE_COOLDOWN_MIN: int = 10
+    BNF_HEDGE_COOLDOWN_BYPASS_MULT: float = 2.0
+    BNF_HEDGE_FREEZE_BEFORE_MIN: int = 15
+    BNF_HEDGE_FREEZE_BYPASS_MULT: float = 3.0
+    BNF_HEDGE_MIN_T_DAYS: float = 1.0
+    BNF_HEDGE_MAX_LOTS_PER_DAY: int = 8
+    BNF_HEDGE_STATE_PATH: str = "data/bnf_hedge_state.json"
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

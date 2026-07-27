@@ -639,6 +639,33 @@ def make_scheduler(
             settings.NG_DELTA_HEDGE_ENABLED,
         )
 
+        # BANKNIFTY delta hedge — NSE hours only (09:15–15:30). second=40 keeps
+        # it off the quote-bucket collisions with hedge :05, paper :20,
+        # partial :35, defense :50, EMA :15. Guarded by BNF_HEDGE_ENABLED so it
+        # is a cheap no-op when the flag is off.
+        from app.bnf_delta_hedge import run_bnf_hedge_job
+        scheduler.add_job(
+            run_bnf_hedge_job,
+            trigger="cron",
+            day_of_week="mon-fri",
+            hour="9-15",
+            minute="*",
+            second=40,
+            kwargs={"settings": settings, "session_factory": session_factory},
+            id="bnf_delta_hedge",
+            misfire_grace_time=30,
+            max_instances=1,
+        )
+        log.info(
+            "[scheduler] BNF delta-hedge cron: every 1 min IST, Mon-Fri 09-15 "
+            "(band=±%.0f δ units, cooldown=%dm, min_T=%.1fd, cap=%d/day, enabled=%s via .env)",
+            settings.BNF_HEDGE_BAND_UNITS,
+            settings.BNF_HEDGE_COOLDOWN_MIN,
+            settings.BNF_HEDGE_MIN_T_DAYS,
+            settings.BNF_HEDGE_MAX_LOTS_PER_DAY,
+            settings.BNF_HEDGE_ENABLED,
+        )
+
     if settings.SCHEDULED_STRADDLE_ENABLED and session_factory is not None:
         from app.scheduled_straddle import run_scheduled_straddle, squareoff_scheduled_straddles
 
