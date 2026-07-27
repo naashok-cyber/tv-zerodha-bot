@@ -427,6 +427,15 @@ class Settings(BaseSettings):
     COMMODITY_AGENT_MODEL_EVENT: str = "claude-sonnet-5"
     COMMODITY_AGENT_MODEL_VOL: str = "claude-sonnet-5"
     COMMODITY_AGENT_MODEL_JUDGE: str = "claude-opus-4-8"
+    # Claude Code shim backend: manual /run analyses can be routed through the
+    # host's `claude` CLI (subscription) instead of the metered API. Scheduled
+    # runs stay on the API — driving a subscription from a cron is not what it
+    # is for, and the shim serialises to one call at a time anyway.
+    COMMODITY_AGENT_SHIM_URL: str = ""        # e.g. http://host.docker.internal:8765
+    COMMODITY_AGENT_SHIM_TOKEN: str = ""
+    COMMODITY_AGENT_SHIM_MODEL: str = "sonnet"
+    COMMODITY_AGENT_SHIM_TIMEOUT: int = 600
+    COMMODITY_AGENT_MANUAL_BACKEND: str = "shim"   # "shim" | "api"
     COMMODITY_BLACKOUT_PRE_HOURS: float = 3.0
     COMMODITY_BLACKOUT_POST_HOURS: float = 1.0
     COMMODITY_MAX_LOSS_PER_LOT: float = 15000.0   # ₹ worst-case per lot cap

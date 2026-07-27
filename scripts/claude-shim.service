@@ -1,0 +1,26 @@
+[Unit]
+Description=Claude Code shim for tv-zerodha-bot commodity agents
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Must run as the user that owns ~/.claude/.credentials.json — the OAuth token
+# is per-user and refreshes in place, so root would not see it.
+User=naashok_gmail_com
+Group=naashok_gmail_com
+Environment=HOME=/home/naashok_gmail_com
+EnvironmentFile=/etc/claude-shim.env
+ExecStart=/usr/bin/python3 /opt/tv-zerodha-bot/scripts/claude_shim.py
+Restart=always
+RestartSec=5
+# The service shells out to the CLI, which needs a writable HOME and /tmp;
+# everything else stays read-only.
+ProtectSystem=full
+PrivateTmp=false
+NoNewPrivileges=true
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

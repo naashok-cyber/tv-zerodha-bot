@@ -188,6 +188,57 @@ runs on page load and on every chip tap, `/runs/latest` excludes `IV_SAMPLE`
 rows (they fire every 5 min and would always be the newest), and the card shows
 an "as of" stamp that turns amber past `_ANALYSIS_TTL_SECONDS` (24 h).
 
+### Wave 6 — Claude Code shim backend (2026-07-27)
+
+Manual analyses no longer have to be billed to the Anthropic API. The VM
+already runs Claude Code authenticated with a **subscription OAuth token**
+(`~/.claude/.credentials.json`), so `claude -p` there costs nothing marginal.
+The bot is in Docker and the CLI plus its credentials are on the host, so the
+bridge is a small host-side HTTP service:
+
+- `scripts/claude_shim.py` — stdlib-only `ThreadingHTTPServer`. `POST /run`
+  (bearer token, one run at a time, 429 when busy) shells out to `claude -p
+  --output-format json` inside a `TemporaryDirectory`, so no repo `CLAUDE.md`
+  or project settings leak into the prompt. `GET /healthz` reports the CLI
+  version and whether a run is in flight.
+- `scripts/claude-shim.service` — systemd unit; **must run as the human user**
+  that owns the credentials file (root cannot see it), with
+  `EnvironmentFile=/etc/claude-shim.env`.
+- `docker-compose.yml` gained `extra_hosts: host.docker.internal:host-gateway`
+  — that is how the container reaches the host at all.
+- `app/commodity_agents/llm_shim.py::ShimClient` mirrors `LlmClient.run(role,
+  system, user) -> dict` exactly, so nothing downstream branches on backend.
+
+**The one thing that is genuinely different: it must be a single call.**
+Measured 2026-07-27, a headless `claude -p` invocation carries **~18.9K tokens
+of fixed scaffolding** (6.1K cache-create + 12.8K cache-read) even with
+`--allowed-tools ""` in an empty directory. Four per-role calls would burn
+~75K tokens of pure overhead against ~3.3K for the entire API path. So
+`debate.run_full_debate` plays all four seats in one turn and
+`debate.split_full_debate` unpacks the reply; `_run_stages` still writes
+`trend_json` / `event_debate_json` / `vol_json` / `judge_json` separately, so
+the UI, the reasoning trail and `calibration.py` cannot tell the backends
+apart. The role briefs (`_TREND_BRIEF`/`_EVENT_BRIEF`/`_VOL_BRIEF`) and
+`_JUDGE_RULES` are module constants precisely so both paths send identical
+text — a test asserts this.
+
+Cost of that trade-off, stated plainly: one turn means the three agents no
+longer reason independently, so their outputs correlate more than over the
+API. The prompt pushes back on it (write each seat in full before judging) but
+does not eliminate it. If `calibration.py` ever shows shim-run debates
+agreeing more than API-run ones, that is why.
+
+Backend selection: `orchestrator.make_backend(settings, manual)` — scheduled
+cadence always API, manual `/run` prefers the shim
+(`COMMODITY_AGENT_MANUAL_BACKEND=shim`) and silently falls back to the API if
+the shim is not configured. `GET /commodity-agents/backend` reports configured
+vs reachable vs effective; the Analyze page shows it under the button so the
+cost is visible *before* the press.
+
+Worth saying once: driving a subscription from an automated server process is
+outside what the subscription is for. Manual-only triggering is the defensible
+pattern, and is why the scheduled path was deliberately left on the API.
+
 ### Verified results worth remembering
 - BANKNIFTY 436-day CSV backtest with `--cost-pct 1.0 --slippage-pct 0.25`:
   range-bound +1.99% gross → **+0.50% net**; trending +0.83% gross →

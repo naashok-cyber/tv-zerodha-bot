@@ -211,6 +211,7 @@ border-radius:50%;background:var(--dim)}
   <div style="margin-top:10px"><input id="ticker" placeholder="or type: NIFTY, BANKNIFTY, GOLDM, SILVERM, CRUDEOILM, NATURALGAS (aliases: NG, BN, CRUDE, GOLD, SILVER)"
     onkeydown="if(event.key==='Enter')analyze()"></div>
   <button class="go" id="goBtn" onclick="analyze()">Analyze</button>
+  <div class="dim" id="backend" style="margin-top:8px"></div>
 </div>
 
 <div class="card hidden" id="progress">
@@ -428,7 +429,20 @@ pendingConfirm={id:id,action:action,token:r.confirm_token};
 box.innerHTML='<button class="confirm" onclick="decide('+id+',\\''+action+'\\')">TAP AGAIN to confirm '+
 action.toUpperCase()+' ('+(recLots[id]||1)+' lot'+((recLots[id]||1)===1?'':'s')+')'+
 '</button><button onclick="pendingConfirm=null;location.reload()">Cancel</button>'}
-renderChips();
+// Say what the next Analyze press will cost before it is pressed. The shim
+// runs on the VM host, so "configured" and "reachable" differ — show which.
+async function loadBackend(){
+const el=document.getElementById('backend');if(!el)return;
+let d;try{d=await api('/backend')}catch(e){return}
+if(d.effective==='shim'){
+el.innerHTML='Runs on this machine&#8217;s Claude Code subscription ('+esc(d.shim_model)+
+') &#8212; no API charge.';return}
+if(d.manual_backend==='shim'&&d.shim_configured){
+el.innerHTML='<span style="color:var(--amber)">Claude Code bridge unreachable ('+
+esc((d.shim||{}).error||'no response')+') &#8212; falling back to the paid API.</span>';return}
+el.innerHTML='Runs on the paid Anthropic API'+(d.api_configured?'.':
+' <span style="color:var(--red)">&#8212; but no API key is set, so runs will fail.</span>')}
+renderChips();loadBackend();
 // deep link: /analyze?t=GOLDM preselects the ticker (from Desk drift chips);
 // otherwise fall back to whatever was last looked at, so returning to this
 // page shows the stored analysis instead of an empty form.

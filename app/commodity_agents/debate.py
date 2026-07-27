@@ -21,6 +21,7 @@ from app.commodity_agents.llm_client import (
     ROLE_TREND,
     ROLE_VOL,
     LlmClient,
+    LlmError,
 )
 from app.commodity_agents.models import EventWindow, RegimeSnapshot, StrikeCandidate
 
@@ -198,51 +199,59 @@ def build_context(
     )
 
 
+# Role briefs live as constants because they are used twice: once per role in
+# the four-call API path, and once concatenated in the single-call shim path
+# (see run_full_debate). Editing a brief must change both, or the two backends
+# would quietly grade the same setup differently.
+_TREND_BRIEF = (
+    "You are the Trend/Breakout debate agent on a commodity options desk "
+    "run by a 20+ year options seller. Assess directional breakout risk to "
+    "a short-premium position: could this market trend hard enough to hurt "
+    "it? Weigh ADX, band width and price action from the context. Argue "
+    "both sides honestly — a quiet, rangebound tape is a real and common "
+    "finding, and saying so plainly is as useful as flagging danger. Be "
+    "specific and falsifiable."
+)
+
+_EVENT_BRIEF = (
+    "You are the Event/Gap-Risk debate agent on a commodity options desk. "
+    "Assess asymmetric gap risk to a SHORT-PREMIUM position from (a) the "
+    "scheduled events listed in the context and (b) breaking news you can "
+    "find via web search — geopolitical supply shocks, weather anomalies, "
+    "OPEC surprises. Scheduled events are ALREADY blackout-enforced by a "
+    "deterministic layer upstream, so do not re-veto them; your job is the "
+    "UNSCHEDULED risk, and whether the scheduled ones are bigger than the "
+    "market has priced. Yours is the only risk_flag that hard-blocks short "
+    "premium downstream, so spend 'high' carefully."
+)
+
+_VOL_BRIEF = (
+    "You are the Volatility debate agent on a commodity options desk. "
+    "Argue whether current implied vol is rich enough to compensate for "
+    "tail risk (favors selling premium) or whether the market is "
+    "underpricing risk (dangerous to sell). Use the ATM IV, realized vol, "
+    "IV/RV ratio and IV percentile from the context, and the VOL ANALYTICS "
+    "block when present: the VRP (IV minus realized), whether IV is "
+    "expanding or contracting across recent runs, and the expected-move "
+    "edge ratio (implied straddle move vs realized pace — above 1 favours "
+    "the seller). An expanding IV trend argues for waiting even when VRP "
+    "is positive; a fat, stable VRP is a genuine seller's edge and should "
+    "be called as one."
+)
+
+
 def run_trend_agent(llm: LlmClient, ctx: DebateContext) -> dict:
-    system = (
-        "You are the Trend/Breakout debate agent on a commodity options desk "
-        "run by a 20+ year options seller. Assess directional breakout risk to "
-        "a short-premium position: could this market trend hard enough to hurt "
-        "it? Weigh ADX, band width and price action from the context. Argue "
-        "both sides honestly — a quiet, rangebound tape is a real and common "
-        "finding, and saying so plainly is as useful as flagging danger. Be "
-        "specific and falsifiable.\n\n"
-        + _RISK_RUBRIC + "\n\n" + _DEBATE_SCHEMA
-    )
+    system = _TREND_BRIEF + "\n\n" + _RISK_RUBRIC + "\n\n" + _DEBATE_SCHEMA
     return llm.run(ROLE_TREND, system, ctx.for_trend())
 
 
 def run_event_agent(llm: LlmClient, ctx: DebateContext) -> dict:
-    system = (
-        "You are the Event/Gap-Risk debate agent on a commodity options desk. "
-        "Assess asymmetric gap risk to a SHORT-PREMIUM position from (a) the "
-        "scheduled events listed in the context and (b) breaking news you can "
-        "find via web search — geopolitical supply shocks, weather anomalies, "
-        "OPEC surprises. Scheduled events are ALREADY blackout-enforced by a "
-        "deterministic layer upstream, so do not re-veto them; your job is the "
-        "UNSCHEDULED risk, and whether the scheduled ones are bigger than the "
-        "market has priced. Yours is the only risk_flag that hard-blocks short "
-        "premium downstream, so spend 'high' carefully.\n\n"
-        + _RISK_RUBRIC + "\n\n" + _DEBATE_SCHEMA
-    )
+    system = _EVENT_BRIEF + "\n\n" + _RISK_RUBRIC + "\n\n" + _DEBATE_SCHEMA
     return llm.run(ROLE_EVENT, system, ctx.for_event())
 
 
 def run_vol_agent(llm: LlmClient, ctx: DebateContext) -> dict:
-    system = (
-        "You are the Volatility debate agent on a commodity options desk. "
-        "Argue whether current implied vol is rich enough to compensate for "
-        "tail risk (favors selling premium) or whether the market is "
-        "underpricing risk (dangerous to sell). Use the ATM IV, realized vol, "
-        "IV/RV ratio and IV percentile from the context, and the VOL ANALYTICS "
-        "block when present: the VRP (IV minus realized), whether IV is "
-        "expanding or contracting across recent runs, and the expected-move "
-        "edge ratio (implied straddle move vs realized pace — above 1 favours "
-        "the seller). An expanding IV trend argues for waiting even when VRP "
-        "is positive; a fat, stable VRP is a genuine seller's edge and should "
-        "be called as one.\n\n"
-        + _RISK_RUBRIC + "\n\n" + _DEBATE_SCHEMA
-    )
+    system = _VOL_BRIEF + "\n\n" + _RISK_RUBRIC + "\n\n" + _DEBATE_SCHEMA
     return llm.run(ROLE_VOL, system, ctx.for_vol())
 
 
@@ -266,6 +275,37 @@ _JUDGE_SCHEMA = """Return ONLY a valid JSON object:
 }"""
 
 
+_JUDGE_RULES = (
+    "You are the Judge on a commodity options desk. Synthesize the three "
+    "debate outputs into ONE recommendation for an experienced short-"
+    "premium options trader. Rules:\n"
+    "1. ONLY the Event/Gap-Risk agent's risk_flag can block short premium, "
+    "and only when it is exactly 'high'. This is enforced in code "
+    "downstream. A 'high' from the Trend or Vol agent is EVIDENCE TO "
+    "WEIGH, NOT A VETO — do not treat it as one, and do not cite this rule "
+    "when standing aside on their flags.\n"
+    "2. Preserve every dissenting or minority risk view in "
+    "dissenting_views — never silently discard a risk flag.\n"
+    "3. strikes must come from the provided candidates only.\n"
+    "4. NO_TRADE is a legitimate answer but it is NOT the safe default. "
+    "Choose it when the setup is genuinely unattractive: thin or negative "
+    "VRP, a named near-term threat the market has not priced, or limits "
+    "that plainly cannot be met. Do NOT choose it merely because the "
+    "agents disagree — disagreement is the normal output of an adversarial "
+    "debate. A rich VRP with 'medium' flags on both sides is a TRADE, "
+    "sized down, not a pass.\n"
+    "5. Prefer the defined-risk iron_fly (sell both 0.50-delta strikes, "
+    "buy both 0.25-delta wings — list all four tradingsymbols in strikes) "
+    "over a naked short_straddle when a high-impact event falls inside "
+    "the horizon, the IV trend is expanding, or tail risk is elevated; "
+    "the naked straddle is only for clean, quiet setups.\n"
+    "6. headline and plain_reasons are read by someone who does not speak "
+    "options. Keep them free of jargon even when reasoning_summary is "
+    "dense — they must still convey the actual call, including when it is "
+    "NO_TRADE and why."
+)
+
+
 def run_judge(
     llm: LlmClient,
     ctx: DebateContext,
@@ -273,35 +313,7 @@ def run_judge(
     event: dict,
     vol: dict,
 ) -> dict:
-    system = (
-        "You are the Judge on a commodity options desk. Synthesize the three "
-        "debate outputs into ONE recommendation for an experienced short-"
-        "premium options trader. Rules:\n"
-        "1. ONLY the Event/Gap-Risk agent's risk_flag can block short premium, "
-        "and only when it is exactly 'high'. This is enforced in code "
-        "downstream. A 'high' from the Trend or Vol agent is EVIDENCE TO "
-        "WEIGH, NOT A VETO — do not treat it as one, and do not cite this rule "
-        "when standing aside on their flags.\n"
-        "2. Preserve every dissenting or minority risk view in "
-        "dissenting_views — never silently discard a risk flag.\n"
-        "3. strikes must come from the provided candidates only.\n"
-        "4. NO_TRADE is a legitimate answer but it is NOT the safe default. "
-        "Choose it when the setup is genuinely unattractive: thin or negative "
-        "VRP, a named near-term threat the market has not priced, or limits "
-        "that plainly cannot be met. Do NOT choose it merely because the "
-        "agents disagree — disagreement is the normal output of an adversarial "
-        "debate. A rich VRP with 'medium' flags on both sides is a TRADE, "
-        "sized down, not a pass.\n"
-        "5. Prefer the defined-risk iron_fly (sell both 0.50-delta strikes, "
-        "buy both 0.25-delta wings — list all four tradingsymbols in strikes) "
-        "over a naked short_straddle when a high-impact event falls inside "
-        "the horizon, the IV trend is expanding, or tail risk is elevated; "
-        "the naked straddle is only for clean, quiet setups.\n"
-        "6. headline and plain_reasons are read by someone who does not speak "
-        "options. Keep them free of jargon even when reasoning_summary is "
-        "dense — they must still convey the actual call, including when it is "
-        "NO_TRADE and why.\n\n" + _JUDGE_SCHEMA
-    )
+    system = _JUDGE_RULES + "\n\n" + _JUDGE_SCHEMA
     user = (
         ctx.for_judge()
         + "\n\nTREND AGENT: " + json.dumps(trend)
@@ -309,6 +321,70 @@ def run_judge(
         + "\nVOL AGENT: " + json.dumps(vol)
     )
     return llm.run(ROLE_JUDGE, system, user)
+
+
+_FULL_DEBATE_SCHEMA = f"""Return ONLY a valid JSON object with exactly four keys:
+{{
+  "trend": <the Trend agent's object>,
+  "event": <the Event/Gap-Risk agent's object>,
+  "vol":   <the Vol agent's object>,
+  "judge": <the Judge's object>
+}}
+
+Each of trend, event and vol uses this shape:
+{_DEBATE_SCHEMA}
+
+judge uses this shape:
+{_JUDGE_SCHEMA}"""
+
+
+def run_full_debate(llm: LlmClient, ctx: DebateContext) -> dict:
+    """All four roles in ONE model turn, returning {trend, event, vol, judge}.
+
+    The four-call path (run_trend_agent → … → run_judge) is the right shape for
+    the metered API, where per-call overhead is a few hundred tokens. It is the
+    wrong shape for a CLI backend: a headless `claude -p` invocation carries
+    ~18.9K tokens of fixed scaffolding, so four calls burn ~75K tokens of pure
+    overhead. Collapsing to one turn is what makes the shim backend viable.
+
+    The trade-off is real and worth naming: one turn means the three agents no
+    longer reason independently, so their outputs correlate more than they do
+    over the API. The role briefs are therefore reproduced verbatim (they are
+    the same constants), and the judge is told explicitly to write each agent's
+    view before ruling on it.
+    """
+    system = (
+        "You are running a four-seat commodity options desk meeting by "
+        "yourself. Play each seat in order, in full and in character, and do "
+        "not let a later seat's conclusion leak backwards into an earlier "
+        "one's analysis. Write each agent's verdict as that agent would — "
+        "including when it undercuts the call you expect to end up making — "
+        "and only then judge.\n\n"
+        "=== SEAT 1 — TREND/BREAKOUT ===\n" + _TREND_BRIEF + "\n\n"
+        "=== SEAT 2 — EVENT/GAP-RISK ===\n" + _EVENT_BRIEF + "\n\n"
+        "=== SEAT 3 — VOLATILITY ===\n" + _VOL_BRIEF + "\n\n"
+        "=== SEAT 4 — JUDGE ===\n" + _JUDGE_RULES + "\n\n"
+        "The three agents share the risk-flag rubric below; grade "
+        "independently against it, not relative to each other.\n\n"
+        + _RISK_RUBRIC + "\n\n" + _FULL_DEBATE_SCHEMA
+    )
+    # for_judge() is the superset slice — it already contains everything the
+    # three role slices carry, so one turn needs exactly one context render.
+    return llm.run(ROLE_JUDGE, system, ctx.for_judge())
+
+
+def split_full_debate(out: dict) -> tuple[dict, dict, dict, dict]:
+    """Unpack run_full_debate's reply into (trend, event, vol, judge).
+
+    Validated rather than .get()-ed: a missing judge would otherwise surface as
+    an empty recommendation that looks like a real NO_TRADE.
+    """
+    missing = [k for k in ("trend", "event", "vol", "judge")
+               if not isinstance(out.get(k), dict)]
+    if missing:
+        raise LlmError(f"full-debate reply missing sections: {missing} "
+                       f"(got keys {sorted(out)})")
+    return out["trend"], out["event"], out["vol"], out["judge"]
 
 
 SHORT_PREMIUM_TYPES = {"short_straddle", "short_strangle", "short_call", "short_put", "iron_fly"}

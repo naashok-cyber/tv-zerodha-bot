@@ -405,17 +405,32 @@ def _run_stages(
         return
 
     if llm is None:
-        raise RuntimeError("LLM client unavailable (ANTHROPIC_API_KEY not set?)")
+        raise RuntimeError(
+            "LLM client unavailable — set ANTHROPIC_API_KEY, or configure the "
+            "Claude Code shim (COMMODITY_AGENT_SHIM_URL/_TOKEN) for manual runs")
 
     # 6. Debate round
     ctx = debate.build_context(commodity, snap, debate.summarize_candles(candles),
                                cands, evs, analytics=quant)
-    trend_out = llm_stage(run, session, "trend_json", lambda: debate.run_trend_agent(llm, ctx))
-    event_out = llm_stage(run, session, "event_debate_json", lambda: debate.run_event_agent(llm, ctx))
-    vol_out = llm_stage(run, session, "vol_json", lambda: debate.run_vol_agent(llm, ctx))
+    if getattr(llm, "single_call", False):
+        # Shim backend: one CLI invocation plays all four seats, because each
+        # invocation carries ~18.9K tokens of fixed scaffolding. The four stage
+        # columns are still written individually, so the UI, the audit trail
+        # and every downstream reader cannot tell the backends apart.
+        full = llm_stage(run, session, "judge_json",
+                         lambda: debate.run_full_debate(llm, ctx))
+        trend_out, event_out, vol_out, judge_out = debate.split_full_debate(full)
+        run.trend_json = json.dumps(trend_out)
+        run.event_debate_json = json.dumps(event_out)
+        run.vol_json = json.dumps(vol_out)
+    else:
+        trend_out = llm_stage(run, session, "trend_json", lambda: debate.run_trend_agent(llm, ctx))
+        event_out = llm_stage(run, session, "event_debate_json", lambda: debate.run_event_agent(llm, ctx))
+        vol_out = llm_stage(run, session, "vol_json", lambda: debate.run_vol_agent(llm, ctx))
 
-    # 7. Judge + code-level gap-risk gate
-    judge_out = debate.run_judge(llm, ctx, trend_out, event_out, vol_out)
+        # 7. Judge + code-level gap-risk gate
+        judge_out = debate.run_judge(llm, ctx, trend_out, event_out, vol_out)
+
     judge_out = debate.enforce_gap_risk_gate(judge_out, event_out)
     run.judge_json = json.dumps(judge_out)
     session.commit()
@@ -674,14 +689,17 @@ def _persist_recommendation(
 
 # ── Entry points for scheduler / routes ──────────────────────────────────────
 
-def run_all_commodities(session_factory: Any, settings: Any) -> None:
+def run_all_commodities(session_factory: Any, settings: Any,
+                        manual: bool = False) -> None:
     from app.kite_session import get_session_manager
     try:
         kite = get_session_manager().get_kite()
     except Exception as exc:
         log.error("[commodity_agents] no Kite session, skipping cycle: %s", exc)
         return
-    llm = _make_llm(settings)
+    llm, backend = make_backend(settings, manual=manual)
+    log.info("[commodity_agents] cycle starting on the %s backend (manual=%s)",
+             backend, manual)
     now = datetime.now(IST)
     for commodity in settings.COMMODITY_AGENTS_COMMODITIES:
         if not market_open(commodity, now):
@@ -719,6 +737,39 @@ def _make_llm(settings: Any) -> LlmClient | None:
         },
         enable_web_search=settings.COMMODITY_AGENTS_WEB_SEARCH,
     )
+
+
+def _make_shim(settings: Any) -> Any:
+    """Claude Code CLI backend, or None when it isn't configured."""
+    from app.commodity_agents.llm_shim import ShimClient
+    if not (settings.COMMODITY_AGENT_SHIM_URL and settings.COMMODITY_AGENT_SHIM_TOKEN):
+        return None
+    client = ShimClient(
+        url=settings.COMMODITY_AGENT_SHIM_URL,
+        token=settings.COMMODITY_AGENT_SHIM_TOKEN,
+        model=settings.COMMODITY_AGENT_SHIM_MODEL,
+        enable_web_search=settings.COMMODITY_AGENTS_WEB_SEARCH,
+        timeout=settings.COMMODITY_AGENT_SHIM_TIMEOUT,
+    )
+    # Consumed by _run_stages: the shim must use the one-call debate path.
+    client.single_call = True
+    return client
+
+
+def make_backend(settings: Any, manual: bool) -> tuple[Any, str]:
+    """Pick the LLM backend and report which one, so the caller can say so.
+
+    Scheduled runs always use the metered API. Manual runs prefer the shim
+    (subscription, no marginal cost) and fall back to the API if it isn't
+    configured — a user pressing Analyze wants an answer, not a config lecture.
+    """
+    if manual and settings.COMMODITY_AGENT_MANUAL_BACKEND == "shim":
+        shim = _make_shim(settings)
+        if shim is not None:
+            return shim, "shim"
+        log.info("[commodity_agents] manual run wanted the shim but it is not "
+                 "configured; falling back to the API")
+    return _make_llm(settings), "api"
 
 
 def register_jobs(scheduler: Any, settings: Any, session_factory: Any) -> None:
@@ -814,11 +865,15 @@ def register_jobs(scheduler: Any, settings: Any, session_factory: Any) -> None:
              interval, settings.COMMODITY_AGENTS_IV_SAMPLE_MIN)
 
 
-def run_commodity_pipeline_by_name(commodity: str, session_factory: Any, settings: Any) -> None:
+def run_commodity_pipeline_by_name(commodity: str, session_factory: Any, settings: Any,
+                                   manual: bool = False) -> None:
     from app.kite_session import get_session_manager
     try:
         kite = get_session_manager().get_kite()
     except Exception as exc:
         log.error("[commodity_agents] no Kite session for %s run: %s", commodity, exc)
         return
-    run_commodity_pipeline(commodity, session_factory, settings, kite, _make_llm(settings))
+    llm, backend = make_backend(settings, manual=manual)
+    log.info("[commodity_agents] %s run starting on the %s backend (manual=%s)",
+             commodity, backend, manual)
+    run_commodity_pipeline(commodity, session_factory, settings, kite, llm)

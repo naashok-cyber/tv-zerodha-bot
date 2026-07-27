@@ -8,6 +8,11 @@ services:
       - .env
     volumes:
       - ./data:/app/data
+    # Lets manual commodity-agent analyses reach the host's claude-shim service
+    # (scripts/claude_shim.py) at http://host.docker.internal:8765 — the Claude
+    # Code CLI and its subscription credentials live on the host, not in here.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]

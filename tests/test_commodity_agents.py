@@ -530,6 +530,193 @@ class TestOrchestrator:
             assert run.error
 
 
+class FakeSingleCallLlm:
+    """Stands in for ShimClient: one .run() call returns all four seats."""
+    single_call = True
+
+    def __init__(self, gap_risk="low", drop=None):
+        self.gap_risk = gap_risk
+        self.drop = drop            # simulate a section missing from the reply
+        self.calls = []
+
+    def run(self, role, system, user):
+        self.calls.append((role, system, user))
+        agent = {"stance": "ok", "bull_case": "b", "bear_case": "s",
+                 "risk_flag": "low", "confidence": 0.7, "falsifier": "f"}
+        out = {
+            "trend": dict(agent),
+            "event": dict(agent, risk_flag=self.gap_risk),
+            "vol": dict(agent),
+            "judge": {"direction": "SELL", "strategy_type": "short_straddle",
+                      "strikes": ["GOLDM26JUL72000CE", "GOLDM26JUL72000PE"],
+                      "confidence": 0.8, "reasoning_summary": "IV rich, range-bound",
+                      "headline": "Options look pricey for how little this is moving.",
+                      "plain_reasons": ["Priced for bigger swings than it makes."],
+                      "dissenting_views": ["trend agent worried about breakout"]},
+        }
+        if self.drop:
+            out.pop(self.drop)
+        return out
+
+
+class TestSingleCallDebate:
+    """The shim backend collapses four roles into one call (each CLI
+    invocation carries ~18.9K tokens of fixed scaffolding). Everything
+    downstream must be unable to tell which backend ran."""
+
+    def test_one_call_fills_every_stage_column(self, db_factory, ca_settings):
+        from app.commodity_agents.orchestrator import run_commodity_pipeline
+        with db_factory() as s:
+            _seed_instruments(s)
+        llm = FakeSingleCallLlm()
+        now = datetime(2026, 7, 5, 12, 0, tzinfo=IST)
+        run_id = run_commodity_pipeline("GOLDM", db_factory, ca_settings,
+                                        _mk_kite(), llm, now=now)
+        assert len(llm.calls) == 1, "the whole point is one invocation"
+        with db_factory() as s:
+            run = s.get(AgentRun, run_id)
+            assert run.status == "COMPLETED"
+            for field in ("trend_json", "event_debate_json", "vol_json", "judge_json"):
+                assert json.loads(getattr(run, field)), f"{field} missing"
+            rec = s.query(CommodityRecommendation).filter_by(run_pk=run.id).one()
+            assert rec.direction == "SELL"
+            assert rec.headline
+
+    def test_gap_risk_gate_still_applies(self, db_factory, ca_settings):
+        from app.commodity_agents.orchestrator import run_commodity_pipeline
+        with db_factory() as s:
+            _seed_instruments(s)
+        now = datetime(2026, 7, 5, 12, 0, tzinfo=IST)
+        run_id = run_commodity_pipeline(
+            "GOLDM", db_factory, ca_settings, _mk_kite(),
+            FakeSingleCallLlm(gap_risk="high"), now=now)
+        with db_factory() as s:
+            rec = s.query(CommodityRecommendation).filter_by(
+                run_pk=s.get(AgentRun, run_id).id).one()
+            assert rec.direction == "NO_TRADE"
+
+    def test_missing_section_fails_loudly(self):
+        from app.commodity_agents.llm_client import LlmError
+        with pytest.raises(LlmError, match="judge"):
+            debate.split_full_debate({"trend": {}, "event": {}, "vol": {}})
+
+    def test_missing_section_is_not_a_silent_no_trade(self, db_factory, ca_settings):
+        from app.commodity_agents.orchestrator import run_commodity_pipeline
+        with db_factory() as s:
+            _seed_instruments(s)
+        now = datetime(2026, 7, 5, 12, 0, tzinfo=IST)
+        run_id = run_commodity_pipeline(
+            "GOLDM", db_factory, ca_settings, _mk_kite(),
+            FakeSingleCallLlm(drop="judge"), now=now)
+        with db_factory() as s:
+            run = s.get(AgentRun, run_id)
+            assert run.status == "FAILED"
+            assert not s.query(CommodityRecommendation).count()
+
+    def test_prompt_carries_all_four_seats_and_the_full_context(self):
+        ctx = TestDebateContext()._ctx()
+        llm = FakeSingleCallLlm()
+        debate.run_full_debate(llm, ctx)
+        _role, system, user = llm.calls[0]
+        for seat in ("TREND/BREAKOUT", "EVENT/GAP-RISK", "VOLATILITY", "JUDGE"):
+            assert seat in system
+        assert user == ctx.for_judge()
+        # The role briefs must be the same text both backends send, or the two
+        # would grade the same setup differently.
+        assert debate._TREND_BRIEF in system
+        assert debate._EVENT_BRIEF in system
+        assert debate._VOL_BRIEF in system
+        assert debate._JUDGE_RULES in system
+
+
+class TestShimClient:
+    def _client(self):
+        from app.commodity_agents.llm_shim import ShimClient
+        return ShimClient(url="http://host.docker.internal:8765/",
+                          token="s3cret", model="sonnet")
+
+    def test_posts_bearer_token_and_parses_fenced_json(self):
+        client = self._client()
+        seen = {}
+
+        def fake_post(payload):
+            seen.update(payload)
+            return {"result": '```json\n{"direction": "NO_TRADE"}\n```',
+                    "usage": {"output_tokens": 42}, "total_cost_usd": 0.0}
+
+        client._post = fake_post
+        out = client.run("judge", "sys", "usr")
+        assert out == {"direction": "NO_TRADE"}
+        assert seen["system"] == "sys" and seen["user"] == "usr"
+        assert seen["model"] == "sonnet"
+        assert client.last_usage["output_tokens"] == 42
+
+    def test_url_gets_the_run_path_once(self):
+        assert self._client()._url == "http://host.docker.internal:8765/run"
+
+    def test_web_search_only_where_it_is_needed(self):
+        client = self._client()
+        seen = []
+        client._post = lambda p: (seen.append(p), {"result": "{}"})[1]
+        for role in ("trend", "vol", "event", "judge"):
+            client.run(role, "s", "u")
+        assert [p["web_search"] for p in seen] == [False, False, True, True]
+
+    def test_missing_token_refuses_to_construct(self):
+        from app.commodity_agents.llm_client import LlmError
+        from app.commodity_agents.llm_shim import ShimClient
+        with pytest.raises(LlmError):
+            ShimClient(url="http://x:1", token="")
+
+    def test_transport_failure_is_not_retried(self):
+        from app.commodity_agents.llm_client import LlmError
+        client = self._client()
+        calls = []
+
+        def boom(_payload):
+            calls.append(1)
+            raise LlmError("shim call failed: connection refused")
+
+        client._post = boom
+        with pytest.raises(LlmError):
+            client.run("judge", "s", "u")
+        assert len(calls) == 1, "a dead shim must not burn a second CLI run"
+
+
+class TestBackendSelection:
+    def _settings(self, **over):
+        from app.config import get_settings
+        base = {"COMMODITY_AGENT_SHIM_URL": "http://host.docker.internal:8765",
+                "COMMODITY_AGENT_SHIM_TOKEN": "tok",
+                "ANTHROPIC_API_KEY": "sk-test"}
+        base.update(over)
+        return get_settings().model_copy(update=base)
+
+    def test_scheduled_runs_stay_on_the_paid_api(self):
+        from app.commodity_agents.orchestrator import make_backend
+        client, name = make_backend(self._settings(), manual=False)
+        assert name == "api"
+        assert not getattr(client, "single_call", False)
+
+    def test_manual_runs_prefer_the_shim(self):
+        from app.commodity_agents.orchestrator import make_backend
+        client, name = make_backend(self._settings(), manual=True)
+        assert name == "shim"
+        assert client.single_call is True
+
+    def test_manual_falls_back_when_shim_unconfigured(self):
+        from app.commodity_agents.orchestrator import make_backend
+        _client, name = make_backend(
+            self._settings(COMMODITY_AGENT_SHIM_TOKEN=""), manual=True)
+        assert name == "api"
+
+    def test_opting_out_keeps_manual_on_the_api(self):
+        from app.commodity_agents.orchestrator import make_backend
+        _client, name = make_backend(
+            self._settings(COMMODITY_AGENT_MANUAL_BACKEND="api"), manual=True)
+        assert name == "api"
+
+
 class TestIvSample:
     """run_iv_sample: the LLM-free deterministic snapshot that feeds the
     Volatility Monitor chart on a faster cadence than the debate pipeline."""

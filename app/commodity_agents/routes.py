@@ -229,6 +229,37 @@ def service_worker() -> Response:
     return Response(SERVICE_WORKER_JS, media_type="application/javascript")
 
 
+@router.get("/backend")
+def backend_status(
+    x_admin_auth_token: str | None = Header(default=None),
+    zb_session: str | None = Cookie(default=None),
+) -> dict:
+    """What a manual Analyze press would cost, and whether it can run at all.
+
+    The shim lives on the VM host outside this container, so "configured" and
+    "reachable" are different questions — the UI needs both to explain a
+    failure before the user spends 90 seconds waiting for one.
+    """
+    _require_admin(x_admin_auth_token, zb_session)
+    from app.commodity_agents.llm_shim import shim_health
+    settings = get_settings()
+    url = settings.COMMODITY_AGENT_SHIM_URL
+    out: dict = {
+        "manual_backend": settings.COMMODITY_AGENT_MANUAL_BACKEND,
+        "shim_configured": bool(url and settings.COMMODITY_AGENT_SHIM_TOKEN),
+        "api_configured": bool(settings.ANTHROPIC_API_KEY),
+        "shim_model": settings.COMMODITY_AGENT_SHIM_MODEL,
+    }
+    out["shim"] = shim_health(url) if url else {"status": "not configured"}
+    out["effective"] = (
+        "shim" if out["shim_configured"]
+        and settings.COMMODITY_AGENT_MANUAL_BACKEND == "shim"
+        and out["shim"].get("status") == "ok"
+        else "api"
+    )
+    return out
+
+
 class RunRequest(BaseModel):
     commodity: str | None = None    # None = all four
 
@@ -252,16 +283,22 @@ def trigger_run(
         _last_manual_run[commodity] = now
 
     from app.commodity_agents.orchestrator import (
+        make_backend,
         run_all_commodities,
         run_commodity_pipeline_by_name,
     )
     settings = get_settings()
     factory = app_storage._factory
+    # Manual runs prefer the Claude Code shim (subscription, no marginal cost);
+    # the scheduled cadence stays on the API. Resolve the name here so the reply
+    # can say which one is about to be billed.
+    _, backend = make_backend(settings, manual=True)
     if commodity != "ALL":
-        background.add_task(run_commodity_pipeline_by_name, commodity, factory, settings)
+        background.add_task(run_commodity_pipeline_by_name, commodity, factory,
+                            settings, True)
     else:
-        background.add_task(run_all_commodities, factory, settings)
-    return {"status": "started", "commodity": commodity}
+        background.add_task(run_all_commodities, factory, settings, True)
+    return {"status": "started", "commodity": commodity, "backend": backend}
 
 
 # Pipeline stages in execution order; each maps to the AgentRun column that is
