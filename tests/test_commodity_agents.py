@@ -407,6 +407,47 @@ class TestDebateContext:
                                        datetime(2026, 7, 27, 20, 0, tzinfo=IST))
         assert len(out) == 3      # loss breaker + concurrency cap + zero margin
 
+    def test_a_full_book_still_gets_analysed_on_a_manual_press(self):
+        """Closing a position to make room is a decision only a person can
+        take, and taking it needs the read the gate would have suppressed."""
+        from unittest.mock import MagicMock
+
+        from app.commodity_agents import orchestrator as orch
+
+        session, settings, kite = MagicMock(), MagicMock(), MagicMock()
+        settings.MAX_DAILY_LOSS_ABS = 10000.0
+        settings.COMMODITY_MAX_CONCURRENT = 2
+        kite.margins.return_value = {"commodity": {"net": 250000.0}}
+        now = datetime(2026, 7, 27, 20, 0, tzinfo=IST)
+        with patch.object(orch, "_daily_realized_pnl", return_value=-500.0), \
+                patch.object(orch, "_open_commodity_count", return_value=2):
+            assert orch._capacity_block(session, settings, kite, "GOLDM", now,
+                                        manual=True) == []
+            # The scheduled cadence cannot rotate the book, so it still skips.
+            assert orch._capacity_block(session, settings, kite, "GOLDM",
+                                        now) != []
+
+    def test_manual_press_does_not_waive_the_other_capacity_reasons(self):
+        from unittest.mock import MagicMock
+
+        from app.commodity_agents import orchestrator as orch
+
+        session, settings, kite = MagicMock(), MagicMock(), MagicMock()
+        settings.MAX_DAILY_LOSS_ABS = 10000.0
+        settings.COMMODITY_MAX_CONCURRENT = 2
+        kite.margins.return_value = {
+            "commodity": {"net": 0.0, "available": {"live_balance": 5000.0},
+                          "utilised": {"debits": 5000.0}},
+        }
+        with patch.object(orch, "_daily_realized_pnl", return_value=-12000.0), \
+                patch.object(orch, "_open_commodity_count", return_value=5):
+            out = orch._capacity_block(session, settings, kite, "GOLDM",
+                                       datetime(2026, 7, 27, 20, 0, tzinfo=IST),
+                                       manual=True)
+        # Loss breaker and zero margin survive; only concurrency is waived.
+        assert len(out) == 2
+        assert not any("open commodity positions" in r for r in out)
+
     def test_capacity_gate_clear_when_there_is_room(self):
         from unittest.mock import MagicMock
 

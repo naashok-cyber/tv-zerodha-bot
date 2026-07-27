@@ -287,6 +287,7 @@ def run_commodity_pipeline(
     kite: Any,
     llm: LlmClient | None,
     now: datetime | None = None,
+    manual: bool = False,
 ) -> int | None:
     """Run the full pipeline for one commodity. Returns AgentRun.id (or None
     if it could not even start). Never raises — failures land in run.error."""
@@ -299,7 +300,8 @@ def run_commodity_pipeline(
         session.commit()
         run_id = run.id
         try:
-            _run_stages(run, session, settings, kite, llm, commodity, now)
+            _run_stages(run, session, settings, kite, llm, commodity, now,
+                        manual=manual)
         except Exception as exc:
             log.error("[commodity_agents] %s pipeline failed: %s", commodity, exc, exc_info=True)
             run.status = "FAILED"
@@ -437,6 +439,7 @@ def _compute_deterministic_snapshot(
 def _run_stages(
     run: AgentRun, session: Any, settings: Any, kite: Any,
     llm: LlmClient | None, commodity: str, now: datetime,
+    manual: bool = False,
 ) -> None:
     evs, blackout, candles, fut_price, cands, snap, quant = _compute_deterministic_snapshot(
         run, session, settings, kite, commodity, now)
@@ -466,7 +469,7 @@ def _run_stages(
     # structure the Judge picks, so if one is already failing, no debate can
     # produce an approved trade. Paying for four LLM calls to reach a veto we
     # can compute for free is the cheapest spend to cut.
-    blocked = _capacity_block(session, settings, kite, commodity, now)
+    blocked = _capacity_block(session, settings, kite, commodity, now, manual=manual)
     if blocked:
         run.status = "SKIPPED_REGIME"
         _persist_recommendation(
@@ -683,8 +686,8 @@ _VETO_PLAIN = (
 )
 
 
-def _capacity_block(session: Any, settings: Any, kite: Any,
-                    commodity: str, now: datetime) -> list[str]:
+def _capacity_block(session: Any, settings: Any, kite: Any, commodity: str,
+                    now: datetime, manual: bool = False) -> list[str]:
     """Risk-guard reasons that hold regardless of what the Judge decides.
 
     Deliberately a subset. Blackout and correlated-short-vega could be hoisted
@@ -692,7 +695,16 @@ def _capacity_block(session: Any, settings: Any, kite: Any,
     left downstream on purpose: this gate suppresses the analysis entirely, and
     a run that is going to be blocked is still worth reading for its regime and
     premium read. Only the checks that no amount of analysis could change
-    belong here."""
+    belong here.
+
+    The concurrency cap is the one reason a person can clear on the spot, by
+    closing something. On the scheduled cadence it still skips the run — the
+    cron cannot rotate the book, so paying for a debate whose answer cannot be
+    acted on is waste. A manual Analyze press is the opposite case: the
+    question being asked is "is this better than what I am already holding?",
+    which needs the analysis to actually run. It stays a hard veto in the
+    downstream risk guard either way, so a full book can never auto-approve.
+    """
     reasons: list[str] = []
 
     pnl = _daily_realized_pnl(session, now)
@@ -702,8 +714,14 @@ def _capacity_block(session: Any, settings: Any, kite: Any,
 
     open_count = _open_commodity_count(session, kite)
     if open_count >= settings.COMMODITY_MAX_CONCURRENT:
-        reasons.append(f"open commodity positions {open_count} >= "
-                       f"cap {settings.COMMODITY_MAX_CONCURRENT}")
+        if manual:
+            log.info("[commodity_agents] %s at the concurrency cap (%d >= %d) "
+                     "but this run is manual — analysing anyway so the read is "
+                     "available for a rotation decision", commodity, open_count,
+                     settings.COMMODITY_MAX_CONCURRENT)
+        else:
+            reasons.append(f"open commodity positions {open_count} >= "
+                           f"cap {settings.COMMODITY_MAX_CONCURRENT}")
 
     margin = _margin_available(kite, commodity)
     if margin is not None and margin <= 0:
@@ -787,7 +805,8 @@ def run_all_commodities(session_factory: Any, settings: Any,
         if not market_open(commodity, now):
             log.debug("[commodity_agents] %s market closed, skipping", commodity)
             continue
-        run_commodity_pipeline(commodity, session_factory, settings, kite, llm)
+        run_commodity_pipeline(commodity, session_factory, settings, kite, llm,
+                               manual=manual)
 
 
 def run_all_iv_samples(session_factory: Any, settings: Any) -> None:
@@ -963,4 +982,5 @@ def run_commodity_pipeline_by_name(commodity: str, session_factory: Any, setting
     llm, backend = make_backend(settings, manual=manual)
     log.info("[commodity_agents] %s run starting on the %s backend (manual=%s)",
              commodity, backend, manual)
-    run_commodity_pipeline(commodity, session_factory, settings, kite, llm)
+    run_commodity_pipeline(commodity, session_factory, settings, kite, llm,
+                           manual=manual)
