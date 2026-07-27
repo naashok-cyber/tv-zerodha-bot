@@ -716,6 +716,21 @@ class TestBackendSelection:
             self._settings(COMMODITY_AGENT_MANUAL_BACKEND="api"), manual=True)
         assert name == "api"
 
+    def test_a_dead_shim_never_silently_bills_the_api(self):
+        """The point of this backend is to not spend API money. A configured
+        shim that happens to be down must break the button, not open a bill."""
+        from app.commodity_agents.llm_client import LlmError
+        from app.commodity_agents.orchestrator import make_backend
+        client, name = make_backend(self._settings(), manual=True)
+        assert name == "shim"
+
+        def dead(_payload):
+            raise LlmError("shim call failed: connection refused")
+
+        client._post = dead
+        with pytest.raises(LlmError, match="connection refused"):
+            client.run("judge", "s", "u")
+
 
 class TestIvSample:
     """run_iv_sample: the LLM-free deterministic snapshot that feeds the

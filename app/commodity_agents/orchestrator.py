@@ -759,9 +759,14 @@ def _make_shim(settings: Any) -> Any:
 def make_backend(settings: Any, manual: bool) -> tuple[Any, str]:
     """Pick the LLM backend and report which one, so the caller can say so.
 
-    Scheduled runs always use the metered API. Manual runs prefer the shim
-    (subscription, no marginal cost) and fall back to the API if it isn't
-    configured — a user pressing Analyze wants an answer, not a config lecture.
+    Scheduled runs always use the metered API. Manual runs prefer the shim.
+
+    The fallback is deliberately narrow: it fires only when the shim is
+    UNCONFIGURED (no URL/token), which is a fresh-deploy state, never a
+    running-system state. A configured-but-unreachable shim does NOT fall
+    back — the run fails instead. That asymmetry is the point: the whole
+    reason this backend exists is to not spend API money, so a dead service
+    must surface as a broken button, not as a silent bill.
     """
     if manual and settings.COMMODITY_AGENT_MANUAL_BACKEND == "shim":
         shim = _make_shim(settings)

@@ -438,8 +438,10 @@ if(d.effective==='shim'){
 el.innerHTML='Runs on this machine&#8217;s Claude Code subscription ('+esc(d.shim_model)+
 ') &#8212; no API charge.';return}
 if(d.manual_backend==='shim'&&d.shim_configured){
-el.innerHTML='<span style="color:var(--amber)">Claude Code bridge unreachable ('+
-esc((d.shim||{}).error||'no response')+') &#8212; falling back to the paid API.</span>';return}
+el.innerHTML='<span style="color:var(--amber)">Claude Code bridge is down ('+
+esc((d.shim||{}).error||'no response')+'). Analyze will fail until it is back &#8212; '+
+'it will NOT quietly switch to the paid API. Fix on the VM with: '+
+'<code>sudo systemctl restart claude-shim</code></span>';return}
 el.innerHTML='Runs on the paid Anthropic API'+(d.api_configured?'.':
 ' <span style="color:var(--red)">&#8212; but no API key is set, so runs will fail.</span>')}
 renderChips();loadBackend();
