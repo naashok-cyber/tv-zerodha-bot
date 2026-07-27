@@ -23,6 +23,13 @@ Safety non-negotiables (do not weaken):
 - Risk Guard veto is final; vetoed recs cannot be approved via the API.
 - `enforce_gap_risk_gate` downgrades short premium to NO_TRADE in CODE when the
   event agent flags high gap risk.
+- `enforce_trend_gate` downgrades short premium to NO_TRADE in CODE on a
+  trending tape — naked structures first, everything at/above
+  `COMMODITY_TREND_BLOCK_ADX`.
+- The Judge has **no long side**. `direction` is SELL or NO_TRADE; there is no
+  `long_call`/`long_put`. This desk sells premium, so a directional view is a
+  reason to stand aside, never a trade. Re-adding a long branch would also
+  silently weaken the risk gates, which are allowed to assume short premium.
 - All flags default OFF: `COMMODITY_AGENTS_ENABLED`, `COMMODITY_AGENTS_LIVE`.
 - Every pipeline stage persists to `AgentRun` (audit trail mandatory).
 
@@ -168,8 +175,10 @@ New **capacity gate** (`orchestrator._capacity_block`) runs the
 strategy-independent risk-guard checks (daily-loss breaker, concurrent-position
 cap, zero margin) *before* the debate: if one is already failing, no debate
 outcome could be approved, so the four LLM calls are skipped. Deliberately a
-subset — blackout and correlated-short-vega only bite short premium and the
-Judge may answer with a long option, so those stay downstream.
+subset — blackout and correlated-short-vega stay downstream, because this gate
+suppresses the whole analysis and a run that will be blocked is still worth
+reading for its regime and premium read. (Wave 7 revised the reason: the Judge
+no longer answers with long options, so that is no longer why.)
 
 **Readability + persistence.** `_JUDGE_SCHEMA` gained `headline` (one
 plain-English sentence < 110 chars, jargon words explicitly banned) and
@@ -308,6 +317,53 @@ pattern, and is why the scheduled path was deliberately left on the API.
 - Local PC has no Kite session — pipeline runs need the VM or the stubbed
   harness (scratchpad `ui_demo.py`, recreate `.claude/launch.json` pointing at
   it for browser checks; delete after).
+
+### Wave 7 — one question, and a gate that had been stuck shut (2026-07-27)
+
+**The capacity gate was vetoing every run on a flat book.** Three checks read
+state that was stale or simply the wrong field:
+
+- `_open_commodity_count` counted every `Position` row ever written. Rows are
+  never deleted, so once a second underlying had traded the count sat at or
+  above `COMMODITY_MAX_CONCURRENT` permanently. Production showed 4 counted
+  against a cap of 2 with **zero** genuinely open positions.
+- `_open_group_shorts` had the same defect on the correlated-short-vega veto.
+- `_margin_available` read `margins["commodity"]["net"]`, a flat zero on
+  accounts that have not segregated commodity funds — the whole ledger reports
+  under `equity` there. Production read commodity net=0 with zero utilisation
+  while 5 short MCX legs were open against ₹7.9L of equity margin in use.
+
+Both counts now read `kite.positions()` first (the DB has drifted from the
+broker in *both* directions); the DB path survives as a fallback and finally
+carries the `ClosedTrade`/`dry_run` filters it always needed. Margin falls back
+to equity only when the commodity segment shows no balance **and** no
+utilisation, which a genuinely segregated account can never do.
+
+**The verdict is now a short-premium yes/no.** Two conditions decide it, stated
+as rule 0 in `_JUDGE_RULES`: premium must be rich (meaningful VRP), and the tape
+must be choppy rather than trending. The trend half was the real gap — the
+classifier computed `label` and `adx` but nothing acted on them, and rule 1
+actively demoted the Trend agent's flag to non-binding evidence, so a trending
+tape with rich premium could return a naked short. That is the setup that
+produces a short straddle's worst loss, because the loss compounds as the move
+extends. `enforce_trend_gate` backs the prompt with code in two tiers: while
+trending, naked structures are removed but a defined-risk `iron_fly` survives
+(its loss stops growing past the wing); at or above `COMMODITY_TREND_BLOCK_ADX`
+(32) nothing short is allowed regardless of label or structure.
+
+**A manual Analyze press works on a full book.** The concurrency cap is the one
+capacity reason a person can clear on the spot, by closing something, so
+suppressing the analysis for it answered the wrong question — a short-premium
+trader pressing Analyze on a full book is asking whether the new setup beats
+what they already hold. Manual runs analyse through the cap; the scheduled
+cadence still skips it, since a cron cannot rotate the book. It remains a hard
+veto in the downstream risk guard for both, so a full book still cannot
+auto-approve.
+
+Live proof (CRUDEOILM, 2026-07-27 21:39 IST, shim backend, run #4058): manual
+run cleared the cap, regime `trending` at ADX 39.2, and the Judge returned
+NO_TRADE citing rule 0b — *with* VRP at +11.6 and IV/RV 1.21, i.e. it declined
+rich premium because of the trend, which is the whole point of the wave.
 
 ## 6. Quick reference
 
