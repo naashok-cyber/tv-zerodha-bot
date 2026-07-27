@@ -326,7 +326,14 @@ class TestDebateContext:
         session, settings, kite = MagicMock(), MagicMock(), MagicMock()
         settings.MAX_DAILY_LOSS_ABS = 10000.0
         settings.COMMODITY_MAX_CONCURRENT = 2
-        kite.margins.return_value = {"commodity": {"net": 0.0}}
+        # A segregated commodity ledger that is fully deployed: no free margin
+        # left, but the segment is plainly in use, so it is the ledger to read.
+        kite.margins.return_value = {
+            "commodity": {"net": 0.0,
+                          "available": {"live_balance": 250000.0},
+                          "utilised": {"debits": 250000.0}},
+            "equity": {"net": 900000.0},
+        }
         with patch.object(orch, "_daily_realized_pnl", return_value=-12000.0), \
                 patch.object(orch, "_open_commodity_count", return_value=3):
             out = orch._capacity_block(session, settings, kite, "GOLDM",
@@ -347,6 +354,77 @@ class TestDebateContext:
             assert orch._capacity_block(
                 session, settings, kite, "GOLDM",
                 datetime(2026, 7, 27, 20, 0, tzinfo=IST)) == []
+
+    def test_a_flat_broker_book_never_reads_as_full(self):
+        """Closed Position rows are never deleted, so a DB-only count grows
+        monotonically and eventually pins the gate shut on a flat book."""
+        from unittest.mock import MagicMock
+
+        from app.commodity_agents import orchestrator as orch
+
+        session, kite = MagicMock(), MagicMock()
+        kite.positions.return_value = {"net": [
+            {"exchange": "MCX", "tradingsymbol": "CRUDEOILM26AUG7500CE", "quantity": 0},
+            {"exchange": "MCX", "tradingsymbol": "NATURALGAS26AUGFUT", "quantity": 0},
+        ]}
+        assert orch._open_commodity_count(session, kite) == 0
+        session.query.assert_not_called()
+
+    def test_open_count_is_per_underlying_not_per_leg(self):
+        from unittest.mock import MagicMock
+
+        from app.commodity_agents import orchestrator as orch
+
+        session, kite = MagicMock(), MagicMock()
+        kite.positions.return_value = {"net": [
+            {"exchange": "MCX", "tradingsymbol": "CRUDEOILM26AUG7500CE", "quantity": -5},
+            {"exchange": "MCX", "tradingsymbol": "CRUDEOILM26AUG8200PE", "quantity": -3},
+            {"exchange": "NFO", "tradingsymbol": "BANKNIFTY26JUL57500CE", "quantity": 30},
+            # CRUDEOIL is a prefix of CRUDEOILM — must not count as a third.
+            {"exchange": "MCX", "tradingsymbol": "CRUDEOILM26AUGFUT", "quantity": 1},
+        ]}
+        assert orch._open_commodity_count(session, kite) == 2
+
+    def test_group_shorts_read_short_legs_from_the_broker(self):
+        from unittest.mock import MagicMock
+
+        from app.commodity_agents import orchestrator as orch
+
+        session, kite = MagicMock(), MagicMock()
+        kite.positions.return_value = {"net": [
+            {"exchange": "MCX", "tradingsymbol": "NATURALGAS26AUG300CE", "quantity": -1},
+            {"exchange": "MCX", "tradingsymbol": "GOLDM26AUG80000CE", "quantity": -1},
+        ]}
+        # NATURALGAS shares the energy group with CRUDEOILM; GOLDM does not.
+        assert orch._open_group_shorts(session, "CRUDEOILM", kite) == 1
+        # A long leg is not short-vega exposure.
+        kite.positions.return_value = {"net": [
+            {"exchange": "MCX", "tradingsymbol": "NATURALGAS26AUG300CE", "quantity": 1},
+        ]}
+        assert orch._open_group_shorts(session, "CRUDEOILM", kite) == 0
+
+    def test_pooled_ledger_is_not_mistaken_for_an_empty_account(self):
+        """Unsegregated accounts report everything under equity; the commodity
+        segment then reads all-zero even with MCX positions open."""
+        from unittest.mock import MagicMock
+
+        from app.commodity_agents import orchestrator as orch
+
+        kite = MagicMock()
+        kite.margins.return_value = {
+            "equity": {"net": 1420867.55,
+                       "available": {"live_balance": 1420867.55},
+                       "utilised": {"debits": 787873.74}},
+            "commodity": {"net": 0, "available": {"live_balance": 0},
+                          "utilised": {"debits": 0}},
+        }
+        assert orch._margin_available(kite, "CRUDEOILM") == 1420867.55
+        # A segregated commodity ledger with real usage is read as-is.
+        kite.margins.return_value["commodity"] = {
+            "net": 0.0, "available": {"live_balance": 250000.0},
+            "utilised": {"debits": 250000.0},
+        }
+        assert orch._margin_available(kite, "CRUDEOILM") == 0.0
 
     def test_unmapped_veto_reason_survives_verbatim(self):
         from app.commodity_agents.orchestrator import _plain_summary

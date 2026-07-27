@@ -34,8 +34,9 @@ from app.commodity_agents.models import (
 )
 from app.commodity_agents.storage import AgentRun, CommodityRecommendation
 from app.config import IST
+from app.delta_hedge import _matches_underlying
 from app.orders import throttled_quote_call
-from app.storage import Position
+from app.storage import ClosedTrade, Order, Position
 
 log = logging.getLogger(__name__)
 
@@ -127,34 +128,85 @@ def _daily_realized_pnl(session: Any, now: datetime) -> float:
     return float(total or 0.0)
 
 
-def _open_commodity_count(session: Any) -> int:
+def _open_commodity_count(session: Any, kite: Any = None) -> int:
+    """Distinct tracked underlyings that currently hold an open leg.
+
+    The broker is the source of truth. The Position table drifts from it in
+    both directions — it has held rows for legs the broker no longer has, and
+    missed legs the broker does have — so a count taken from the DB can block
+    trading on a flat book. The DB path stays as a fallback for when
+    positions() is unavailable, and it must exclude rows that already have a
+    ClosedTrade: without that filter every underlying ever traded counts as
+    open forever and the capacity gate never reopens.
+    """
+    if kite is not None:
+        try:
+            legs = kite.positions().get("net", []) or []
+        except Exception as exc:
+            log.warning("[commodity_agents] positions() unavailable for the "
+                        "capacity count, falling back to the DB: %s", exc)
+        else:
+            return len({
+                name for name in COMMODITIES
+                if any(p.get("quantity")
+                       and _matches_underlying(p.get("tradingsymbol") or "", name)
+                       for p in legs)
+            })
+
     rows = (
         session.query(Position.underlying)
+        .join(Order, Position.order_id == Order.id)
+        .outerjoin(ClosedTrade, Position.id == ClosedTrade.position_id)
         .filter(Position.exchange.in_(["MCX", "MCX-OPT", "NFO"]),
-                Position.underlying.in_(list(COMMODITIES)))
+                Position.underlying.in_(list(COMMODITIES)),
+                ClosedTrade.id == None,      # noqa: E711
+                Order.dry_run == False)      # noqa: E712
         .distinct()
         .all()
     )
     return len(rows)
 
 
-def _open_group_shorts(session: Any, commodity: str) -> int:
-    """Distinct OTHER underlyings in the same correlation group with open
-    short option positions (Order.transaction_type == SELL)."""
+def _open_group_shorts(session: Any, commodity: str, kite: Any = None) -> int:
+    """Distinct OTHER underlyings in the same correlation group carrying open
+    short option legs.
+
+    Broker-first for the same reason as _open_commodity_count: a short leg the
+    DB never marked closed would otherwise veto the whole correlation group
+    forever. On the broker side a short is simply a negative net quantity.
+    """
     group = group_for(commodity)
     if group is None:
         return 0
-    from app.storage import Order
     members = [m for m in CORRELATION_GROUPS[group] if m != commodity]
     if not members:
         return 0
+
+    if kite is not None:
+        try:
+            legs = kite.positions().get("net", []) or []
+        except Exception as exc:
+            log.warning("[commodity_agents] positions() unavailable for the "
+                        "correlation check, falling back to the DB: %s", exc)
+        else:
+            return len({
+                name for name in members
+                if any(int(p.get("quantity") or 0) < 0
+                       and (p.get("tradingsymbol") or "").endswith(("CE", "PE"))
+                       and _matches_underlying(p.get("tradingsymbol") or "", name)
+                       for p in legs)
+            })
+
     rows = (
         session.query(Position.underlying)
         .join(Order, Position.order_id == Order.id)
+        .outerjoin(ClosedTrade, Position.id == ClosedTrade.position_id)
         .filter(
             Position.underlying.in_(members),
             Position.instrument_type.in_(["CE", "PE"]),
             Order.transaction_type == "SELL",
+            ClosedTrade.id == None,      # noqa: E711
+            Order.dry_run == False,      # noqa: E712
         )
         .distinct()
         .all()
@@ -162,13 +214,38 @@ def _open_group_shorts(session: Any, commodity: str) -> int:
     return len(rows)
 
 
+def _segment_in_use(seg: dict) -> bool:
+    """True when a margin segment shows any balance or any utilisation."""
+    used = float((seg.get("utilised") or {}).get("debits") or 0.0)
+    avail = float((seg.get("available") or {}).get("live_balance") or 0.0)
+    return bool(used or avail)
+
+
 def _margin_available(kite: Any, commodity: str) -> float | None:
+    """Free margin in the segment this underlying trades against.
+
+    Accounts that have not segregated commodity funds are reported by Kite as
+    one pooled ledger under "equity"; their "commodity" segment reads zero
+    across balance AND utilisation even while MCX positions are open and
+    consuming margin. Reading that zero as "no funds" blocks every MCX trade
+    permanently, so a completely idle commodity segment is taken to mean the
+    funds live elsewhere and equity is consulted instead. A segregated account
+    that genuinely holds commodity funds always trips _segment_in_use, so the
+    fallback cannot fire on one.
+    """
     segment = "equity" if commodity in INDEX_UNDERLYINGS else "commodity"
     try:
         margins = kite.margins()
-        return float(margins[segment]["net"])
+        seg = margins[segment] or {}
+        net = float(seg["net"])
     except Exception:
         return None
+    if segment == "commodity" and net <= 0 and not _segment_in_use(seg):
+        try:
+            return float(margins["equity"]["net"])
+        except Exception:
+            return None
+    return net
 
 
 def _margin_required_basket(kite: Any, commodity: str, ce: Any, pe: Any,
@@ -466,11 +543,11 @@ def _run_stages(
             lots=1,   # advisory sizing; actual lots decided at approval time
             est_max_loss_per_lot=est_loss,
             daily_realized_pnl=_daily_realized_pnl(session, now),
-            open_commodity_count=_open_commodity_count(session),
+            open_commodity_count=_open_commodity_count(session, kite),
             margin_available=margin_available,
             margin_required=margin_required,
             blackout=blackout,
-            open_group_shorts=_open_group_shorts(session, commodity),
+            open_group_shorts=_open_group_shorts(session, commodity, kite),
             group_name=group_for(commodity),
         ),
     )
@@ -618,7 +695,7 @@ def _capacity_block(session: Any, settings: Any, kite: Any,
         reasons.append(f"daily loss circuit breaker: realized {pnl:.0f} "
                        f"vs cap -{settings.MAX_DAILY_LOSS_ABS:.0f}")
 
-    open_count = _open_commodity_count(session)
+    open_count = _open_commodity_count(session, kite)
     if open_count >= settings.COMMODITY_MAX_CONCURRENT:
         reasons.append(f"open commodity positions {open_count} >= "
                        f"cap {settings.COMMODITY_MAX_CONCURRENT}")
