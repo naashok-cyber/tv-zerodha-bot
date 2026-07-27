@@ -4,10 +4,17 @@ Every agent must return structured JSON with an explicit confidence and a
 falsifier ("what would change my mind") — falsifiability is what makes the
 reasoning trail auditable after the fact.
 
-Two rules are enforced in CODE, not just in the Judge's prompt:
+Three rules are enforced in CODE, not just in the Judge's prompt:
   * if the event agent flags gap_risk == "high", any short-premium
     recommendation is downgraded to NO_TRADE;
+  * a trending tape blocks short premium (naked first, then everything once
+    the trend is very strong) — see enforce_trend_gate;
   * dissenting views are always carried into the final output.
+
+This desk sells premium only. The Judge's schema has no BUY side and no long
+option strategies: a directional view is a reason to stand aside, not a trade,
+so the two questions that decide every run are "is the premium rich?" and "is
+the tape choppy rather than trending?".
 """
 from __future__ import annotations
 
@@ -23,7 +30,12 @@ from app.commodity_agents.llm_client import (
     LlmClient,
     LlmError,
 )
-from app.commodity_agents.models import EventWindow, RegimeSnapshot, StrikeCandidate
+from app.commodity_agents.models import (
+    TRENDING,
+    EventWindow,
+    RegimeSnapshot,
+    StrikeCandidate,
+)
 
 # Per-commodity trading character (Section 2 of the design brief) — injected
 # into every prompt so the agents reason about THIS commodity, not a generic one.
@@ -266,8 +278,8 @@ _JUDGE_SCHEMA = """Return ONLY a valid JSON object:
                       jargon. Translate the numbers instead of quoting them:
                       say 'the market is pricing bigger swings than it has
                       actually been making' rather than 'VRP +14 pts'.>"],
-  "direction": "BUY" | "SELL" | "NO_TRADE",
-  "strategy_type": "short_straddle" | "short_strangle" | "iron_fly" | "long_call" | "long_put" | "none",
+  "direction": "SELL" | "NO_TRADE",
+  "strategy_type": "short_straddle" | "short_strangle" | "iron_fly" | "none",
   "strikes": [<tradingsymbols chosen from the provided candidates>],
   "confidence": <float 0.0-1.0>,
   "reasoning_summary": "<3-5 sentences of desk-level detail; jargon allowed here — this is the audit trail>",
@@ -276,9 +288,27 @@ _JUDGE_SCHEMA = """Return ONLY a valid JSON object:
 
 
 _JUDGE_RULES = (
-    "You are the Judge on a commodity options desk. Synthesize the three "
-    "debate outputs into ONE recommendation for an experienced short-"
-    "premium options trader. Rules:\n"
+    "You are the Judge on a commodity options desk. The desk sells premium "
+    "and does nothing else — there is exactly ONE question to answer: is "
+    "this a setup to sell a straddle/strangle into, yes or no? Never "
+    "recommend buying options outright; a bullish or bearish directional "
+    "view is only ever a reason to stand aside, never a trade of its own. "
+    "Rules:\n"
+    "0. The two conditions that decide it:\n"
+    "   (a) PREMIUM must be rich — the market pricing bigger moves than "
+    "this has actually been making (positive, meaningful VRP; IV high in "
+    "its own history). Thin or negative VRP is NO_TRADE no matter how calm "
+    "the tape looks; you are not paid enough to carry the tail.\n"
+    "   (b) The tape must be CHOPPY, not trending. A strong directional "
+    "trend — up or down, it does not matter which — is the single way a "
+    "short straddle takes its worst loss, because the loss compounds as "
+    "the move extends. Rich premium in a trending tape is rich for a "
+    "reason. When the regime is trending, do not sell a naked straddle or "
+    "strangle: either answer NO_TRADE, or, only if the premium is "
+    "genuinely exceptional, an iron_fly whose wings cap the loss. A code "
+    "rule downstream enforces NO_TRADE outright once the trend is very "
+    "strong, so do not spend confidence arguing past it.\n"
+    "   Choppy plus rich = the trade. Anything else = NO_TRADE.\n"
     "1. ONLY the Event/Gap-Risk agent's risk_flag can block short premium, "
     "and only when it is exactly 'high'. This is enforced in code "
     "downstream. A 'high' from the Trend or Vol agent is EVIDENCE TO "
@@ -289,8 +319,9 @@ _JUDGE_RULES = (
     "3. strikes must come from the provided candidates only.\n"
     "4. NO_TRADE is a legitimate answer but it is NOT the safe default. "
     "Choose it when the setup is genuinely unattractive: thin or negative "
-    "VRP, a named near-term threat the market has not priced, or limits "
-    "that plainly cannot be met. Do NOT choose it merely because the "
+    "VRP, a strong directional trend (rule 0b), a named near-term threat "
+    "the market has not priced, or limits that plainly cannot be met. "
+    "Do NOT choose it merely because the "
     "agents disagree — disagreement is the normal output of an adversarial "
     "debate. A rich VRP with 'medium' flags on both sides is a TRADE, "
     "sized down, not a pass.\n"
@@ -388,6 +419,57 @@ def split_full_debate(out: dict) -> tuple[dict, dict, dict, dict]:
 
 
 SHORT_PREMIUM_TYPES = {"short_straddle", "short_strangle", "short_call", "short_put", "iron_fly"}
+
+
+NAKED_SHORT_TYPES = {"short_straddle", "short_strangle", "short_call", "short_put"}
+
+
+def enforce_trend_gate(judge_out: dict, regime: RegimeSnapshot,
+                       strong_adx: float) -> dict:
+    """Code-level enforcement: a trending tape is no place to be short gamma.
+
+    Two tiers, because the two cases are not the same trade. Above
+    `strong_adx` the move is established enough that even capped wings are a
+    poor bet, so nothing short is allowed. Between the classifier's own
+    trending threshold and `strong_adx` the naked structures are removed but
+    a defined-risk iron_fly survives — its loss stops growing once the move
+    clears the wing, which is the specific failure this gate exists to stop.
+    """
+    adx = regime.adx
+    strategy = judge_out.get("strategy_type")
+    if strategy not in SHORT_PREMIUM_TYPES or adx is None:
+        return judge_out
+
+    very_strong = adx >= strong_adx
+    trending = regime.label == TRENDING
+    if not trending and not very_strong:
+        return judge_out
+    if not very_strong and strategy not in NAKED_SHORT_TYPES:
+        return judge_out          # capped wings are allowed in a mild trend
+
+    gated = dict(judge_out)
+    gated["direction"] = "NO_TRADE"
+    gated["strategy_type"] = "none"
+    gated["headline"] = (
+        "Standing aside — this market is trending too hard to sell options into."
+    )
+    gated["plain_reasons"] = [
+        "Price is moving persistently in one direction rather than chopping "
+        "around, and a sold straddle loses more the further that run goes.",
+        "Premium can look generous in a tape like this precisely because the "
+        "risk is real, so a rich price is not a reason to sell it.",
+        "This block is applied by a fixed rule, not by judgement, so it "
+        "cannot be argued around.",
+    ]
+    gated["reasoning_summary"] = (
+        f"OVERRIDDEN IN CODE: trend gate (ADX {adx:.1f}, regime "
+        f"{regime.label}) blocks {strategy}. Original judge reasoning: "
+        + str(judge_out.get("reasoning_summary", ""))
+    )
+    dissent = list(judge_out.get("dissenting_views") or [])
+    dissent.append(f"Judge originally recommended {strategy} with ADX {adx:.1f}")
+    gated["dissenting_views"] = dissent
+    return gated
 
 
 def enforce_gap_risk_gate(judge_out: dict, event_out: dict) -> dict:

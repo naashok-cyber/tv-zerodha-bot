@@ -509,6 +509,8 @@ def _run_stages(
         judge_out = debate.run_judge(llm, ctx, trend_out, event_out, vol_out)
 
     judge_out = debate.enforce_gap_risk_gate(judge_out, event_out)
+    judge_out = debate.enforce_trend_gate(judge_out, snap,
+                                          settings.COMMODITY_TREND_BLOCK_ADX)
     run.judge_json = json.dumps(judge_out)
     session.commit()
 
@@ -685,9 +687,12 @@ def _capacity_block(session: Any, settings: Any, kite: Any,
                     commodity: str, now: datetime) -> list[str]:
     """Risk-guard reasons that hold regardless of what the Judge decides.
 
-    Deliberately a subset: blackout and correlated-short-vega only bite short
-    premium, and the Judge may legitimately answer with a long option, so they
-    stay downstream where the strategy is known."""
+    Deliberately a subset. Blackout and correlated-short-vega could be hoisted
+    here now that the Judge only ever answers SELL or NO_TRADE, but they are
+    left downstream on purpose: this gate suppresses the analysis entirely, and
+    a run that is going to be blocked is still worth reading for its regime and
+    premium read. Only the checks that no amount of analysis could change
+    belong here."""
     reasons: list[str] = []
 
     pnl = _daily_realized_pnl(session, now)

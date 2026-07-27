@@ -254,6 +254,73 @@ class TestGapRiskGate:
         assert out["plain_reasons"] != judge["plain_reasons"]
 
 
+class TestTrendGate:
+    """A trending tape is how a sold straddle takes its worst loss, so the
+    trend veto is enforced in code rather than left to the Judge's prompt."""
+
+    @staticmethod
+    def _snap(label, adx):
+        from app.commodity_agents.models import RegimeSnapshot
+        return RegimeSnapshot(label=label, adx=adx, bb_width_pct=None,
+                              realized_vol=None, atm_iv=None, iv_rv_ratio=None,
+                              iv_percentile=None)
+
+    @staticmethod
+    def _judge(strategy="short_straddle"):
+        return {"direction": "SELL", "strategy_type": strategy,
+                "strikes": ["X"], "confidence": 0.9,
+                "reasoning_summary": "premium is rich", "dissenting_views": [],
+                "headline": "Sell it.", "plain_reasons": ["Options look dear."]}
+
+    def test_range_bound_is_left_alone(self):
+        out = debate.enforce_trend_gate(self._judge(), self._snap(RANGE_BOUND, 14.0), 32.0)
+        assert out["direction"] == "SELL"
+
+    def test_trend_blocks_a_naked_straddle(self):
+        out = debate.enforce_trend_gate(self._judge(), self._snap(TRENDING, 27.0), 32.0)
+        assert out["direction"] == "NO_TRADE"
+        assert out["strategy_type"] == "none"
+        assert any("ADX 27.0" in d for d in out["dissenting_views"])
+        # Rich premium is not a counter-argument; the headline must say so.
+        assert "trending" in out["headline"].lower()
+
+    def test_mild_trend_still_allows_capped_wings(self):
+        out = debate.enforce_trend_gate(self._judge("iron_fly"),
+                                        self._snap(TRENDING, 27.0), 32.0)
+        assert out["strategy_type"] == "iron_fly"
+
+    def test_very_strong_trend_blocks_even_an_iron_fly(self):
+        out = debate.enforce_trend_gate(self._judge("iron_fly"),
+                                        self._snap(TRENDING, 38.0), 32.0)
+        assert out["direction"] == "NO_TRADE"
+
+    def test_very_strong_adx_blocks_whatever_the_label_says(self):
+        # The classifier ranks high-vol-expansion above trending, so a violent
+        # directional blowout carries a different label with the same danger.
+        out = debate.enforce_trend_gate(self._judge(),
+                                        self._snap(HIGH_VOL_EXPANSION, 41.0), 32.0)
+        assert out["direction"] == "NO_TRADE"
+
+    def test_missing_adx_leaves_the_verdict_to_the_judge(self):
+        # Too few candles to compute ADX. Inventing a trend reading either way
+        # would be worse than deferring to the debate that already ran.
+        judge = self._judge()
+        assert debate.enforce_trend_gate(judge, self._snap(TRENDING, None), 32.0) is judge
+
+    def test_no_trade_verdicts_pass_through_untouched(self):
+        judge = self._judge("none")
+        assert debate.enforce_trend_gate(judge, self._snap(TRENDING, 40.0), 32.0) is judge
+
+    def test_judge_schema_offers_no_long_side(self):
+        # The desk sells premium only — a directional view is a reason to
+        # stand aside, never a trade of its own.
+        assert "long_call" not in debate._JUDGE_SCHEMA
+        assert "long_put" not in debate._JUDGE_SCHEMA
+        assert '"BUY"' not in debate._JUDGE_SCHEMA
+        for brief in (debate._JUDGE_RULES, debate.run_full_debate.__doc__ or ""):
+            assert "long_call" not in brief
+
+
 # ── context slicing (token budget) ───────────────────────────────────────────
 
 class TestDebateContext:

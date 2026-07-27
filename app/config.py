@@ -447,6 +447,10 @@ class Settings(BaseSettings):
     COMMODITY_MAX_CONCURRENT: int = 2
     COMMODITY_MAX_MARGIN_UTIL_PCT: float = 60.0
     COMMODITY_AGENT_MAX_LOTS: int = 5
+    # ADX at which a trend is "very strong" and even a defined-risk short is
+    # refused. Between the classifier's own trending threshold (25) and this,
+    # only capped structures (iron_fly) survive the gate.
+    COMMODITY_TREND_BLOCK_ADX: float = 32.0
     COMMODITY_NOTIFY_MIN_CONFIDENCE: float = 0.6   # Telegram push threshold
     COMMODITY_DELTA_ALERT_THRESHOLD: float = 0.20  # straddle net delta/lot drift alert
 
