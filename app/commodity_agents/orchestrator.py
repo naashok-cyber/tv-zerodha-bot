@@ -471,17 +471,14 @@ def _run_stages(
     # can compute for free is the cheapest spend to cut.
     blocked = _capacity_block(session, settings, kite, commodity, now, manual=manual)
     if blocked:
-        run.status = "SKIPPED_REGIME"
-        _persist_recommendation(
-            session, run, commodity, now,
-            direction="NO_TRADE", strategy_type="none", strikes_syms=[],
-            confidence=1.0,
-            reasoning="Capacity gate: " + "; ".join(blocked) + " — debate skipped.",
-            dissent=[], risk_vetoed=False, settings=settings,
-            headline="No room for a new trade right now, so we skipped the analysis.",
-            plain_reasons=[next((text for key, text in _VETO_PLAIN
-                                 if b.startswith(key)), b) for b in blocked],
-        )
+        # No recommendation row: nothing was analysed, so there is no verdict to
+        # record. Writing one would also displace the last real analysis, since
+        # the UI reads the newest run — a scheduled skip every 30 minutes would
+        # permanently bury a result the user asked for by hand.
+        run.status = "SKIPPED_CAPACITY"
+        run.error = "Capacity gate: " + "; ".join(blocked) + " — debate skipped."
+        session.commit()
+        log.info("[commodity_agents] %s skipped, no room: %s", commodity, blocked)
         return
 
     if llm is None:

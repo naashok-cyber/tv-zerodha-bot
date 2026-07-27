@@ -916,6 +916,13 @@ class TestDeskEnhancements:
         from app.commodity_agents.dashboard import ANALYZE_HTML
         assert "URLSearchParams" in ANALYZE_HTML
 
+    def test_analyze_page_handles_a_capacity_skip(self, settings_paper):
+        from app.commodity_agents.dashboard import ANALYZE_HTML
+        assert "capacity_skip" in ANALYZE_HTML
+        # A skipped run is absent from `run`, so the poller has to end on the
+        # skip itself or it spins forever with the Analyze button disabled.
+        assert "capacityStopped(cs)" in ANALYZE_HTML
+
     def test_recommendations_include_last_runs(self, db_factory, settings_paper):
         now = datetime.now(IST)
         with db_factory() as s:
@@ -927,6 +934,29 @@ class TestDeskEnhancements:
         assert lr["status"] == "FAILED"
         assert "no text content" in lr["error"]
         assert out["last_runs"]["GOLDM"] is None
+
+    def test_capacity_skip_rows_never_become_the_card(self, db_factory,
+                                                      settings_paper):
+        # Historical skips wrote a "no room for a new trade" recommendation.
+        # Joined to their run they are recognisable as non-analyses.
+        now = datetime.now(IST)
+        with db_factory() as s:
+            for rid, status, age, head in (("c-real", "COMPLETED", 4, "Sell it."),
+                                           ("c-skip", "SKIPPED_CAPACITY", 0, "No room.")):
+                started = now - timedelta(hours=age)
+                run = AgentRun(run_id=rid, commodity="GOLDM",
+                               started_at=started, status=status)
+                s.add(run)
+                s.commit()
+                s.add(CommodityRecommendation(
+                    run_pk=run.id, commodity="GOLDM", created_at=started,
+                    direction="NO_TRADE", strategy_type="none", strikes_json="[]",
+                    confidence=1.0, reasoning_summary="x", headline=head,
+                    plain_reasons_json="[]", dissent_json="[]",
+                    risk_vetoed=False, status="PROPOSED"))
+            s.commit()
+        out = routes.latest_recommendations(x_admin_auth_token=TOKEN)
+        assert out["recommendations"]["GOLDM"]["headline"] == "Sell it."
 
 
 # ── stored analysis stays visible for a day ──────────────────────────────────
@@ -977,6 +1007,45 @@ class TestAnalysisPersistence:
         run = routes.latest_run("GOLDM", x_admin_auth_token=TOKEN)["run"]
         assert run["run_id"] == "p-real"
         assert run["recommendation"]["headline"] == "Staying out of this one."
+
+    def test_capacity_skip_does_not_bury_the_last_analysis(self, db_factory,
+                                                           settings_paper):
+        # On a book at the position cap the scheduled cadence produces one of
+        # these every 30 min. Letting them win the "newest run" race replaced a
+        # real analysis with "no room for a new trade" within the hour.
+        self._seed_run(db_factory, age_hours=3, run_id="p-real")
+        with db_factory() as s:
+            s.add(AgentRun(run_id="p-cap", commodity="GOLDM",
+                           started_at=datetime.now(IST), status="SKIPPED_CAPACITY",
+                           error="Capacity gate: open commodity positions 2 >= cap 2"))
+            s.commit()
+        out = routes.latest_run("GOLDM", x_admin_auth_token=TOKEN)
+        assert out["run"]["run_id"] == "p-real"
+        assert out["run"]["recommendation"]["headline"] == "Staying out of this one."
+        # ...but the user is still told why nothing newer has arrived.
+        assert "cap 2" in out["capacity_skip"]["reason"]
+
+    def test_capacity_skip_is_silent_once_something_newer_ran(self, db_factory,
+                                                              settings_paper):
+        with db_factory() as s:
+            s.add(AgentRun(run_id="p-cap", commodity="GOLDM",
+                           started_at=datetime.now(IST) - timedelta(hours=4),
+                           status="SKIPPED_CAPACITY", error="Capacity gate: x"))
+            s.commit()
+        self._seed_run(db_factory, age_hours=1, run_id="p-real")
+        out = routes.latest_run("GOLDM", x_admin_auth_token=TOKEN)
+        assert out["capacity_skip"] is None
+
+    def test_capacity_skip_reported_even_with_no_analysis_at_all(self, db_factory,
+                                                                 settings_paper):
+        with db_factory() as s:
+            s.add(AgentRun(run_id="p-cap", commodity="GOLDM",
+                           started_at=datetime.now(IST), status="SKIPPED_CAPACITY",
+                           error="Capacity gate: no margin available"))
+            s.commit()
+        out = routes.latest_run("GOLDM", x_admin_auth_token=TOKEN)
+        assert out["run"] is None
+        assert "no margin" in out["capacity_skip"]["reason"]
 
     def test_no_stored_run_returns_none(self, db_factory, settings_paper):
         assert routes.latest_run("GOLDM", x_admin_auth_token=TOKEN)["run"] is None

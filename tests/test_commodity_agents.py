@@ -715,6 +715,25 @@ class TestOrchestrator:
             assert run.status == "FAILED"
             assert run.error
 
+    def test_capacity_skip_writes_no_recommendation(self, db_factory, ca_settings):
+        """A skip is not a verdict. Recording one as a recommendation put "no
+        room for a new trade" on screen every scheduled cycle, burying the last
+        real analysis the user asked for."""
+        from app.commodity_agents.orchestrator import run_commodity_pipeline
+        with db_factory() as s:
+            _seed_instruments(s)
+        kite = _mk_kite()
+        kite.positions.return_value = {"net": []}
+        settings = ca_settings.model_copy(update={"COMMODITY_MAX_CONCURRENT": 0})
+        now = datetime(2026, 7, 5, 12, 0, tzinfo=IST)
+        run_id = run_commodity_pipeline("GOLDM", db_factory, settings, kite,
+                                        FakeLlm(), now=now)
+        with db_factory() as s:
+            run = s.get(AgentRun, run_id)
+            assert run.status == "SKIPPED_CAPACITY"
+            assert "Capacity gate" in run.error
+            assert s.query(CommodityRecommendation).count() == 0
+
 
 class FakeSingleCallLlm:
     """Stands in for ShimClient: one .run() call returns all four seats."""

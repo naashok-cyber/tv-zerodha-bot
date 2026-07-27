@@ -25,9 +25,13 @@ class AgentRun(Base):
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     status: Mapped[str] = mapped_column(String(24), nullable=False, default="RUNNING")
-    # RUNNING / COMPLETED / SKIPPED_REGIME / FAILED / IV_SAMPLE
+    # RUNNING / COMPLETED / SKIPPED_REGIME / SKIPPED_CAPACITY / FAILED / IV_SAMPLE
     # IV_SAMPLE = LLM-free deterministic snapshot only (run_iv_sample) — no
     # debate, no judge_json/risk_json, no CommodityRecommendation row.
+    # SKIPPED_CAPACITY = the account had no room (position cap, loss breaker,
+    # no margin), so nothing was analysed. Distinct from SKIPPED_REGIME, which
+    # IS a market verdict: kept separate so a scheduled capacity skip does not
+    # overwrite the last real analysis on screen. Carries no recommendation.
 
     regime_json: Mapped[str | None] = mapped_column(Text)
     events_json: Mapped[str | None] = mapped_column(Text)

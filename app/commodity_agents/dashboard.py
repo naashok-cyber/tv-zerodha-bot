@@ -250,7 +250,7 @@ const el=document.getElementById('result');
 el.innerHTML='<div class="card dim">Loading last analysis for '+esc(t)+'&#8230;</div>';
 let d;try{d=await api('/'+t+'/runs/latest')}catch(e){el.innerHTML='';return}
 if(poller)return;                       // user hit Analyze while this was in flight
-if(!d.run){el.innerHTML='<div class="card dim">No analysis stored for '+esc(t)+
+if(!d.run){el.innerHTML=capacityNote(d)+'<div class="card dim">No analysis stored for '+esc(t)+
 ' yet &#8212; tap Analyze to run one.</div>';return}
 if(d.run.status==='RUNNING'){           // a scheduled run is mid-flight: follow it
 document.getElementById('progress').classList.remove('hidden');
@@ -259,7 +259,28 @@ runStartedAt=new Date(d.run.started_at).getTime();
 el.innerHTML='';
 poller=setInterval(()=>pollRun(t),2500);renderStages(d.run);return}
 document.getElementById('progress').classList.add('hidden');
-renderResult(d.run,true)}
+renderResult(d.run,true);
+el.insertAdjacentHTML('afterbegin',capacityNote(d))}
+function capacityReasons(r){const b=[];
+if(r.indexOf('open commodity positions')>=0)b.push('the position limit is reached');
+if(r.indexOf('margin')>=0)b.push('there is no free margin');
+if(r.indexOf('daily loss')>=0)b.push('the daily loss limit is hit');
+return b.length?b.join(' and '):'the account has no room for a new trade'}
+// Scheduled runs stop analysing once the book is at the position cap, so the
+// result on screen can be older than the usual cadence implies. Say so, rather
+// than letting a stale card look current — Analyze still works by hand.
+function capacityNote(d){const s=d.capacity_skip;if(!s)return '';
+return '<div class="card dim" style="border-left:3px solid var(--amber)">'+
+'<b>Scheduled analysis is paused</b> &#8212; '+capacityReasons(s.reason||'')+
+', so the automatic runs are skipping this ticker and anything below may be '+
+'older than usual. Tap <b>Analyze</b> for a fresh read: a manual run goes '+
+'through the position limit, so you can judge whether to rotate.</div>'}
+// The gate can also stop a run the user just triggered: a manual press waives
+// the position cap, but not the loss breaker or an empty margin account.
+function capacityStopped(s){
+return '<div class="card" style="border-left:3px solid var(--amber)">'+
+'<b>Nothing was analysed</b> &#8212; the run stopped before the agents started '+
+'because '+capacityReasons(s.reason||'')+'.</div>'}
 function pickAndRestore(t){pick(t);restore(t)}
 function ago(sec){if(sec<90)return 'just now';
 if(sec<5400)return Math.round(sec/60)+' min ago';
@@ -283,6 +304,12 @@ if(poller)clearInterval(poller);
 poller=setInterval(()=>pollRun(t),2500);pollRun(t)}
 async function pollRun(t){
 let d;try{d=await api('/'+t+'/runs/latest')}catch(e){return}
+// A run can end without producing an analysis when the capacity gate stops it
+// before the debate. That row is deliberately absent from `run`, so it has to
+// be caught here or the poller spins forever on the previous result.
+const cs=d.capacity_skip;
+if(cs&&new Date(cs.at).getTime()>=runStartedAt-30000){
+finishRun();document.getElementById('result').innerHTML=capacityStopped(cs);return}
 const run=d.run;if(!run)return;
 // only track a run that started at/after our trigger (30s grace for clock skew)
 if(new Date(run.started_at).getTime() < runStartedAt-30000)return;

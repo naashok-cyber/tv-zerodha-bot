@@ -365,6 +365,27 @@ run cleared the cap, regime `trending` at ADX 39.2, and the Judge returned
 NO_TRADE citing rule 0b — *with* VRP at +11.6 and IV/RV 1.21, i.e. it declined
 rich premium because of the trend, which is the whole point of the wave.
 
+**A skip is not a verdict** (`SKIPPED_CAPACITY`). The manual fix above was not
+enough on its own: the scheduled cadence kept writing a `SKIPPED_REGIME` run
+plus a "No room for a new trade right now" recommendation every 30 minutes, and
+both `/runs/latest` and `/recommendations` return the newest row — so within the
+hour that buried run #4058 and the user saw the same message again. A capacity
+skip now writes a run with status `SKIPPED_CAPACITY`, its reason in `run.error`,
+and **no recommendation row**: nothing was analysed, so there is no verdict to
+record. Both routes exclude the status the same way they already excluded
+`IV_SAMPLE`, and `/runs/latest` reports the newest skip separately as
+`capacity_skip` so the page can say why nothing newer has arrived instead of
+letting an old card look current. The Analyze poller watches that field too — a
+manually triggered run can still be stopped by the loss breaker or an empty
+margin account, and without it the poller would never see its own run finish.
+
+`scripts/migrate_capacity_skips.py` relabels the historical rows (identifiable
+by a `reasoning_summary` starting `"Capacity gate:"`). It deletes nothing —
+relabelling the run hides those rows from both routes, and the recommendation
+rows stay as the audit record. **Known gap:** those orphans still count in
+`calibration.evaluate_pending`, which scores every NO_TRADE as AVOIDED/MISSED;
+skips were never market calls and should be excluded there too.
+
 ## 6. Quick reference
 
 ```

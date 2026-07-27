@@ -42,6 +42,10 @@ _RUN_COOLDOWN_SECONDS = 60          # on-demand trigger rate limit (LLM cost)
 # page keeps rendering it but marks it stale, rather than showing a blank
 # page that pushes the user into paying for another run.
 _ANALYSIS_TTL_SECONDS = 24 * 3600
+# Run statuses that analysed nothing, so must never win the "latest" race
+# against a real analysis: IV_SAMPLE lands every 5 min and SKIPPED_CAPACITY
+# every scheduled cycle while the book is full.
+_SKIP_STATUSES = ("IV_SAMPLE", "SKIPPED_CAPACITY")
 _confirm_tokens: dict[int, tuple[str, float]] = {}   # rec_id -> (token, expiry)
 _last_manual_run: dict[str, float] = {}              # per-commodity cooldown
 _lock = threading.Lock()
@@ -116,9 +120,13 @@ def latest_recommendations(
     runs = {}
     with _session() as session:
         for commodity in COMMODITIES:
+            # Joined to the run so rows left behind by a capacity skip can't
+            # present themselves as the desk's latest read on the market.
             rec = (
                 session.query(CommodityRecommendation)
-                .filter(CommodityRecommendation.commodity == commodity)
+                .join(AgentRun, CommodityRecommendation.run_pk == AgentRun.id)
+                .filter(CommodityRecommendation.commodity == commodity,
+                        AgentRun.status.notin_(_SKIP_STATUSES))
                 .order_by(CommodityRecommendation.created_at.desc())
                 .first()
             )
@@ -328,7 +336,12 @@ def latest_run(
     to pay for a fresh run just to see it again.
 
     IV_SAMPLE rows are excluded: they fire every 5 min, carry no debate or
-    recommendation, and would otherwise always be the newest row."""
+    recommendation, and would otherwise always be the newest row.
+    SKIPPED_CAPACITY rows are excluded for the same reason — they analysed
+    nothing, and on a book that is at the position cap the scheduled cadence
+    produces one every 30 minutes, which would bury the last real analysis.
+    The most recent one is still reported separately as `capacity_skip` so the
+    page can say why nothing newer has arrived."""
     _require_admin(x_admin_auth_token, zb_session)
     commodity = commodity.upper()
     if commodity not in COMMODITIES:
@@ -337,12 +350,24 @@ def latest_run(
         run = (
             session.query(AgentRun)
             .filter(AgentRun.commodity == commodity,
-                    AgentRun.status != "IV_SAMPLE")
+                    AgentRun.status.notin_(_SKIP_STATUSES))
             .order_by(AgentRun.started_at.desc())
             .first()
         )
+        skip = (
+            session.query(AgentRun)
+            .filter(AgentRun.commodity == commodity,
+                    AgentRun.status == "SKIPPED_CAPACITY")
+            .order_by(AgentRun.started_at.desc())
+            .first()
+        )
+        # Only worth mentioning while it is the current state — i.e. nothing
+        # has been analysed since.
+        capacity_skip = None
+        if skip is not None and (run is None or skip.started_at > run.started_at):
+            capacity_skip = {"at": skip.started_at.isoformat(), "reason": skip.error}
         if run is None:
-            return {"run": None}
+            return {"run": None, "capacity_skip": capacity_skip}
         rec = (
             session.query(CommodityRecommendation)
             .filter(CommodityRecommendation.run_pk == run.id)
@@ -367,7 +392,7 @@ def latest_run(
             ],
             "analytics": json.loads(run.analytics_json or "null"),
             "recommendation": _rec_to_dict(rec) if rec else None,
-        }}
+        }, "capacity_skip": capacity_skip}
 
 
 @router.get("/{commodity}/iv-history")
