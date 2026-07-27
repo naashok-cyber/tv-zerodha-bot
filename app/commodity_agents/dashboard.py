@@ -191,6 +191,13 @@ border-radius:8px;padding:10px;font-size:12px;max-height:45vh;overflow:auto}
 border:1px solid var(--border);padding:9px 16px;border-radius:10px;font-size:13.5px;z-index:20}
 .hidden{display:none}
 details summary{cursor:pointer;color:var(--blue);font-size:13.5px;margin-top:8px}
+.headline{font-size:17px;line-height:1.35;margin-top:10px}
+.why{margin:10px 0 0;padding-left:0;list-style:none}
+.why li{position:relative;padding:0 0 0 18px;margin-top:7px;font-size:14.5px;color:#c9d1d9}
+.why li:before{content:'';position:absolute;left:2px;top:8px;width:6px;height:6px;
+border-radius:50%;background:var(--dim)}
+.asof{font-size:12.5px;color:var(--dim);margin-top:2px}
+.asof.stale{color:var(--amber)}
 </style>
 </head>
 <body>
@@ -231,8 +238,31 @@ if(r.status===401){location.href='/login?next='+encodeURIComponent(location.path
 if(!r.ok){const d=await r.json().catch(()=>({detail:r.status}));toast(d.detail||('HTTP '+r.status));throw new Error(r.status)}
 return r.json()}
 function renderChips(){const c=document.getElementById('chips');
-c.innerHTML=TICKERS.map(t=>'<span class="chip'+(t===sel?' sel':'')+'" onclick="pick(\\''+t+'\\')">'+t+'</span>').join('')}
-function pick(t){sel=t;document.getElementById('ticker').value=t;renderChips()}
+c.innerHTML=TICKERS.map(t=>'<span class="chip'+(t===sel?' sel':'')+'" onclick="pickAndRestore(\\''+t+'\\')">'+t+'</span>').join('')}
+function pick(t){sel=t;document.getElementById('ticker').value=t;renderChips();
+try{localStorage.setItem('ca_last_ticker',t)}catch(e){}}
+// Show whatever analysis is already stored for this ticker. Without this the
+// only way to see a result is to trigger a fresh (paid) run.
+async function restore(t){
+if(poller)return;                       // a live run is already driving the view
+const el=document.getElementById('result');
+el.innerHTML='<div class="card dim">Loading last analysis for '+esc(t)+'&#8230;</div>';
+let d;try{d=await api('/'+t+'/runs/latest')}catch(e){el.innerHTML='';return}
+if(poller)return;                       // user hit Analyze while this was in flight
+if(!d.run){el.innerHTML='<div class="card dim">No analysis stored for '+esc(t)+
+' yet &#8212; tap Analyze to run one.</div>';return}
+if(d.run.status==='RUNNING'){           // a scheduled run is mid-flight: follow it
+document.getElementById('progress').classList.remove('hidden');
+document.getElementById('progTitle').textContent='Running agents on '+t+'&#8230;';
+runStartedAt=new Date(d.run.started_at).getTime();
+el.innerHTML='';
+poller=setInterval(()=>pollRun(t),2500);renderStages(d.run);return}
+document.getElementById('progress').classList.add('hidden');
+renderResult(d.run,true)}
+function pickAndRestore(t){pick(t);restore(t)}
+function ago(sec){if(sec<90)return 'just now';
+if(sec<5400)return Math.round(sec/60)+' min ago';
+const h=Math.round(sec/3600);return h+' hour'+(h===1?'':'s')+' ago'}
 function resolveTicker(){let v=(document.getElementById('ticker').value||'').trim().toUpperCase();
 if(!v&&sel)v=sel;v=ALIASES[v]||v;return TICKERS.includes(v)?v:null}
 async function analyze(){
@@ -269,7 +299,7 @@ function badge(rec){if(rec.risk_vetoed)return '<span class="badge b-veto">RISK V
 if(rec.direction==='SELL')return '<span class="badge b-sell">SELL</span>';
 if(rec.direction==='BUY')return '<span class="badge b-buy">BUY</span>';
 return '<span class="badge b-none">NO TRADE</span>'}
-function renderResult(run){
+function renderResult(run,restored){
 const el=document.getElementById('result');
 if(run.status==='FAILED'){
 el.innerHTML='<div class="card"><b>Run failed</b><div class="dim" style="margin-top:6px">'+
@@ -284,16 +314,23 @@ if(rec.status==='PROPOSED'&&!rec.risk_vetoed&&rec.direction!=='NO_TRADE'){
 actions='<div class="row" style="margin-top:12px" id="act-'+rec.id+'">'+
 '<button class="approve" onclick="decide('+rec.id+',\\'approve\\')">Approve</button>'+
 '<button class="reject" onclick="decide('+rec.id+',\\'reject\\')">Reject</button></div>'}
+const why=(rec.plain_reasons||[]).map(v=>'<li>'+esc(v)+'</li>').join('');
+const stamp=restored?'<div class="asof'+(run.stale?' stale':'')+'">Saved analysis from '+
+ago(run.age_seconds||0)+(run.stale?' — over a day old, worth re-running':'')+'</div>':'';
 el.innerHTML='<div class="card">'+
 '<div class="row" style="justify-content:space-between"><b style="font-size:17px">'+esc(rec.commodity)+'</b>'+badge(rec)+'</div>'+
-'<div class="dim" style="margin-top:4px">'+esc(rec.strategy_type)+' · confidence '+conf+
+stamp+
+(rec.headline?'<div class="headline">'+esc(rec.headline)+'</div>':'')+
+(why?'<ul class="why">'+why+'</ul>':'')+
+'<div class="dim" style="margin-top:10px">'+esc(rec.strategy_type)+' · confidence '+conf+
 ' · '+(run.status==='SKIPPED_REGIME'?'regime-gated (LLM round skipped)':'full debate')+'</div>'+
 (rec.suggested_lots!=null?'<div style="margin-top:6px">Suggested size: <b>'+rec.suggested_lots+
 ' lot'+(rec.suggested_lots===1?'':'s')+'</b><span class="dim"> — from daily loss budget, '+
 'worst-case per lot, and margin</span>'+(rec.suggested_lots===0?
 ' <b style="color:var(--amber)">(worst case exceeds budget — skip or reduce)</b>':'')+'</div>':'')+
 (rec.strikes&&rec.strikes.length?'<div style="margin-top:8px"><b>Strikes:</b> '+esc(rec.strikes.join(', '))+'</div>':'')+
-'<div style="margin-top:8px">'+esc(rec.reasoning_summary||'')+'</div>'+
+(rec.reasoning_summary?'<details><summary>Desk notes (the technical version)</summary>'+
+'<div style="margin-top:6px">'+esc(rec.reasoning_summary)+'</div></details>':'')+
 (run.analytics?renderAnalytics(run.analytics):'')+
 (dissent?'<details><summary>Dissenting views ('+(rec.dissenting_views||[]).length+
 ')</summary><ul style="margin:6px 0 0 18px">'+dissent+'</ul></details>':'')+
@@ -392,9 +429,13 @@ box.innerHTML='<button class="confirm" onclick="decide('+id+',\\''+action+'\\')"
 action.toUpperCase()+' ('+(recLots[id]||1)+' lot'+((recLots[id]||1)===1?'':'s')+')'+
 '</button><button onclick="pendingConfirm=null;location.reload()">Cancel</button>'}
 renderChips();
-// deep link: /analyze?t=GOLDM preselects the ticker (from Desk drift chips)
+// deep link: /analyze?t=GOLDM preselects the ticker (from Desk drift chips);
+// otherwise fall back to whatever was last looked at, so returning to this
+// page shows the stored analysis instead of an empty form.
 const _q=(new URLSearchParams(location.search).get('t')||'').toUpperCase();
-if(TICKERS.includes(ALIASES[_q]||_q))pick(ALIASES[_q]||_q);
+let _init=ALIASES[_q]||_q;
+if(!TICKERS.includes(_init)){try{_init=localStorage.getItem('ca_last_ticker')||''}catch(e){_init=''}}
+if(TICKERS.includes(_init))pickAndRestore(_init);
 if('serviceWorker' in navigator)navigator.serviceWorker.register('/commodity-agents/sw.js');
 </script>
 </body></html>"""

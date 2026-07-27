@@ -60,6 +60,10 @@ class CommodityRecommendation(Base):
     strikes_json: Mapped[str | None] = mapped_column(Text)
     confidence: Mapped[float | None] = mapped_column(Float)
     reasoning_summary: Mapped[str | None] = mapped_column(Text)
+    # Jargon-free restatement of the same call, for readers who don't speak
+    # options; reasoning_summary stays the dense audit trail.
+    headline: Mapped[str | None] = mapped_column(Text)
+    plain_reasons_json: Mapped[str | None] = mapped_column(Text)
     dissent_json: Mapped[str | None] = mapped_column(Text)
     risk_vetoed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="PROPOSED")

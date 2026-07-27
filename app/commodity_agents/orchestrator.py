@@ -373,6 +373,34 @@ def _run_stages(
             confidence=1.0,
             reasoning="Regime gate: high-vol-expansion — short-premium debate skipped.",
             dissent=[], risk_vetoed=False, settings=settings,
+            headline=f"Sitting this one out — {commodity} is moving too violently right now.",
+            plain_reasons=[
+                "Price is swinging far more than usual, and the options market "
+                "agrees things are unsettled.",
+                "Selling options into a move like this is how small losses turn "
+                "into big ones, so we did not even ask the analysts.",
+                "This clears on its own once the market calms down — the next "
+                "run will look at it fresh.",
+            ],
+        )
+        return
+
+    # 5b. Capacity gate — some risk-guard checks don't depend on which
+    # structure the Judge picks, so if one is already failing, no debate can
+    # produce an approved trade. Paying for four LLM calls to reach a veto we
+    # can compute for free is the cheapest spend to cut.
+    blocked = _capacity_block(session, settings, kite, commodity, now)
+    if blocked:
+        run.status = "SKIPPED_REGIME"
+        _persist_recommendation(
+            session, run, commodity, now,
+            direction="NO_TRADE", strategy_type="none", strikes_syms=[],
+            confidence=1.0,
+            reasoning="Capacity gate: " + "; ".join(blocked) + " — debate skipped.",
+            dissent=[], risk_vetoed=False, settings=settings,
+            headline="No room for a new trade right now, so we skipped the analysis.",
+            plain_reasons=[next((text for key, text in _VETO_PLAIN
+                                 if b.startswith(key)), b) for b in blocked],
         )
         return
 
@@ -380,8 +408,8 @@ def _run_stages(
         raise RuntimeError("LLM client unavailable (ANTHROPIC_API_KEY not set?)")
 
     # 6. Debate round
-    ctx = debate._fmt_context(commodity, snap, debate.summarize_candles(candles),
-                              cands, evs, analytics=quant)
+    ctx = debate.build_context(commodity, snap, debate.summarize_candles(candles),
+                               cands, evs, analytics=quant)
     trend_out = llm_stage(run, session, "trend_json", lambda: debate.run_trend_agent(llm, ctx))
     event_out = llm_stage(run, session, "event_debate_json", lambda: debate.run_event_agent(llm, ctx))
     vol_out = llm_stage(run, session, "vol_json", lambda: debate.run_vol_agent(llm, ctx))
@@ -448,6 +476,7 @@ def _run_stages(
         risk_vetoed=vetoed, settings=settings,
         suggested_lots=None if vetoed else _suggested_lots(
             settings, est_loss, margin_required, margin_available),
+        **_plain_summary(judge_out, verdict if vetoed else None),
     )
     run.status = "COMPLETED"
 
@@ -535,11 +564,84 @@ def llm_stage(run: AgentRun, session: Any, field: str, fn: Any) -> dict:
     return out
 
 
+# The risk guard's reasons are written for an audit trail, not for a phone
+# screen. Map the machine-readable prefix of each to one plain sentence; a
+# reason with no mapping falls through verbatim rather than being dropped.
+_VETO_PLAIN = (
+    ("blackout window active",
+     "A scheduled market-moving announcement is too close for comfort."),
+    ("daily loss circuit breaker",
+     "Today's losses already hit the daily limit, so no new risk goes on."),
+    ("est. max loss/lot",
+     "The worst case on this trade is bigger than the per-trade loss limit."),
+    ("cannot estimate max loss",
+     "Option prices were not clean enough to price the worst case, so we passed."),
+    ("correlated short-vega exposure",
+     "A related commodity already carries the same kind of bet — one shock "
+     "would hit both at once."),
+    ("open commodity positions",
+     "There are already as many commodity positions open as the limit allows."),
+    ("no margin available",
+     "There is no free margin in the account to fund this trade."),
+    ("margin utilization",
+     "This trade would use more of the account's margin than the cap allows."),
+    ("lots ", "The requested size is above the per-trade lot cap."),
+)
+
+
+def _capacity_block(session: Any, settings: Any, kite: Any,
+                    commodity: str, now: datetime) -> list[str]:
+    """Risk-guard reasons that hold regardless of what the Judge decides.
+
+    Deliberately a subset: blackout and correlated-short-vega only bite short
+    premium, and the Judge may legitimately answer with a long option, so they
+    stay downstream where the strategy is known."""
+    reasons: list[str] = []
+
+    pnl = _daily_realized_pnl(session, now)
+    if -pnl >= settings.MAX_DAILY_LOSS_ABS:
+        reasons.append(f"daily loss circuit breaker: realized {pnl:.0f} "
+                       f"vs cap -{settings.MAX_DAILY_LOSS_ABS:.0f}")
+
+    open_count = _open_commodity_count(session)
+    if open_count >= settings.COMMODITY_MAX_CONCURRENT:
+        reasons.append(f"open commodity positions {open_count} >= "
+                       f"cap {settings.COMMODITY_MAX_CONCURRENT}")
+
+    margin = _margin_available(kite, commodity)
+    if margin is not None and margin <= 0:
+        reasons.append("no margin available")
+
+    return reasons
+
+
+def _plain_summary(judge_out: dict, verdict: Any) -> dict:
+    """headline/plain_reasons for a completed debate. When the risk guard
+    vetoed, the Judge's own plain summary describes a trade that is not
+    happening, so it is replaced with the veto's reasons in plain language."""
+    if verdict is None:
+        return {
+            "headline": judge_out.get("headline"),
+            "plain_reasons": judge_out.get("plain_reasons", []),
+        }
+
+    plain = []
+    for reason in verdict.reasons:
+        plain.append(next((text for key, text in _VETO_PLAIN
+                           if reason.startswith(key)), reason))
+    return {
+        "headline": "The analysts liked a trade here, but the safety checks "
+                    "blocked it.",
+        "plain_reasons": plain,
+    }
+
+
 def _persist_recommendation(
     session: Any, run: AgentRun, commodity: str, now: datetime,
     direction: str, strategy_type: str, strikes_syms: list,
     confidence: float | None, reasoning: str, dissent: list, risk_vetoed: bool,
     settings: Any = None, suggested_lots: int | None = None,
+    headline: str | None = None, plain_reasons: list | None = None,
 ) -> None:
     rec = CommodityRecommendation(
         run_pk=run.id,
@@ -550,6 +652,8 @@ def _persist_recommendation(
         strikes_json=json.dumps(strikes_syms),
         confidence=confidence,
         reasoning_summary=reasoning,
+        headline=headline,
+        plain_reasons_json=json.dumps(plain_reasons or []),
         dissent_json=json.dumps(dissent),
         risk_vetoed=risk_vetoed,
         status="PROPOSED",
@@ -564,6 +668,7 @@ def _persist_recommendation(
             "id": rec.id, "commodity": commodity, "direction": direction,
             "strategy_type": strategy_type, "strikes": strikes_syms,
             "confidence": confidence, "reasoning_summary": reasoning,
+            "headline": headline,
         })
 
 

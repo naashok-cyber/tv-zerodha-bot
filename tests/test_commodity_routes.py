@@ -927,3 +927,64 @@ class TestDeskEnhancements:
         assert lr["status"] == "FAILED"
         assert "no text content" in lr["error"]
         assert out["last_runs"]["GOLDM"] is None
+
+
+# ── stored analysis stays visible for a day ──────────────────────────────────
+
+class TestAnalysisPersistence:
+    def _seed_run(self, factory, *, age_hours=0.0, status="COMPLETED",
+                  run_id="p-1", headline="Staying out of this one.",
+                  plain=("Prices are calm.", "Nothing pays enough to justify it.")):
+        started = datetime.now(IST) - timedelta(hours=age_hours)
+        with factory() as s:
+            run = AgentRun(run_id=run_id, commodity="GOLDM",
+                           started_at=started, status=status)
+            s.add(run)
+            s.commit()
+            if status != "IV_SAMPLE":
+                s.add(CommodityRecommendation(
+                    run_pk=run.id, commodity="GOLDM", created_at=started,
+                    direction="NO_TRADE", strategy_type="none",
+                    strikes_json="[]", confidence=0.7,
+                    reasoning_summary="VRP thin, ADX 31, skew rich",
+                    headline=headline, plain_reasons_json=json.dumps(list(plain)),
+                    dissent_json="[]", risk_vetoed=False, status="PROPOSED",
+                ))
+                s.commit()
+
+    def test_recent_run_is_returned_with_plain_summary(self, db_factory, settings_paper):
+        self._seed_run(db_factory, age_hours=2)
+        run = routes.latest_run("GOLDM", x_admin_auth_token=TOKEN)["run"]
+        assert run["stale"] is False
+        assert 6000 < run["age_seconds"] < 8000
+        rec = run["recommendation"]
+        assert rec["headline"] == "Staying out of this one."
+        assert len(rec["plain_reasons"]) == 2
+
+    def test_day_old_run_still_returned_but_flagged_stale(self, db_factory, settings_paper):
+        self._seed_run(db_factory, age_hours=30)
+        run = routes.latest_run("GOLDM", x_admin_auth_token=TOKEN)["run"]
+        # Still served: a blank page would push the user into paying for a
+        # fresh run just to see anything.
+        assert run["recommendation"] is not None
+        assert run["stale"] is True
+
+    def test_iv_sample_does_not_mask_the_last_analysis(self, db_factory, settings_paper):
+        # IV samples land every 5 min and carry no debate; without the filter
+        # they are always the newest row and the page shows nothing.
+        self._seed_run(db_factory, age_hours=3, run_id="p-real")
+        self._seed_run(db_factory, age_hours=0, run_id="p-iv", status="IV_SAMPLE")
+        run = routes.latest_run("GOLDM", x_admin_auth_token=TOKEN)["run"]
+        assert run["run_id"] == "p-real"
+        assert run["recommendation"]["headline"] == "Staying out of this one."
+
+    def test_no_stored_run_returns_none(self, db_factory, settings_paper):
+        assert routes.latest_run("GOLDM", x_admin_auth_token=TOKEN)["run"] is None
+
+    def test_analyze_page_restores_without_a_new_run(self, settings_paper):
+        from app.commodity_agents.dashboard import ANALYZE_HTML
+        # Chip taps and page load must go through restore(), not analyze() —
+        # otherwise the only way to see a result is to pay for a fresh one.
+        assert "function restore(" in ANALYZE_HTML
+        assert "pickAndRestore" in ANALYZE_HTML
+        assert "ca_last_ticker" in ANALYZE_HTML

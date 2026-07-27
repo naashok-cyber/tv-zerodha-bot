@@ -17,6 +17,16 @@ ROLE_EVENT = "event"
 ROLE_VOL = "vol"
 ROLE_JUDGE = "judge"
 
+# A debate reply is six short JSON fields; 3000 tokens just bought rambling.
+# The event agent keeps more headroom because web-search turns are chattier,
+# and the Judge needs room for the plain-language block plus dissents.
+DEFAULT_ROLE_MAX_TOKENS = {
+    ROLE_TREND: 700,
+    ROLE_EVENT: 1200,
+    ROLE_VOL: 700,
+    ROLE_JUDGE: 1400,
+}
+
 
 class LlmError(Exception):
     pass
@@ -54,6 +64,7 @@ class LlmClient:
         role_models: dict[str, str],
         enable_web_search: bool = True,
         max_tokens: int = 3000,     # web-search replies got truncated at 1500
+        role_max_tokens: dict[str, int] | None = None,
     ) -> None:
         if not api_key:
             raise LlmError("ANTHROPIC_API_KEY is empty")
@@ -61,6 +72,7 @@ class LlmClient:
         self._role_models = role_models
         self._web_search = enable_web_search
         self._max_tokens = max_tokens
+        self._role_max_tokens = role_max_tokens or DEFAULT_ROLE_MAX_TOKENS
         self._client: Any = None
 
     def _get_client(self) -> Any:
@@ -100,7 +112,7 @@ class LlmClient:
 
         kwargs: dict[str, Any] = {
             "model": model,
-            "max_tokens": self._max_tokens,
+            "max_tokens": self._role_max_tokens.get(role, self._max_tokens),
             "system": system,
         }
         # Event/gap-risk agent gets web search so it can catch breaking news

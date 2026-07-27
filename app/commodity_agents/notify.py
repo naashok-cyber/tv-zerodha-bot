@@ -44,11 +44,14 @@ def notify_recommendation(settings: Any, rec_dict: dict) -> bool:
     if conf < settings.COMMODITY_NOTIFY_MIN_CONFIDENCE:
         return False
     strikes = ", ".join(rec_dict.get("strikes") or []) or "—"
+    # Prefer the plain-language line: this lands on a phone lock screen, where
+    # the dense reasoning_summary is unreadable at a glance.
+    why = rec_dict.get("headline") or rec_dict.get("reasoning_summary") or ""
     text = (
         f"<b>{rec_dict['commodity']}</b> — {rec_dict['direction']} "
         f"{rec_dict['strategy_type']} (conf {conf:.0%})\n"
         f"Strikes: {strikes}\n"
-        f"{(rec_dict.get('reasoning_summary') or '')[:400]}\n\n"
+        f"{why[:400]}\n\n"
         f"Open the dashboard to approve/reject. Recommendation "
         f"#{rec_dict.get('id', '?')}"
     )

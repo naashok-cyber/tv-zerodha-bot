@@ -27,7 +27,17 @@ ADX_TREND_THRESHOLD = 25.0
 VOL_EXPANSION_RATIO = 1.5
 BB_PERIOD = 20
 RV_RECENT_WINDOW = 5
-RV_BASELINE_WINDOW = 20
+# Spans more than one full MCX session (29 half-hour bars), so the baseline is
+# not itself a single time-of-day slice.
+RV_BASELINE_WINDOW = 40
+# Candles are intraday, and intraday vol has a strong time-of-day profile: the
+# US-overlap evening routinely runs 2-3x the quiet Indian morning. Ratio plus a
+# 3-sigma candle therefore fires on ordinary session ramp, which is how this
+# gate came to skip 94% of runs. A real expansion is one the options market has
+# repriced, so confirm against ATM IV's own percentile before gating; with too
+# little IV history to rank, demand a far larger realized move instead.
+IV_CONFIRM_PERCENTILE = 80.0
+VOL_EXPANSION_RATIO_NO_IV = 3.0
 
 
 def _log_returns(closes: list[float]) -> list[float]:
@@ -96,7 +106,8 @@ def classify_regime(
     # Vol expansion: recent short-window RV vs the baseline window before it.
     # A 5-sample stdev alone is too noisy (random wiggle can read 1.5x), so we
     # also require at least one recent candle move beyond 3 sigma of baseline —
-    # that's what a genuine blowout looks like, and noise almost never does.
+    # that's what a genuine blowout looks like, and noise almost never does —
+    # and then confirmation from IV (see IV_CONFIRM_PERCENTILE).
     expansion = False
     if len(closes) >= RV_RECENT_WINDOW + RV_BASELINE_WINDOW + 1:
         recent_closes = closes[-(RV_RECENT_WINDOW + 1):]
@@ -108,11 +119,24 @@ def classify_regime(
             sigma = statistics.stdev(base_rets) if len(base_rets) >= 3 else None
             recent_rets = _log_returns(recent_closes)
             if sigma and any(abs(r) > 3.0 * sigma for r in recent_rets):
-                expansion = True
-                notes.append(
-                    f"recent RV {recent:.1%} vs baseline {baseline:.1%} "
-                    f"(x{recent / baseline:.2f}), >3-sigma candle present"
-                )
+                ratio = recent / baseline
+                if ivp is not None:
+                    confirmed = ivp >= IV_CONFIRM_PERCENTILE
+                    why = f"ATM IV at {ivp:.0f}th pct"
+                else:
+                    confirmed = ratio >= VOL_EXPANSION_RATIO_NO_IV
+                    why = "no IV history to rank"
+                if confirmed:
+                    expansion = True
+                    notes.append(
+                        f"recent RV {recent:.1%} vs baseline {baseline:.1%} "
+                        f"(x{ratio:.2f}), >3-sigma candle, {why}"
+                    )
+                else:
+                    notes.append(
+                        f"RV spike x{ratio:.2f} not confirmed by IV ({why}) — "
+                        f"read as intraday session ramp, not a regime change"
+                    )
 
     if expansion:
         label = HIGH_VOL_EXPANSION

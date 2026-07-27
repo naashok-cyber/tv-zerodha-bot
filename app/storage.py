@@ -431,6 +431,8 @@ def _migrate(engine: Engine) -> None:
         "ALTER TABLE commodity_recommendations ADD COLUMN realized_move_pct FLOAT",
         "ALTER TABLE commodity_recommendations ADD COLUMN outcome VARCHAR(16)",
         "ALTER TABLE commodity_recommendations ADD COLUMN suggested_lots INTEGER",
+        "ALTER TABLE commodity_recommendations ADD COLUMN headline TEXT",
+        "ALTER TABLE commodity_recommendations ADD COLUMN plain_reasons_json TEXT",
         "ALTER TABLE commodity_trade_journal ADD COLUMN slippage_pct FLOAT",
         "ALTER TABLE commodity_trade_journal ADD COLUMN mae_pct FLOAT",
         "ALTER TABLE commodity_trade_journal ADD COLUMN mfe_pct FLOAT",

@@ -6,7 +6,7 @@ import json
 import math
 import random
 from datetime import date, datetime, timedelta
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from sqlalchemy import create_engine
@@ -19,6 +19,7 @@ from app.commodity_agents.models import (
     RANGE_BOUND,
     TRENDING,
     EventWindow,
+    StrikeCandidate,
 )
 from app.commodity_agents.storage import AgentRun, CommodityRecommendation
 from app.config import IST
@@ -118,6 +119,41 @@ class TestRegime:
         assert regime.iv_percentile(0.4, [0.3] * 10) == 100.0
         assert regime.iv_percentile(0.2, [0.3] * 10) == 0.0
 
+    # A moderate ramp is what the MCX evening session looks like every day.
+    # Before IV confirmation this alone skipped 94% of production runs.
+    def _session_ramp(self):
+        """Calm baseline then a 2.0x RV pickup with one >3-sigma candle — the
+        old ratio + sigma test fires on this, so only IV can settle it."""
+        return self._flat_closes(55) + [100.50, 100.35, 100.42, 100.34, 100.45]
+
+    def test_moderate_ramp_not_expansion_without_iv_history(self):
+        snap = regime.classify_regime(
+            _mk_candles(self._session_ramp()), periods_per_year=252,
+            atm_iv=0.5, iv_history=[], in_event_window=False,
+        )
+        assert snap.label != HIGH_VOL_EXPANSION
+        assert any("not confirmed by IV" in n for n in snap.notes)
+
+    def test_moderate_ramp_not_expansion_when_iv_is_calm(self):
+        # ATM IV sits at the bottom of its own range: options are not pricing
+        # a regime change, so neither do we.
+        snap = regime.classify_regime(
+            _mk_candles(self._session_ramp()), periods_per_year=252,
+            atm_iv=0.20, iv_history=[0.30 + i * 0.01 for i in range(20)],
+            in_event_window=False,
+        )
+        assert snap.label != HIGH_VOL_EXPANSION
+        assert snap.iv_percentile is not None and snap.iv_percentile < 80.0
+
+    def test_moderate_ramp_is_expansion_when_iv_confirms(self):
+        snap = regime.classify_regime(
+            _mk_candles(self._session_ramp()), periods_per_year=252,
+            atm_iv=0.90, iv_history=[0.30 + i * 0.01 for i in range(20)],
+            in_event_window=False,
+        )
+        assert snap.label == HIGH_VOL_EXPANSION
+        assert any("ATM IV at" in n for n in snap.notes)
+
 
 # ── risk guard ───────────────────────────────────────────────────────────────
 
@@ -204,6 +240,130 @@ class TestGapRiskGate:
                  "strikes": ["X"], "confidence": 0.8,
                  "reasoning_summary": "buy it", "dissenting_views": []}
         assert debate.enforce_gap_risk_gate(judge, {"risk_flag": "high"}) is judge
+
+    def test_veto_rewrites_the_plain_summary(self):
+        # The judge's own headline describes a trade that is no longer
+        # happening — leaving it on screen would be actively misleading.
+        judge = {"direction": "SELL", "strategy_type": "short_straddle",
+                 "strikes": ["X"], "confidence": 0.9,
+                 "reasoning_summary": "sell it", "dissenting_views": [],
+                 "headline": "Selling premium here looks good.",
+                 "plain_reasons": ["Options look expensive."]}
+        out = debate.enforce_gap_risk_gate(judge, {"risk_flag": "high"})
+        assert out["headline"] != judge["headline"]
+        assert out["plain_reasons"] != judge["plain_reasons"]
+
+
+# ── context slicing (token budget) ───────────────────────────────────────────
+
+class TestDebateContext:
+    def _ctx(self):
+        snap = regime.classify_regime(
+            _mk_candles([100 + i * 0.1 for i in range(60)]), periods_per_year=252,
+            atm_iv=0.3, iv_history=[], in_event_window=False,
+        )
+        strikes = [
+            StrikeCandidate(
+                tradingsymbol=f"GOLDM26JUL{72000 + i * 100}CE", strike=72000.0 + i * 100,
+                instrument_type="CE", expiry="2026-07-28", ltp=250.0 + i,
+                iv=0.245631758876675, delta=0.5031415926535, target_delta=0.50,
+                lot_units=10,
+            )
+            for i in range(6)
+        ]
+        return debate.build_context(
+            "GOLDM", snap, debate.summarize_candles(_mk_candles([100.0] * 30)),
+            strikes, [],
+            analytics={"vrp": 0.0512345678, "iv_trend": {"slope": 0.0011111111},
+                       "skew": {"rr25": -0.0212345}, "positioning": {"pcr": 1.23456}},
+        )
+
+    def test_each_role_gets_only_its_slice(self):
+        ctx = self._ctx()
+        # The strike chain is the single biggest block and only the Judge
+        # prices strikes, so it must not be paid for three extra times.
+        assert "STRIKE CANDIDATES" not in ctx.for_trend()
+        assert "STRIKE CANDIDATES" not in ctx.for_event()
+        assert "STRIKE CANDIDATES" not in ctx.for_vol()
+        assert "STRIKE CANDIDATES" in ctx.for_judge()
+        assert "VOL ANALYTICS" in ctx.for_vol()
+        assert "VOL ANALYTICS" not in ctx.for_trend()
+        assert "SKEW / POSITIONING" in ctx.for_event()
+        assert "SKEW / POSITIONING" not in ctx.for_vol()
+
+    def test_every_slice_is_smaller_than_the_whole(self):
+        ctx = self._ctx()
+        full = len(ctx.for_judge())
+        for part in (ctx.for_trend(), ctx.for_event(), ctx.for_vol()):
+            assert len(part) < full
+
+    def test_floats_are_rounded(self):
+        ctx = self._ctx()
+        assert "0.245631758876675" not in ctx.for_judge()
+        assert "0.0512345678" not in ctx.for_vol()
+
+    def test_risk_veto_is_restated_in_plain_language(self):
+        from app.commodity_agents.orchestrator import _plain_summary
+
+        verdict = risk_guard.RiskVerdict(approved=False, reasons=[
+            "correlated short-vega exposure: 1 underlying(s) in the energy "
+            "group already carry short option positions — one macro shock "
+            "would hit both",
+            "no margin available",
+        ])
+        out = _plain_summary({"headline": "Sell the straddle.",
+                              "plain_reasons": ["Options are expensive."]}, verdict)
+        assert "safety checks" in out["headline"]
+        assert len(out["plain_reasons"]) == 2
+        assert all("short-vega" not in r and "margin available" not in r
+                   for r in out["plain_reasons"])
+
+    def test_capacity_gate_skips_the_debate_when_no_room(self):
+        from unittest.mock import MagicMock
+
+        from app.commodity_agents import orchestrator as orch
+
+        session, settings, kite = MagicMock(), MagicMock(), MagicMock()
+        settings.MAX_DAILY_LOSS_ABS = 10000.0
+        settings.COMMODITY_MAX_CONCURRENT = 2
+        kite.margins.return_value = {"commodity": {"net": 0.0}}
+        with patch.object(orch, "_daily_realized_pnl", return_value=-12000.0), \
+                patch.object(orch, "_open_commodity_count", return_value=3):
+            out = orch._capacity_block(session, settings, kite, "GOLDM",
+                                       datetime(2026, 7, 27, 20, 0, tzinfo=IST))
+        assert len(out) == 3      # loss breaker + concurrency cap + zero margin
+
+    def test_capacity_gate_clear_when_there_is_room(self):
+        from unittest.mock import MagicMock
+
+        from app.commodity_agents import orchestrator as orch
+
+        session, settings, kite = MagicMock(), MagicMock(), MagicMock()
+        settings.MAX_DAILY_LOSS_ABS = 10000.0
+        settings.COMMODITY_MAX_CONCURRENT = 2
+        kite.margins.return_value = {"commodity": {"net": 250000.0}}
+        with patch.object(orch, "_daily_realized_pnl", return_value=-500.0), \
+                patch.object(orch, "_open_commodity_count", return_value=0):
+            assert orch._capacity_block(
+                session, settings, kite, "GOLDM",
+                datetime(2026, 7, 27, 20, 0, tzinfo=IST)) == []
+
+    def test_unmapped_veto_reason_survives_verbatim(self):
+        from app.commodity_agents.orchestrator import _plain_summary
+
+        verdict = risk_guard.RiskVerdict(approved=False,
+                                         reasons=["some new guard fired"])
+        out = _plain_summary({}, verdict)
+        assert out["plain_reasons"] == ["some new guard fired"]
+
+    def test_strike_payload_drops_unused_fields(self):
+        ctx = self._ctx()
+        # Per-row keys are abbreviated and the fields no agent reasons over
+        # are dropped; expiry moves to the header so it isn't repeated per row.
+        assert '"sym"' in ctx.strikes and '"tradingsymbol"' not in ctx.strikes
+        for dropped in ("lot_units", "target_delta", "instrument_type"):
+            assert dropped not in ctx.strikes
+        assert ctx.strikes.count("2026-07-28") == 1
 
 
 # ── strike engine ────────────────────────────────────────────────────────────

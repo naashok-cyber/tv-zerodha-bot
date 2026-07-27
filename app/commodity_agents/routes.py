@@ -38,6 +38,10 @@ router = APIRouter(prefix="/commodity-agents", tags=["commodity-agents"])
 
 _CONFIRM_TTL_SECONDS = 60
 _RUN_COOLDOWN_SECONDS = 60          # on-demand trigger rate limit (LLM cost)
+# How long a stored analysis is still worth showing. Past this the Analyze
+# page keeps rendering it but marks it stale, rather than showing a blank
+# page that pushes the user into paying for another run.
+_ANALYSIS_TTL_SECONDS = 24 * 3600
 _confirm_tokens: dict[int, tuple[str, float]] = {}   # rec_id -> (token, expiry)
 _last_manual_run: dict[str, float] = {}              # per-commodity cooldown
 _lock = threading.Lock()
@@ -93,6 +97,8 @@ def _rec_to_dict(rec: CommodityRecommendation) -> dict:
         "strikes": json.loads(rec.strikes_json or "[]"),
         "confidence": rec.confidence,
         "reasoning_summary": rec.reasoning_summary,
+        "headline": rec.headline,
+        "plain_reasons": json.loads(rec.plain_reasons_json or "[]"),
         "dissenting_views": json.loads(rec.dissent_json or "[]"),
         "risk_vetoed": rec.risk_vetoed,
         "status": rec.status,
@@ -279,8 +285,13 @@ def latest_run(
     x_admin_auth_token: str | None = Header(default=None),
     zb_session: str | None = Cookie(default=None),
 ) -> dict:
-    """Most recent pipeline run for a ticker, with per-stage completion —
-    polled by the Analyze page while a run is in flight."""
+    """Most recent *analysis* run for a ticker, with per-stage completion.
+    Polled by the Analyze page while a run is in flight, and read once on
+    page load so the last result stays on screen instead of the user having
+    to pay for a fresh run just to see it again.
+
+    IV_SAMPLE rows are excluded: they fire every 5 min, carry no debate or
+    recommendation, and would otherwise always be the newest row."""
     _require_admin(x_admin_auth_token, zb_session)
     commodity = commodity.upper()
     if commodity not in COMMODITIES:
@@ -288,7 +299,8 @@ def latest_run(
     with _session() as session:
         run = (
             session.query(AgentRun)
-            .filter(AgentRun.commodity == commodity)
+            .filter(AgentRun.commodity == commodity,
+                    AgentRun.status != "IV_SAMPLE")
             .order_by(AgentRun.started_at.desc())
             .first()
         )
@@ -299,10 +311,16 @@ def latest_run(
             .filter(CommodityRecommendation.run_pk == run.id)
             .first()
         )
+        started = run.started_at
+        if started.tzinfo is None:
+            started = started.replace(tzinfo=IST)
+        age = max((datetime.now(IST) - started).total_seconds(), 0.0)
         return {"run": {
             "run_id": run.run_id,
             "commodity": run.commodity,
             "started_at": run.started_at.isoformat(),
+            "age_seconds": round(age),
+            "stale": age > _ANALYSIS_TTL_SECONDS,
             "status": run.status,
             "error": run.error,
             "stages": [

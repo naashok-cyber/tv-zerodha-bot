@@ -120,6 +120,74 @@ checkmarks → recommendation card with two-step approve).
 - Migrations: 6 more additive ALTERs in `app/storage.py _migrate` (rec
   suggested_lots; journal slippage/mae/mfe; positions excursion columns).
 
+### Wave 5 — token cost, readability, and the NO_TRADE bias (2026-07-27)
+
+Diagnosed from 234 production recommendation rows: **every outcome was
+NO_TRADE**, for three stacked reasons, all now fixed.
+
+1. **Regime gate over-fired on 221 of 234 runs (94%).** `regime.classify_regime`
+   compared a 5-bar (2.5 h) window against the 20 bars immediately before it on
+   *30-minute* candles. On MCX (09:00–23:30) the US-overlap evening genuinely
+   runs 2–3× the quiet Indian morning, so ordinary intraday seasonality cleared
+   "ratio ≥ 1.5 + one >3σ candle" nearly every evening — observed x2.05, x2.18,
+   x2.34, x3.18, x3.88. Those runs return NO_TRADE at confidence 1.0 without
+   calling an LLM at all. Fix: `RV_BASELINE_WINDOW` 20 → **40** (spans more than
+   one full session, so the baseline is not itself a time-of-day slice) plus
+   **IV confirmation** — a realized-vol spike is only a regime change if the
+   options market repriced it (`IV_CONFIRM_PERCENTILE = 80`); with < 10 IV
+   samples to rank against, demand `VOL_EXPANSION_RATIO_NO_IV = 3.0` instead.
+2. **No debate agent ever emitted `risk_flag: "low"`** — across all 13 debated
+   runs the tally was trend {medium 7, high 6}, event {medium 7, high 6}, vol
+   {medium 6, high 7}. All three system prompts framed the agent purely as a
+   risk-hunter and never defined the grades. Fix: shared `debate._RISK_RUBRIC`
+   with explicit definitions, "high" reserved for a *named near-term
+   mechanism*, plus per-role rebalancing (a quiet tape is a real finding; a fat
+   stable VRP is a genuine edge).
+3. **The Judge misapplied its own rules.** Verbatim from a stored output: *"The
+   Vol agent's risk_flag is 'high', which hard-blocks any short-premium
+   greenlight per desk rule 1"* — rule 1 only ever named the **Event** agent.
+   And rule 4 ("prefer NO_TRADE when the debate is split") was an always-open
+   escape hatch, since an adversarial debate is always somewhat split. Fix:
+   rule 1 now says a Trend/Vol "high" is *evidence to weigh, not a veto*; rule 4
+   says NO_TRADE "is NOT the safe default" and that a rich VRP with medium flags
+   is a trade sized down, not a pass. `enforce_gap_risk_gate` remains the only
+   hard block and is still code-level.
+
+**Token cost** (measured, not estimated). The old `_fmt_context` built one
+~3712-char blob and sent it identically to all four roles (~928 tok × 4).
+Replaced by a frozen `debate.DebateContext` whose `for_trend/for_event/for_vol/
+for_judge` render only the slice that role reasons over — the strike chain, the
+single biggest block, now goes to the Judge alone. Plus `_compact_strikes`
+(6 abbreviated keys, expiry hoisted to the header), recursive float rounding
+(`0.24563175887667` → `0.2456`), and per-role `max_tokens` in
+`llm_client.DEFAULT_ROLE_MAX_TOKENS` (700/1200/700/1400, was a flat 3000).
+Measured on a realistic 24-strike CRUDEOILM context: **6216 chars total across
+all four roles vs 14848 before — a 58% cut**.
+
+New **capacity gate** (`orchestrator._capacity_block`) runs the
+strategy-independent risk-guard checks (daily-loss breaker, concurrent-position
+cap, zero margin) *before* the debate: if one is already failing, no debate
+outcome could be approved, so the four LLM calls are skipped. Deliberately a
+subset — blackout and correlated-short-vega only bite short premium and the
+Judge may answer with a long option, so those stay downstream.
+
+**Readability + persistence.** `_JUDGE_SCHEMA` gained `headline` (one
+plain-English sentence < 110 chars, jargon words explicitly banned) and
+`plain_reasons` (2–4 bullets < 120 chars); both persist to new
+`CommodityRecommendation.headline` / `plain_reasons_json` columns and lead the
+Analyze card, with the dense `reasoning_summary` demoted to a "Desk notes"
+collapsible. Risk vetoes and both skip gates write their own plain-language
+text (`orchestrator._plain_summary` / `_VETO_PLAIN`) rather than leaving a
+headline that describes a trade which is not happening.
+
+The Analyze page previously had **no code path that displayed an existing
+run** — `renderResult` was reachable only from `pollRun`, which only started
+from `analyze()`, and `pollRun` discarded any run older than the current
+trigger. So seeing a past result required paying for a new one. Now `restore(t)`
+runs on page load and on every chip tap, `/runs/latest` excludes `IV_SAMPLE`
+rows (they fire every 5 min and would always be the newest), and the card shows
+an "as of" stamp that turns amber past `_ANALYSIS_TTL_SECONDS` (24 h).
+
 ### Verified results worth remembering
 - BANKNIFTY 436-day CSV backtest with `--cost-pct 1.0 --slippage-pct 0.25`:
   range-bound +1.99% gross → **+0.50% net**; trending +0.83% gross →
