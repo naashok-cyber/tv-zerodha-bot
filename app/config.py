@@ -269,7 +269,10 @@ class Settings(BaseSettings):
     # through the normal alert pipeline with a fixed ₹ SL / ₹ target GTT band.
     # Default OFF and paper-first — enable at /control after a paper track record.
     EMA_ANALYZER_ENABLED: bool = False               # live-toggleable at /control
-    EMA_ANALYZER_UNDERLYINGS: list[str] = ["NIFTY"]  # spot/near-fut chart driving the signal
+    EMA_ANALYZER_UNDERLYINGS: list[str] = ["NIFTY"]  # default active scrips; runtime-overridable at /control
+    EMA_ANALYZER_ALLOWED_UNDERLYINGS: list[str] = [  # menu shown in the /control scrip picker
+        "NIFTY", "BANKNIFTY", "CRUDEOILM", "NATURALGAS", "GOLDM", "SILVERM",
+    ]
     EMA_ANALYZER_FAST: int = 9                        # fast EMA period
     EMA_ANALYZER_SLOW: int = 39                       # slow EMA period
     EMA_ANALYZER_SLOPE_LOOKBACK: int = 5             # bars over which slow-EMA slope is measured

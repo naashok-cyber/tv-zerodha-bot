@@ -115,3 +115,80 @@ def test_signal_is_frozen_dataclass():
         assert "cannot assign" in str(exc).lower() or "frozen" in str(exc).lower()
     else:
         raise AssertionError("AnalyzerSignal should be immutable")
+
+
+# ── scrip selector (runtime override) ────────────────────────────────────────────
+
+_ALLOWED = ["NIFTY", "BANKNIFTY", "CRUDEOILM", "NATURALGAS", "GOLDM", "SILVERM"]
+
+
+def test_underlyings_override_toggle_add_remove_and_order(monkeypatch):
+    import app.state as state
+    monkeypatch.setattr(state, "_save_overrides", lambda: None)
+    state.set_ema_analyzer_underlyings(None)  # start from .env default
+    env = ["NIFTY"]
+
+    # Adding a scrip keeps the default and orders the result by the allowed menu.
+    out = state.toggle_ema_analyzer_underlying("CRUDEOILM", env, _ALLOWED)
+    assert out == ["NIFTY", "CRUDEOILM"]
+
+    # Toggling an active scrip removes it.
+    out = state.toggle_ema_analyzer_underlying("NIFTY", env, _ALLOWED)
+    assert out == ["CRUDEOILM"]
+
+    # Case-insensitive input resolves to the canonical symbol.
+    out = state.toggle_ema_analyzer_underlying("goldm", env, _ALLOWED)
+    assert out == ["CRUDEOILM", "GOLDM"]
+
+    state.set_ema_analyzer_underlyings(None)
+
+
+def test_underlyings_override_ignores_unknown_symbol(monkeypatch):
+    import app.state as state
+    monkeypatch.setattr(state, "_save_overrides", lambda: None)
+    state.set_ema_analyzer_underlyings(["CRUDEOILM"])
+    out = state.toggle_ema_analyzer_underlying("RELIANCE", ["NIFTY"], _ALLOWED)
+    assert out == ["CRUDEOILM"]  # unchanged — not in the allowed menu
+    state.set_ema_analyzer_underlyings(None)
+
+
+def test_get_underlyings_falls_back_to_env_default(monkeypatch):
+    import app.state as state
+    monkeypatch.setattr(state, "_save_overrides", lambda: None)
+    state.set_ema_analyzer_underlyings(None)
+    assert state.get_ema_analyzer_underlyings(["NIFTY", "BANKNIFTY"]) == ["NIFTY", "BANKNIFTY"]
+
+
+def test_job_iterates_the_override_not_the_setting(monkeypatch):
+    """run_ema_analyzer_job must trade the runtime-selected scrips, not .env."""
+    import app.state as state
+    import app.ema_analyzer as ema
+    from app import kite_session
+
+    monkeypatch.setattr(state, "is_ema_analyzer_enabled", lambda d: True)
+    monkeypatch.setattr(state, "is_emergency_stop", lambda: False)
+    monkeypatch.setattr(state, "get_session_invalid", lambda: False)
+    monkeypatch.setattr(state, "is_paper_mode", lambda d: True)
+    monkeypatch.setattr(state, "get_ema_analyzer_underlyings", lambda d: ["CRUDEOILM", "GOLDM"])
+
+    class _Mgr:
+        def get_kite(self):
+            return object()
+
+    monkeypatch.setattr(kite_session, "get_session_manager", lambda: _Mgr())
+
+    seen: list[str] = []
+    monkeypatch.setattr(ema, "_process_underlying", lambda name, *a, **k: seen.append(name))
+
+    class _S:
+        EMA_ANALYZER_ENABLED = False
+        DRY_RUN = True
+        EMA_ANALYZER_CANDLE_INTERVAL = "minute"
+        EMA_ANALYZER_FAST = 9
+        EMA_ANALYZER_SLOW = 39
+        EMA_ANALYZER_SLOPE_LOOKBACK = 5
+        EMA_ANALYZER_SLOPE_MIN_PCT = 0.0003
+        EMA_ANALYZER_UNDERLYINGS = ["NIFTY"]
+
+    ema.run_ema_analyzer_job(_S(), session_factory=lambda: None)
+    assert seen == ["CRUDEOILM", "GOLDM"]

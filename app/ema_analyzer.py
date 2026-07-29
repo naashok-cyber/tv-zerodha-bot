@@ -325,7 +325,8 @@ def run_ema_analyzer_job(settings: Any, session_factory: Any) -> None:
     slope_min = settings.EMA_ANALYZER_SLOPE_MIN_PCT
     min_needed = slow + lookback + 1
 
-    for underlying_name in settings.EMA_ANALYZER_UNDERLYINGS:
+    underlyings = state.get_ema_analyzer_underlyings(settings.EMA_ANALYZER_UNDERLYINGS)
+    for underlying_name in underlyings:
         try:
             _process_underlying(
                 underlying_name, kite, session_factory, settings,

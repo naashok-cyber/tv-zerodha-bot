@@ -37,6 +37,7 @@ _STRADDLE_DEFENSE_MODE_OVERRIDE: Optional[str] = None  # ALERT/SEMI_AUTO/AUTO; N
 _PARTIAL_BOOKING_ENABLED_OVERRIDE: Optional[bool] = None  # None = use .env PARTIAL_BOOKING_ENABLED
 _ENTRY_WINGS_ENABLED_OVERRIDE: Optional[bool] = None  # None = use .env STRADDLE_ENTRY_WINGS_ENABLED
 _EMA_ANALYZER_ENABLED_OVERRIDE: Optional[bool] = None  # None = use .env EMA_ANALYZER_ENABLED
+_EMA_ANALYZER_UNDERLYINGS_OVERRIDE: Optional[list] = None  # None = use .env EMA_ANALYZER_UNDERLYINGS
 _MAX_TRADES_PER_DAY_OVERRIDE: Optional[int] = None
 _MAX_OPEN_POSITIONS_OVERRIDE: Optional[int] = None
 _CAPITAL_PER_TRADE_OVERRIDE: Optional[float] = None
@@ -70,6 +71,7 @@ def _save_overrides() -> None:
         "partial_booking_enabled": _PARTIAL_BOOKING_ENABLED_OVERRIDE,
         "entry_wings_enabled": _ENTRY_WINGS_ENABLED_OVERRIDE,
         "ema_analyzer_enabled": _EMA_ANALYZER_ENABLED_OVERRIDE,
+        "ema_analyzer_underlyings": _EMA_ANALYZER_UNDERLYINGS_OVERRIDE,
         "max_trades_per_day": _MAX_TRADES_PER_DAY_OVERRIDE,
         "max_open_positions": _MAX_OPEN_POSITIONS_OVERRIDE,
         "capital_per_trade": _CAPITAL_PER_TRADE_OVERRIDE,
@@ -97,7 +99,7 @@ def load_overrides_from_disk() -> None:
     global _NG_HEDGE_ENABLED_OVERRIDE, _CRUDE_HEDGE_ENABLED_OVERRIDE, _STRADDLE_DEFENSE_ENABLED_OVERRIDE
     global _STRADDLE_DEFENSE_MODE_OVERRIDE
     global _PARTIAL_BOOKING_ENABLED_OVERRIDE, _ENTRY_WINGS_ENABLED_OVERRIDE
-    global _EMA_ANALYZER_ENABLED_OVERRIDE
+    global _EMA_ANALYZER_ENABLED_OVERRIDE, _EMA_ANALYZER_UNDERLYINGS_OVERRIDE
 
     if not os.path.exists(_OVERRIDES_PATH):
         return
@@ -149,6 +151,8 @@ def load_overrides_from_disk() -> None:
             _ENTRY_WINGS_ENABLED_OVERRIDE = data["entry_wings_enabled"]
         if "ema_analyzer_enabled" in data:
             _EMA_ANALYZER_ENABLED_OVERRIDE = data["ema_analyzer_enabled"]
+        if "ema_analyzer_underlyings" in data:
+            _EMA_ANALYZER_UNDERLYINGS_OVERRIDE = data["ema_analyzer_underlyings"]
         if "straddle_defense_mode" in data:
             _STRADDLE_DEFENSE_MODE_OVERRIDE = data["straddle_defense_mode"]
         if "max_trades_per_day" in data:
@@ -534,6 +538,45 @@ def toggle_ema_analyzer_enabled(env_default: bool) -> bool:
         return _EMA_ANALYZER_ENABLED_OVERRIDE
 
 
+def get_ema_analyzer_underlyings(env_default: list) -> list:
+    """Active scrips the analyzer trades. Override (chosen at /control) wins over .env."""
+    with _lock:
+        val = _EMA_ANALYZER_UNDERLYINGS_OVERRIDE
+        return list(val) if val is not None else list(env_default)
+
+
+def set_ema_analyzer_underlyings(value: Optional[list]) -> None:
+    global _EMA_ANALYZER_UNDERLYINGS_OVERRIDE
+    with _lock:
+        _EMA_ANALYZER_UNDERLYINGS_OVERRIDE = list(value) if value is not None else None
+        _save_overrides()
+
+
+def toggle_ema_analyzer_underlying(symbol: str, env_default: list, allowed: list) -> list:
+    """Flip one scrip's membership in the active set; returns the new active list.
+
+    Unknown symbols (not in `allowed`) are ignored. The result is ordered by
+    `allowed` for stable display, with any non-menu members preserved at the end.
+    """
+    global _EMA_ANALYZER_UNDERLYINGS_OVERRIDE
+    symbol = (symbol or "").strip().upper()
+    with _lock:
+        current = list(
+            _EMA_ANALYZER_UNDERLYINGS_OVERRIDE
+            if _EMA_ANALYZER_UNDERLYINGS_OVERRIDE is not None else env_default
+        )
+        if symbol not in allowed:
+            return current
+        members = set(current)
+        members.discard(symbol) if symbol in members else members.add(symbol)
+        ordered = [s for s in allowed if s in members]
+        extras = [s for s in current if s not in allowed and s in members]
+        new_list = ordered + extras
+        _EMA_ANALYZER_UNDERLYINGS_OVERRIDE = new_list
+        _save_overrides()
+        return list(new_list)
+
+
 # ── Straddle defense (1-min monitor + alerts; see app/straddle_defense.py) ────
 
 def is_straddle_defense_enabled(env_default: bool) -> bool:
@@ -675,6 +718,7 @@ def get_all_overrides() -> dict:
             "partial_booking_enabled": _PARTIAL_BOOKING_ENABLED_OVERRIDE,
             "entry_wings_enabled": _ENTRY_WINGS_ENABLED_OVERRIDE,
             "ema_analyzer_enabled": _EMA_ANALYZER_ENABLED_OVERRIDE,
+            "ema_analyzer_underlyings": _EMA_ANALYZER_UNDERLYINGS_OVERRIDE,
             "max_trades_per_day": _MAX_TRADES_PER_DAY_OVERRIDE,
             "max_open_positions": _MAX_OPEN_POSITIONS_OVERRIDE,
             "capital_per_trade": _CAPITAL_PER_TRADE_OVERRIDE,

@@ -87,6 +87,7 @@ terraform/          — GCP infrastructure
 | POST | `/control/partial-booking/toggle` | Enable/disable partial profit booking |
 | POST | `/control/entry-wings/toggle` | Enable/disable defined-risk wings at straddle entry |
 | POST | `/control/ema-analyzer/toggle` | Enable/disable the 1-min EMA crossover analyzer |
+| POST | `/control/ema-analyzer/underlyings` | Toggle one scrip in the analyzer's active set (chip picker) |
 | GET | `/kite/login` | Start Kite OAuth flow |
 | GET | `/kite/callback` | Exchange request_token → access_token |
 | GET | `/healthz` | Health check (returns session status) |
@@ -268,8 +269,9 @@ Paper mode (env `DRY_RUN` or the /control paper toggle) runs the **full real pip
 
 ## EMA Analyzer (`app/ema_analyzer.py`)
 
-`EMA_ANALYZER_ENABLED` (env + live /control toggle, default off). `run_ema_analyzer_job` (1-min cron at `:15s`, Mon–Fri 09–23 IST) is a **momentum long-options** strategy: it reads 1-min candles for each `EMA_ANALYZER_UNDERLYINGS` symbol (NSE index spot / MCX near-fut) and buys a long option on a confirmed EMA crossover.
+`EMA_ANALYZER_ENABLED` (env + live /control toggle, default off). `run_ema_analyzer_job` (1-min cron at `:15s`, Mon–Fri 09–23 IST) is a **momentum long-options** strategy: it reads 1-min candles for each active scrip (NSE index spot / MCX near-fut) and buys a long option on a confirmed EMA crossover.
 
+- **Scrip picker** (chips on the /control Settings tab, `POST /control/ema-analyzer/underlyings`): the active set is a **runtime override** (`state.get_ema_analyzer_underlyings`, persisted to `state_overrides.json`), so scrips are chosen by tapping — no `.env` edit or redeploy. Menu = `EMA_ANALYZER_ALLOWED_UNDERLYINGS` (NIFTY, BANKNIFTY, CRUDEOILM, NATURALGAS, GOLDM, SILVERM); the override falls back to `EMA_ANALYZER_UNDERLYINGS` (default `["NIFTY"]`). The job iterates the override, not the raw setting. Because the analyzer sends an explicit `option_type`, MCX names (incl. NATURALGAS) route to the **options** branch in `_process_alert` (`main.py:1696`), never futures — an absent/illiquid option chain just fails strike selection and no-ops that tick.
 - **Signal** (pure, in `compute_signal`, unit-tested): EMA-fast (`EMA_ANALYZER_FAST`=9) crosses EMA-slow (`EMA_ANALYZER_SLOW`=39) between the last two *completed* bars, AND the slow-EMA % change over `EMA_ANALYZER_SLOPE_LOOKBACK` bars exceeds `EMA_ANALYZER_SLOPE_MIN_PCT` in the cross direction (the trend filter that suppresses chop). Bullish cross + rising slope → BUY; bearish + falling → SELL. `ema_series` seeds with SMA(first period) to match TradingView's `ta.ema`.
 - **Execution**: BUY → **long CE**, SELL → **long PE**, always bought (never written) regardless of global trade mode — routed as an `AlertPayload(action="BUY", option_type=CE/PE)` through `_process_alert`, reusing risk guards, strike selection (delta), sizing, GTT and paper/live handling. One position at a time per underlying (per mode); the always-buy side means the global BUY/SELL trade-mode is bypassed.
 - **Fixed ₹ exits**: the payload carries `sl_inr`/`target_inr` (`EMA_ANALYZER_SL_INR`=3000, `EMA_ANALYZER_TARGET_INR`=6000). `_on_entry_filled` converts each to a premium-point distance (`₹ / (fill_qty × mcx_units)`) so **loss at SL / gain at target equals the ₹ amount regardless of size**; those become the GTT OCO triggers. Paper exits fire off those triggers in `paper_monitor_job` like any other position.
@@ -351,7 +353,8 @@ Relationships: Alert → [Order] → Position → ClosedTrade; Order → Gtt
 
 **EMA analyzer** (`app/ema_analyzer.py`)
 - `EMA_ANALYZER_ENABLED=false` — live-overridable at /control
-- `EMA_ANALYZER_UNDERLYINGS=["NIFTY"]`, `EMA_ANALYZER_FAST=9`, `EMA_ANALYZER_SLOW=39`
+- `EMA_ANALYZER_UNDERLYINGS=["NIFTY"]` (default active set; runtime-overridden by the /control scrip picker), `EMA_ANALYZER_ALLOWED_UNDERLYINGS=[NIFTY, BANKNIFTY, CRUDEOILM, NATURALGAS, GOLDM, SILVERM]` (picker menu)
+- `EMA_ANALYZER_FAST=9`, `EMA_ANALYZER_SLOW=39`
 - `EMA_ANALYZER_SLOPE_LOOKBACK=5`, `EMA_ANALYZER_SLOPE_MIN_PCT=0.0003`, `EMA_ANALYZER_CANDLE_INTERVAL=minute`
 - `EMA_ANALYZER_SL_INR=3000`, `EMA_ANALYZER_TARGET_INR=6000` — fixed ₹ GTT band per position
 - `EMA_ANALYZER_EXIT_ON_OPPOSITE=false`, `EMA_ANALYZER_SKIP_EXPIRY_DAY=true`
@@ -459,6 +462,7 @@ All access via getter/setter with `_lock`. Persistent overrides survive restarts
 | `get_rr_ratio(env_default)` | `_RR_RATIO` | Target/SL ratio |
 | `get_trade_mode()` | persisted | BUY_OPTIONS / SELL_OPTIONS |
 | `is_ema_analyzer_enabled(env_default)` | `_EMA_ANALYZER_ENABLED_OVERRIDE` | None = use .env EMA_ANALYZER_ENABLED |
+| `get_ema_analyzer_underlyings(env_default)` | `_EMA_ANALYZER_UNDERLYINGS_OVERRIDE` | None = use .env EMA_ANALYZER_UNDERLYINGS; set via /control scrip picker |
 | `get_session_invalid()` | in-memory only | Set by daily_session_check |
 
 Orange dot on /control UI = active override present.

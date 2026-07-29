@@ -4521,6 +4521,17 @@ async def control_page(
     ema_label     = "ON" if ema_enabled else "OFF"
     ema_lbl       = "Disable" if ema_enabled else "Enable"
     ema_cls       = "ba" if ema_enabled else "bg2"
+    ema_active    = state.get_ema_analyzer_underlyings(settings.EMA_ANALYZER_UNDERLYINGS)
+    ema_active_label = ", ".join(ema_active) if ema_active else "none selected"
+    ema_chips = "".join(
+        "<form method='post' action='/control/ema-analyzer/underlyings' "
+        "style='margin:0;display:inline-block'>"
+        f"<input type='hidden' name='symbol' value='{_sym}'>"
+        f"<button class='btn {'ba' if _sym in ema_active else 'bg2'}' type='submit' "
+        "style='padding:7px 12px;font-size:.78em;min-height:38px'>"
+        f"{'✓ ' if _sym in ema_active else ''}{_sym}</button></form>"
+        for _sym in settings.EMA_ANALYZER_ALLOWED_UNDERLYINGS
+    )
 
     def src(key: str) -> str:
         return (
@@ -4822,9 +4833,13 @@ async def control_page(
         + f"<button class='btn {ew_cls}' type='submit'>{ew_lbl}</button></form></div>"
         + f"<div class='mdr'><div class='mdl'>EMA Analyzer&ensp;<span class='pill {ema_pill}'>{ema_label}</span>"
         + f"<span style='font-size:.70em;color:var(--ink3)'>&ensp;1-min EMA{settings.EMA_ANALYZER_FAST}/{settings.EMA_ANALYZER_SLOW} cross + slope → long "
-        + f"CE/PE on {', '.join(settings.EMA_ANALYZER_UNDERLYINGS)}, ₹{settings.EMA_ANALYZER_SL_INR:.0f} SL / ₹{settings.EMA_ANALYZER_TARGET_INR:.0f} target</span></div>"
+        + f"CE/PE, ₹{settings.EMA_ANALYZER_SL_INR:.0f} SL / ₹{settings.EMA_ANALYZER_TARGET_INR:.0f} target</span></div>"
         + "<form method='post' action='/control/ema-analyzer/toggle' style='margin:0'>"
         + f"<button class='btn {ema_cls}' type='submit'>{ema_lbl}</button></form></div>"
+        + "<div style='display:flex;flex-wrap:wrap;gap:6px;padding:2px 0 6px'>"
+        + f"<span style='font-size:.70em;color:var(--ink3);width:100%'>Scrips (tap to toggle) — trading: {ema_active_label}</span>"
+        + ema_chips
+        + "</div>"
         + "</div>"
 
         # kite session
@@ -5056,6 +5071,21 @@ async def toggle_ema_analyzer(
     new_val = state.toggle_ema_analyzer_enabled(settings.EMA_ANALYZER_ENABLED)
     log.info("EMA analyzer toggled to %s", new_val)
     return Response(status_code=302, headers={"Location": "/control"})
+
+
+@app.post("/control/ema-analyzer/underlyings")
+async def toggle_ema_analyzer_underlying_route(
+    symbol: str = Form(...),
+    _: None = Depends(_auth_guard),
+    settings: Settings = Depends(get_current_settings),
+) -> Response:
+    new_list = state.toggle_ema_analyzer_underlying(
+        symbol,
+        settings.EMA_ANALYZER_UNDERLYINGS,
+        settings.EMA_ANALYZER_ALLOWED_UNDERLYINGS,
+    )
+    log.info("EMA analyzer scrips now %s (toggled %s)", new_list, symbol)
+    return Response(status_code=302, headers={"Location": "/control#settings"})
 
 
 @app.post("/control/ng-hedge/toggle")
