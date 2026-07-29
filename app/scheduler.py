@@ -666,6 +666,33 @@ def make_scheduler(
             settings.BNF_HEDGE_ENABLED,
         )
 
+        # GOLDM delta hedge — MCX hours, 5-min cadence, price-movement trigger.
+        # second=45 avoids the 1-min cron slots (hedge :05, EMA :15, paper :20,
+        # partial :35, BNF :40, defense :50). Guarded by GOLDM_HEDGE_ENABLED.
+        from app.goldm_delta_hedge import run_goldm_hedge_job
+        scheduler.add_job(
+            run_goldm_hedge_job,
+            trigger="cron",
+            day_of_week="mon-fri",
+            hour="9-23",
+            minute="*/5",
+            second=45,
+            kwargs={"settings": settings, "session_factory": session_factory},
+            id="goldm_delta_hedge",
+            misfire_grace_time=60,
+            max_instances=1,
+        )
+        log.info(
+            "[scheduler] GOLDM delta-hedge cron: every 5 min IST, Mon-Fri 09-23 "
+            "(trigger=±₹%.0f F move, min_δ=%.0f, freeze=%dm before close, "
+            "cap=%d/day, enabled=%s via .env)",
+            settings.GOLDM_HEDGE_TRIGGER_INR,
+            settings.GOLDM_HEDGE_MIN_DELTA_UNITS,
+            settings.GOLDM_HEDGE_FREEZE_BEFORE_MIN,
+            settings.GOLDM_HEDGE_MAX_HEDGES_PER_DAY,
+            settings.GOLDM_HEDGE_ENABLED,
+        )
+
     if settings.SCHEDULED_STRADDLE_ENABLED and session_factory is not None:
         from app.scheduled_straddle import run_scheduled_straddle, squareoff_scheduled_straddles
 

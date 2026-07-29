@@ -477,6 +477,19 @@ class Settings(BaseSettings):
     BNF_HEDGE_MAX_LOTS_PER_DAY: int = 8
     BNF_HEDGE_STATE_PATH: str = "data/bnf_hedge_state.json"
 
+    # ── GOLDM delta hedge (MCX, 5-min cadence, price-movement triggered) ─────
+    # Fires when F moves ±GOLDM_HEDGE_TRIGGER_INR from last hedge checkpoint.
+    # Rebalances via GOLDM front-month FUT (each lot = ±10 δ units, cleanest
+    # correction — no gamma/theta/vega side-effects). Skips if |δ| < min after
+    # F move (would overshoot with fractional lot).
+    GOLDM_HEDGE_ENABLED: bool = False
+    GOLDM_HEDGE_TRIGGER_INR: float = 300.0
+    GOLDM_HEDGE_MIN_DELTA_UNITS: float = 5.0
+    GOLDM_HEDGE_FREEZE_BEFORE_MIN: int = 30
+    GOLDM_HEDGE_MAX_LOTS_PER_TICK: int = 5
+    GOLDM_HEDGE_MAX_HEDGES_PER_DAY: int = 20
+    GOLDM_HEDGE_STATE_PATH: str = "data/goldm_hedge_state.json"
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
