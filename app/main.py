@@ -4506,6 +4506,11 @@ async def control_page(
     crude_label   = "RUNNING" if crude_enabled else "STOPPED"
     crude_lbl     = "Stop"    if crude_enabled else "Start"
     crude_cls     = "br2"     if crude_enabled else "bg2"
+    fmove_enabled = state.is_crudeoilm_fmove_hedge_enabled(settings.CRUDEOILM_FMOVE_HEDGE_ENABLED)
+    fmove_pill    = "pg" if fmove_enabled else "pr"
+    fmove_label   = "RUNNING" if fmove_enabled else "STOPPED"
+    fmove_lbl     = "Stop"    if fmove_enabled else "Start"
+    fmove_cls     = "br2"     if fmove_enabled else "bg2"
     pb_enabled    = state.is_partial_booking_enabled(settings.PARTIAL_BOOKING_ENABLED)
     pb_pill       = "pg" if pb_enabled else "pm"
     pb_label      = "ON" if pb_enabled else "OFF"
@@ -4859,6 +4864,10 @@ async def control_page(
         + "<span style='font-size:.70em;color:var(--ink3)'>&ensp;every 5 min (:02) &middot; band in barrels</span></div>"
         + "<form method='post' action='/control/crude-hedge/toggle' style='margin:0'>"
         + f"<button class='btn {crude_cls}' type='submit'>{crude_lbl}</button></form></div>"
+        + f"<div class='mdr'><div class='mdl'>CRUDEOILM F-move Hedge&ensp;<span class='pill {fmove_pill}'>{fmove_label}</span>"
+        + f"<span style='font-size:.70em;color:var(--ink3)'>&ensp;every 1 min (:25) &middot; SELL ATM opt on ±₹{settings.CRUDEOILM_FMOVE_HEDGE_TRIGGER_INR:.0f} F move</span></div>"
+        + "<form method='post' action='/control/crudeoilm-fmove-hedge/toggle' style='margin:0'>"
+        + f"<button class='btn {fmove_cls}' type='submit'>{fmove_lbl}</button></form></div>"
         + f"<div class='mdr'><div class='mdl'>Straddle Defense&ensp;<span class='pill {'pg' if sd_enabled else 'pr'}'>{'RUNNING' if sd_enabled else 'STOPPED'}</span>"
         + f"<span class='pill {'pa' if sd_mode != 'ALERT' else 'pm'}'>{sd_mode}</span>"
         + "<span style='font-size:.70em;color:var(--ink3)'>&ensp;1-min monitor &middot; drawdown+IV trigger &middot; wing hedging</span></div>"
@@ -5129,6 +5138,32 @@ async def toggle_crude_hedge(
         )
     except Exception as exc:
         log.warning("CRUDEOILM delta-hedge toggle: telegram notify failed: %s", exc)
+    return Response(status_code=302, headers={"Location": "/control"})
+
+
+@app.post("/control/crudeoilm-fmove-hedge/toggle")
+async def toggle_crudeoilm_fmove_hedge(
+    _: None = Depends(_auth_guard),
+    settings: Settings = Depends(get_current_settings),
+) -> Response:
+    """Start/stop the CRUDEOILM F-move-triggered SELL-options hedge.
+
+    Distinct from the band-based /control/crude-hedge/toggle — this fires on
+    front-month FUT movement from the last hedge fill and always SELLs options.
+    """
+    from app.commodity_agents.notify import send_telegram
+
+    new_val = state.toggle_crudeoilm_fmove_hedge_enabled(
+        settings.CRUDEOILM_FMOVE_HEDGE_ENABLED
+    )
+    log.warning("CRUDEOILM fmove-hedge toggled to %s via /control", new_val)
+    try:
+        send_telegram(
+            settings,
+            f"⚡ CRUDEOILM F-move Hedge {'STARTED' if new_val else 'STOPPED'} via /control",
+        )
+    except Exception as exc:
+        log.warning("CRUDEOILM fmove-hedge toggle: telegram notify failed: %s", exc)
     return Response(status_code=302, headers={"Location": "/control"})
 
 

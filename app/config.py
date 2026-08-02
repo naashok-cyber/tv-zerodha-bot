@@ -377,6 +377,19 @@ class Settings(BaseSettings):
     CRUDEOILM_HEDGE_PHASE_MIN: int = 2
     CRUDEOILM_HEDGE_VELOCITY_SAMPLES: int = 2  # 2 x 5 min = 10-min trend window
 
+    # ── CRUDEOILM F-move delta hedge (SELL-options-only, price-triggered) ────
+    # Separate mechanism from the band-based CRUDEOILM_HEDGE_* above. Fires when
+    # front-month FUT moves >= trigger from last hedge fill AND |δ| is growing.
+    # Sells ATM CE (if δ>0) or ATM PE (if δ<0), sized to zero net δ, capped.
+    # Live-toggleable at /control.
+    CRUDEOILM_FMOVE_HEDGE_ENABLED: bool = False
+    CRUDEOILM_FMOVE_HEDGE_TRIGGER_INR: float = 100.0     # ₹/bbl move from anchor
+    CRUDEOILM_FMOVE_HEDGE_MIN_DELTA_UNITS: float = 5.0   # skip if |δ| below this
+    CRUDEOILM_FMOVE_HEDGE_MAX_LOTS_PER_TICK: int = 3     # cap per hedge fire
+    CRUDEOILM_FMOVE_HEDGE_COOLDOWN_MIN: int = 5          # min gap between hedges
+    CRUDEOILM_FMOVE_HEDGE_MAX_HEDGES_PER_DAY: int = 20
+    CRUDEOILM_FMOVE_HEDGE_STATE_PATH: str = "data/crudeoilm_fmove_hedge_state.json"
+
     # ── NATURALGAS half-exit (profit-lock; piggybacks on delta-hedge cron) ────
     # Default True here (instead of in .env) so the running container picks it
     # up via a docker compose restart, without needing a recreate. Re-rebuilds

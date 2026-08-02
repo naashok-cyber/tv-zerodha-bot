@@ -693,6 +693,38 @@ def make_scheduler(
             settings.GOLDM_HEDGE_ENABLED,
         )
 
+        # CRUDEOILM F-move-triggered SELL-options delta hedge. Separate from
+        # the band-based ng_delta_hedge dispatcher — this one wakes every minute
+        # and only acts when front-month FUT has moved trigger from the last
+        # hedge fill AND |δ| is growing. second=25 keeps it clear of the other
+        # 1-min crons (hedge :05, EMA :15, paper :20, partial :35, BNF :40,
+        # defense :50). Guarded by state.is_crudeoilm_fmove_hedge_enabled so it
+        # is a cheap no-op when off; live-toggleable at /control.
+        from app.crudeoilm_fmove_hedge import run_crudeoilm_fmove_hedge_job
+        scheduler.add_job(
+            run_crudeoilm_fmove_hedge_job,
+            trigger="cron",
+            day_of_week="mon-fri",
+            hour="9-23",
+            minute="*",
+            second=25,
+            kwargs={"settings": settings, "session_factory": session_factory},
+            id="crudeoilm_fmove_hedge",
+            misfire_grace_time=30,
+            max_instances=1,
+        )
+        log.info(
+            "[scheduler] CRUDEOILM fmove-hedge cron: every 1 min IST, Mon-Fri 09-23 "
+            "(trigger=±₹%.0f F move, min_δ=%.0f, cap=%d/tick, "
+            "cooldown=%dm, daily_cap=%d, enabled=%s via .env)",
+            settings.CRUDEOILM_FMOVE_HEDGE_TRIGGER_INR,
+            settings.CRUDEOILM_FMOVE_HEDGE_MIN_DELTA_UNITS,
+            settings.CRUDEOILM_FMOVE_HEDGE_MAX_LOTS_PER_TICK,
+            settings.CRUDEOILM_FMOVE_HEDGE_COOLDOWN_MIN,
+            settings.CRUDEOILM_FMOVE_HEDGE_MAX_HEDGES_PER_DAY,
+            settings.CRUDEOILM_FMOVE_HEDGE_ENABLED,
+        )
+
     if settings.SCHEDULED_STRADDLE_ENABLED and session_factory is not None:
         from app.scheduled_straddle import run_scheduled_straddle, squareoff_scheduled_straddles
 
