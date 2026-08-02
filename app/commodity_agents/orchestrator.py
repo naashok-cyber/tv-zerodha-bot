@@ -892,6 +892,7 @@ def register_jobs(scheduler: Any, settings: Any, session_factory: Any) -> None:
     scheduler.add_job(
         run_all_commodities,
         trigger="cron",
+        day_of_week="mon-fri",
         args=[session_factory, settings],
         id="commodity_agents_cycle",
         misfire_grace_time=300,
@@ -906,6 +907,7 @@ def register_jobs(scheduler: Any, settings: Any, session_factory: Any) -> None:
     scheduler.add_job(
         run_all_iv_samples,
         trigger="cron",
+        day_of_week="mon-fri",
         args=[session_factory, settings],
         id="commodity_agents_iv_sample",
         misfire_grace_time=120,
@@ -932,22 +934,26 @@ def register_jobs(scheduler: Any, settings: Any, session_factory: Any) -> None:
     from app.commodity_agents.journal import sync_job
     from app.commodity_agents.portfolio import check_delta_drift
     scheduler.add_job(
-        check_delta_drift, trigger="cron", hour="9-23", minute="*/15",
+        check_delta_drift, trigger="cron", day_of_week="mon-fri",
+        hour="9-23", minute="*/15",
         args=[session_factory, settings],
         id="commodity_agents_delta_drift", misfire_grace_time=120,
     )
     scheduler.add_job(
-        sync_job, trigger="cron", hour="9-23", minute=20,
+        sync_job, trigger="cron", day_of_week="mon-fri",
+        hour="9-23", minute=20,
         args=[session_factory],
         id="commodity_agents_journal_sync", misfire_grace_time=300,
     )
     scheduler.add_job(
-        calibration_job, trigger="cron", hour=8, minute=50,
+        calibration_job, trigger="cron", day_of_week="mon-fri",
+        hour=8, minute=50,
         args=[session_factory],
         id="commodity_agents_calibration", misfire_grace_time=600,
     )
     scheduler.add_job(
-        briefing_job, trigger="cron", hour=8, minute=45,
+        briefing_job, trigger="cron", day_of_week="mon-fri",
+        hour=8, minute=45,
         args=[session_factory, settings],
         id="commodity_agents_briefing", misfire_grace_time=600,
     )

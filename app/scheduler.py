@@ -67,7 +67,11 @@ class _PreciseTimer:
                 time.sleep(0.05)
             if self._stop_event.is_set():
                 break
-            log.info("[PreciseTimer] %s firing at %s", self._name, datetime.now(IST).strftime("%H:%M:%S"))
+            now = datetime.now(IST)
+            if now.weekday() >= 5:  # markets closed Sat/Sun — skip, sleep to next fire
+                log.info("[PreciseTimer] %s skipped (weekend)", self._name)
+                continue
+            log.info("[PreciseTimer] %s firing at %s", self._name, now.strftime("%H:%M:%S"))
             try:
                 self._callback(*self._args, **self._kwargs)
             except Exception as exc:
@@ -366,6 +370,7 @@ def make_scheduler(
         scheduler.add_job(
             auto_login_job,
             trigger="cron",
+            day_of_week="mon-fri",
             hour=al_h,
             minute=al_m,
             kwargs={"watcher_restart_fn": watcher_restart_fn},
@@ -380,6 +385,7 @@ def make_scheduler(
     scheduler.add_job(
         daily_session_check,
         trigger="cron",
+        day_of_week="mon-fri",
         hour=settings.SCHEDULER_HOUR_IST,
         minute=settings.SCHEDULER_MINUTE_IST,
         id="daily_session_check",
@@ -389,6 +395,7 @@ def make_scheduler(
         scheduler.add_job(
             refresh_instruments_job,
             trigger="cron",
+            day_of_week="mon-fri",
             hour=8,
             minute=30,
             args=[session_factory],
@@ -399,6 +406,7 @@ def make_scheduler(
         scheduler.add_job(
             eod_squareoff_job,
             trigger="cron",
+            day_of_week="mon-fri",
             hour=nse_h,
             minute=nse_m,
             kwargs={
@@ -414,6 +422,7 @@ def make_scheduler(
         scheduler.add_job(
             eod_squareoff_job,
             trigger="cron",
+            day_of_week="mon-fri",
             hour=mcx_h,
             minute=mcx_m,
             kwargs={
@@ -429,6 +438,7 @@ def make_scheduler(
         scheduler.add_job(
             expiry_day_squareoff_job,
             trigger="cron",
+            day_of_week="mon-fri",
             hour=exp_h,
             minute=exp_m,
             kwargs={
@@ -476,6 +486,7 @@ def make_scheduler(
             scheduler.add_job(
                 squareoff_window_straddle,
                 trigger="cron",
+                day_of_week="mon-fri",
                 hour=_ws_h,
                 minute=_ws_m,
                 kwargs={
@@ -497,6 +508,7 @@ def make_scheduler(
     scheduler.add_job(
         run_nse_expiry_snapshot_job,
         trigger="cron",
+        day_of_week="mon-fri",
         hour=15,
         minute=31,
         id="nse_expiry_snapshot",
@@ -506,6 +518,7 @@ def make_scheduler(
     scheduler.add_job(
         run_mcx_expiry_snapshot_job,
         trigger="cron",
+        day_of_week="mon-fri",
         hour=22,
         minute=25,
         id="mcx_expiry_snapshot",
@@ -752,6 +765,7 @@ def make_scheduler(
         scheduler.add_job(
             squareoff_scheduled_straddles,
             trigger="cron",
+            day_of_week="mon-fri",
             hour=sq_h,
             minute=sq_m,
             kwargs={
