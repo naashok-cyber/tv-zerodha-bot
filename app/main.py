@@ -4511,6 +4511,11 @@ async def control_page(
     fmove_label   = "RUNNING" if fmove_enabled else "STOPPED"
     fmove_lbl     = "Stop"    if fmove_enabled else "Start"
     fmove_cls     = "br2"     if fmove_enabled else "bg2"
+    silverm_enabled = state.is_silverm_hedge_enabled(settings.SILVERM_HEDGE_ENABLED)
+    silverm_pill    = "pg" if silverm_enabled else "pr"
+    silverm_label   = "RUNNING" if silverm_enabled else "STOPPED"
+    silverm_lbl     = "Stop"    if silverm_enabled else "Start"
+    silverm_cls     = "br2"     if silverm_enabled else "bg2"
     pb_enabled    = state.is_partial_booking_enabled(settings.PARTIAL_BOOKING_ENABLED)
     pb_pill       = "pg" if pb_enabled else "pm"
     pb_label      = "ON" if pb_enabled else "OFF"
@@ -4868,6 +4873,10 @@ async def control_page(
         + f"<span style='font-size:.70em;color:var(--ink3)'>&ensp;every 1 min (:25) &middot; SELL ATM opt on ±₹{settings.CRUDEOILM_FMOVE_HEDGE_TRIGGER_INR:.0f} F move</span></div>"
         + "<form method='post' action='/control/crudeoilm-fmove-hedge/toggle' style='margin:0'>"
         + f"<button class='btn {fmove_cls}' type='submit'>{fmove_lbl}</button></form></div>"
+        + f"<div class='mdr'><div class='mdl'>SILVERM Hedge&ensp;<span class='pill {silverm_pill}'>{silverm_label}</span>"
+        + f"<span style='font-size:.70em;color:var(--ink3)'>&ensp;every 1 min (:30) &middot; BUY OTM wing on ±₹{settings.SILVERM_HEDGE_TRIGGER_INR:.0f}/kg F move &middot; residual ≤ {settings.SILVERM_HEDGE_MAX_RESIDUAL_KG}kg</span></div>"
+        + "<form method='post' action='/control/silverm-hedge/toggle' style='margin:0'>"
+        + f"<button class='btn {silverm_cls}' type='submit'>{silverm_lbl}</button></form></div>"
         + f"<div class='mdr'><div class='mdl'>Straddle Defense&ensp;<span class='pill {'pg' if sd_enabled else 'pr'}'>{'RUNNING' if sd_enabled else 'STOPPED'}</span>"
         + f"<span class='pill {'pa' if sd_mode != 'ALERT' else 'pm'}'>{sd_mode}</span>"
         + "<span style='font-size:.70em;color:var(--ink3)'>&ensp;1-min monitor &middot; drawdown+IV trigger &middot; wing hedging</span></div>"
@@ -5164,6 +5173,32 @@ async def toggle_crudeoilm_fmove_hedge(
         )
     except Exception as exc:
         log.warning("CRUDEOILM fmove-hedge toggle: telegram notify failed: %s", exc)
+    return Response(status_code=302, headers={"Location": "/control"})
+
+
+@app.post("/control/silverm-hedge/toggle")
+async def toggle_silverm_hedge(
+    _: None = Depends(_auth_guard),
+    settings: Settings = Depends(get_current_settings),
+) -> Response:
+    """Start/stop the SILVERM F-move-triggered BUY-wing hedge.
+
+    Fires on front-month FUT movement from the last hedge fill and BUYS an
+    OTM CE (if book δ<0) or PE (if book δ>0) sized to bring |δ| ≤ residual
+    threshold. Never trades futures (5-kg granularity too coarse for silver
+    at ₹2L+/kg) and never sells (would deepen short γ).
+    """
+    from app.commodity_agents.notify import send_telegram
+
+    new_val = state.toggle_silverm_hedge_enabled(settings.SILVERM_HEDGE_ENABLED)
+    log.warning("SILVERM hedge toggled to %s via /control", new_val)
+    try:
+        send_telegram(
+            settings,
+            f"⚡ SILVERM Hedge {'STARTED' if new_val else 'STOPPED'} via /control",
+        )
+    except Exception as exc:
+        log.warning("SILVERM hedge toggle: telegram notify failed: %s", exc)
     return Response(status_code=302, headers={"Location": "/control"})
 
 

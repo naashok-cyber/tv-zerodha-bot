@@ -1127,7 +1127,6 @@ def _process_underlying(
 
         # ── Band: base (ADX regime) x book size x δ direction x escalation ───
         n_lots = sum(abs(int(p["quantity"])) for p in ng_legs)
-        hedge_state = _load_hedge_state(settings)
         history = hedge_state.get("delta_history", [])
         vel_samples = spec.velocity_samples
 
@@ -1665,7 +1664,7 @@ def _process_underlying(
         # of the day (each hedge makes the next one a little harder to trigger).
         hedge_state["hedges_today"] = int(hedge_state.get("hedges_today", 0)) + 1
         hedge_state["last_hedge_at"] = now.isoformat()
-        _save_hedge_state(settings, hedge_state)
+        _save_hedge_state(settings, all_state)
 
         # Update existing Position row so 23:20 squareoff closes full broker qty.
         pos = (

@@ -372,7 +372,7 @@ class Settings(BaseSettings):
     # clamp silently cancels the trend-tightening at reference size. 11.0 still
     # clears the granularity rule: 11.0 / (0.5 x 10) = 2.2 >= 2.
     CRUDEOILM_HEDGE_BAND_MIN: float = 11.0
-    CRUDEOILM_HEDGE_BAND_MAX: float = 90.0
+    CRUDEOILM_HEDGE_BAND_MAX: float = 22.0
     CRUDEOILM_HEDGE_INTERVAL_MIN: int = 5     # :02 :07 :12 … :57
     CRUDEOILM_HEDGE_PHASE_MIN: int = 2
     CRUDEOILM_HEDGE_VELOCITY_SAMPLES: int = 2  # 2 x 5 min = 10-min trend window
@@ -389,6 +389,24 @@ class Settings(BaseSettings):
     CRUDEOILM_FMOVE_HEDGE_COOLDOWN_MIN: int = 5          # min gap between hedges
     CRUDEOILM_FMOVE_HEDGE_MAX_HEDGES_PER_DAY: int = 20
     CRUDEOILM_FMOVE_HEDGE_STATE_PATH: str = "data/crudeoilm_fmove_hedge_state.json"
+
+    # ── SILVERM F-move delta hedge (BUY OTM wings, price-triggered) ──────────
+    # Silver's ₹/kg is 20-100× crude/gas, so notional-parity bands collapse
+    # below one ATM lot's granularity (see CLAUDE.md granularity rule). This
+    # hedger fires on futures-price movement from the last hedge fill and BUYs
+    # OTM options as wings — never futures (5-kg lot = coarse) and never SELLs
+    # (would add short γ to an already short-γ book). Turns the position into
+    # an iron condor/butterfly over time. Live-toggleable at /control.
+    SILVERM_HEDGE_ENABLED: bool = False
+    SILVERM_HEDGE_TRIGGER_INR: float = 1500.0    # ₹/kg move from anchor (~0.6%)
+    SILVERM_HEDGE_MAX_RESIDUAL_KG: float = 0.5   # accept hedge if book |δ| ≤ this after
+    SILVERM_HEDGE_MAX_LOTS_PER_STEP: int = 3     # cap lots per hedge fire
+    SILVERM_HEDGE_WING_MIN_OI: int = 200         # skip wing strikes thinner than this
+    SILVERM_HEDGE_WING_MIN_DELTA: float = 0.10   # skip wings with |δ| < this (too far OTM)
+    SILVERM_HEDGE_WING_MAX_DELTA: float = 0.45   # skip wings ≥ this (too close to ATM)
+    SILVERM_HEDGE_COOLDOWN_MIN: int = 10         # min gap between hedges
+    SILVERM_HEDGE_MAX_HEDGES_PER_DAY: int = 15
+    SILVERM_HEDGE_STATE_PATH: str = "data/silverm_hedge_state.json"
 
     # ── NATURALGAS half-exit (profit-lock; piggybacks on delta-hedge cron) ────
     # Default True here (instead of in .env) so the running container picks it

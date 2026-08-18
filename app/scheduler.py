@@ -738,6 +738,39 @@ def make_scheduler(
             settings.CRUDEOILM_FMOVE_HEDGE_ENABLED,
         )
 
+        # SILVERM F-move-triggered BUY-wing delta hedge. Wakes every minute,
+        # only acts when front-month FUT has moved ±SILVERM_HEDGE_TRIGGER_INR
+        # from the last hedge fill. Buys OTM CE/PE wings (never futures — 5-kg
+        # granularity is too coarse for silver at ₹2L+/kg). second=30 keeps it
+        # clear of the other 1-min crons (hedge :05, EMA :15, paper :20, fmove
+        # :25, partial :35, BNF :40, GOLDM :45, defense :50). Guarded by
+        # state.is_silverm_hedge_enabled so it is a cheap no-op when off;
+        # live-toggleable at /control.
+        from app.silverm_delta_hedge import run_silverm_hedge_job
+        scheduler.add_job(
+            run_silverm_hedge_job,
+            trigger="cron",
+            day_of_week="mon-fri",
+            hour="9-23",
+            minute="*",
+            second=30,
+            kwargs={"settings": settings, "session_factory": session_factory},
+            id="silverm_hedge",
+            misfire_grace_time=30,
+            max_instances=1,
+        )
+        log.info(
+            "[scheduler] SILVERM hedge cron: every 1 min IST, Mon-Fri 09-23 "
+            "(trigger=±₹%.0f/kg F move, max_residual=%.2fkg, cap=%d lots/step, "
+            "cooldown=%dm, daily_cap=%d, enabled=%s via .env)",
+            settings.SILVERM_HEDGE_TRIGGER_INR,
+            settings.SILVERM_HEDGE_MAX_RESIDUAL_KG,
+            settings.SILVERM_HEDGE_MAX_LOTS_PER_STEP,
+            settings.SILVERM_HEDGE_COOLDOWN_MIN,
+            settings.SILVERM_HEDGE_MAX_HEDGES_PER_DAY,
+            settings.SILVERM_HEDGE_ENABLED,
+        )
+
     if settings.SCHEDULED_STRADDLE_ENABLED and session_factory is not None:
         from app.scheduled_straddle import run_scheduled_straddle, squareoff_scheduled_straddles
 
