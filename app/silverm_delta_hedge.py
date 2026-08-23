@@ -112,6 +112,7 @@ def _pick_wing(
     lot_units: int,
     T: float,
     settings: Any,
+    tun: dict,
 ) -> tuple[Any, int, float, float] | None:
     """Greedy wing selection: enumerate OTM candidates, pick lowest-lot combo
     that brings residual |δ| ≤ MAX_RESIDUAL_KG. Prefer round-thousand strikes
@@ -123,8 +124,11 @@ def _pick_wing(
     from app.orders import throttled_quote_call
     from app.storage import Instrument
 
-    max_residual = float(settings.SILVERM_HEDGE_MAX_RESIDUAL_KG)
-    max_lots = int(settings.SILVERM_HEDGE_MAX_LOTS_PER_STEP)
+    # Sizing knobs come from the caller's already-resolved `tun` — resolving them
+    # again here could pick up an edit landing mid-tick and size the wing against
+    # a residual target the trigger check never saw.
+    max_residual = float(tun["max_residual_kg"])
+    max_lots = int(tun["max_lots_per_step"])
     min_oi = int(settings.SILVERM_HEDGE_WING_MIN_OI)
     min_d = float(settings.SILVERM_HEDGE_WING_MIN_DELTA)
     max_d = float(settings.SILVERM_HEDGE_WING_MAX_DELTA)
@@ -266,7 +270,7 @@ def run_silverm_hedge_job(settings: Any, session_factory: Any) -> None:
 
 
 def _run_impl(settings: Any, session_factory: Any) -> None:
-    from app import state
+    from app import hedge_tunables, state
     from app.config import IST
     from app.delta_hedge import _limit_then_market
     from app.kite_session import get_session_manager
@@ -297,6 +301,11 @@ def _run_impl(settings: Any, session_factory: Any) -> None:
         return
 
     now = datetime.now(IST)
+    # Live thresholds: /control override first, .env default behind it. One pass
+    # per tick, then threaded through (including into _pick_wing) so a mid-tick
+    # edit cannot split one hedge decision across two config generations.
+    tun = hedge_tunables.all_effective(settings, "silverm")
+
     opts = [
         p for p in positions
         if p.get("exchange") == _EXCHANGE
@@ -349,8 +358,8 @@ def _run_impl(settings: Any, session_factory: Any) -> None:
             _telegram(
                 settings,
                 f"<b>[SILVERM hedge]</b> anchored at F=₹{F_now:,.0f}/kg\n"
-                f"Trigger: any ±₹{settings.SILVERM_HEDGE_TRIGGER_INR:.0f}/kg move "
-                f"→ BUY OTM wing sized to |δ| ≤ {settings.SILVERM_HEDGE_MAX_RESIDUAL_KG} kg.",
+                f"Trigger: any ±₹{tun['trigger_inr']:.0f}/kg move "
+                f"→ BUY OTM wing sized to |δ| ≤ {tun['max_residual_kg']} kg.",
             )
             return
 
@@ -373,13 +382,13 @@ def _run_impl(settings: Any, session_factory: Any) -> None:
                             _LOG_PREFIX, settings.STRADDLE_SQUAREOFF_TIME)
 
         # Per-day cap
-        daily_cap = int(getattr(settings, "SILVERM_HEDGE_MAX_HEDGES_PER_DAY", 15))
+        daily_cap = int(tun["max_hedges_per_day"])
         if daily_cap > 0 and int(hedge_state.get("hedges_today", 0)) >= daily_cap:
             log.info("%s daily cap %d reached — holding", _LOG_PREFIX, daily_cap)
             return
 
         # Cooldown
-        cooldown_min = int(getattr(settings, "SILVERM_HEDGE_COOLDOWN_MIN", 10))
+        cooldown_min = int(tun["cooldown_min"])
         last_hedge_at = hedge_state.get("last_hedge_at")
         if cooldown_min > 0 and last_hedge_at:
             try:
@@ -394,7 +403,7 @@ def _run_impl(settings: Any, session_factory: Any) -> None:
 
         # Trigger: has F moved trigger threshold from anchor?
         move = F_now - F_anchor
-        trigger = float(settings.SILVERM_HEDGE_TRIGGER_INR)
+        trigger = float(tun["trigger_inr"])
         log.info("%s F=%.0f anchor=%.0f move=%+.0f (trigger ±%.0f)",
                  _LOG_PREFIX, F_now, F_anchor, move, trigger)
         if abs(move) < trigger:
@@ -464,7 +473,7 @@ def _run_impl(settings: Any, session_factory: Any) -> None:
 
         # Near-neutral book — nothing worth hedging. Advance anchor so we
         # don't log the same "over trigger" line every minute.
-        max_residual = float(settings.SILVERM_HEDGE_MAX_RESIDUAL_KG)
+        max_residual = float(tun["max_residual_kg"])
         if abs(total_delta_kg) <= max_residual:
             log.info("%s [SKIP] |δ|=%.3fkg ≤ %.3fkg residual — advancing anchor to F=%.0f",
                      _LOG_PREFIX, abs(total_delta_kg), max_residual, F_now)
@@ -477,7 +486,7 @@ def _run_impl(settings: Any, session_factory: Any) -> None:
         # δ < 0 (book short) → BUY CE (positive δ hedge)
         opt_type = "PE" if total_delta_kg > 0 else "CE"
         picked = _pick_wing(session, kite, opt_expiry, opt_type, F_now,
-                            total_delta_kg, lot_units, T, settings)
+                            total_delta_kg, lot_units, T, settings, tun)
         if picked is None:
             log.warning("%s no wing available — holding (no anchor advance)", _LOG_PREFIX)
             _telegram(

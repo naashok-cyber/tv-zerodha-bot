@@ -29,6 +29,16 @@ def reset_app_state():
         state.set_max_open_positions(None)
         state.set_capital_per_trade(None)
         state.set_consecutive_losses_limit(None)
+        state.clear_hedge_tunables()
+        # Hedge enable toggles are reset by assigning the globals, not via their
+        # setters — those persist to data/state_overrides.json, and the fixture
+        # runs twice per test. A leaked False here is nasty to diagnose: it makes
+        # _build_specs() return one spec instead of two, and the failure lands in
+        # whichever file happens to sort after the one that set it.
+        state._NG_HEDGE_ENABLED_OVERRIDE = None
+        state._CRUDE_HEDGE_ENABLED_OVERRIDE = None
+        state._CRUDEOILM_FMOVE_HEDGE_ENABLED_OVERRIDE = None
+        state._SILVERM_HEDGE_ENABLED_OVERRIDE = None
 
     _clear()
     yield

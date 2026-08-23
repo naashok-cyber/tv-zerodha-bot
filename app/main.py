@@ -4416,6 +4416,86 @@ def _todays_schedule(settings: Settings) -> tuple[str, str]:
     return "<ul class='rail'>" + weekend + "".join(rows) + "</ul>", next_label
 
 
+def _hedge_tunable_drawers(settings: Settings) -> str:
+    """One collapsible card per hedge engine, generated from the registry.
+
+    Every row is `<label> <input> <unit>` in the same `pr2`/`pl`/`pi`/`pu` shape
+    as the Risk Parameters drawer, so the mobile sizing (44px rows, 16px inputs —
+    anything smaller makes iOS zoom on focus) comes for free.
+
+    The units are the point of showing them: NG's band is mmBtu, crude's is
+    barrels, silver's residual is kg and the F-move triggers are rupees. They are
+    not interchangeable, and a card that showed bare numbers would invite typing
+    crude's ₹300 into NG's band.
+    """
+    from app import hedge_tunables
+
+    def _fmt(t: Any, v: float) -> str:
+        """Rupees read as a prefix (₹300, ₹3,000/kg); every other unit suffixes."""
+        if t.unit.startswith("&#8377;"):
+            return f"&#8377;{v:,.0f}{t.unit[len('&#8377;'):]}"
+        if t.unit == "&times;":
+            return f"{v:g}&times;"
+        return f"{v:g} {t.unit}"
+
+    cards: list[str] = []
+    for eng in hedge_tunables.ENGINES:
+        vals = hedge_tunables.all_effective(settings, eng.slug)
+        n_ovr = sum(1 for t in eng.tunables if hedge_tunables.is_overridden(eng.slug, t.key))
+
+        rows: list[str] = []
+        for t in eng.tunables:
+            val = vals[t.key]
+            shown = f"{val:d}" if t.kind == "int" else f"{val:g}"
+            mark = (
+                " <span style='color:#f0a500;font-size:.72em'>(overridden)</span>"
+                if hedge_tunables.is_overridden(eng.slug, t.key) else ""
+            )
+            note = (
+                f"<div style='font-size:.68em;color:var(--ink3);line-height:1.3'>{t.note}</div>"
+                if t.note else ""
+            )
+            rows.append(
+                f"<div class='pr2'><div class='pl'>{t.label}{mark}{note}</div>"
+                f"<input class='pi' type='number' name='{t.key}' value='{shown}' "
+                f"min='{t.lo:g}' max='{t.hi:g}' step='{t.step:g}'>"
+                f"<div class='pu'>{t.unit}</div></div>"
+            )
+
+        # Summary line: the first two knobs are the ones that decide when a
+        # rebalance fires, so the card answers "what is this hedging on?" while
+        # collapsed.
+        summary = " &middot; ".join(
+            f"{t.label.lower()} <b>{_fmt(t, vals[t.key])}</b>"
+            for t in eng.tunables[:2]
+        )
+
+        cards.append(
+            "<details class='cfgd card'><summary>"
+            + f"<div class='ct'>{eng.title}"
+            + (f"<span class='pill pa' style='margin-left:8px'>{n_ovr} overridden</span>" if n_ovr else "")
+            + "</div>"
+            + f"<div class='cfg-sum'>{summary} &middot; tap to edit</div>"
+            + f"<div class='cfg-sum' style='opacity:.75'>{eng.subtitle}</div>"
+            + "</summary>"
+            + f"<form method='post' action='/control/hedge/{eng.slug}'>"
+            + "".join(rows)
+            + "<div style='display:flex;gap:8px;padding:12px 18px 16px'>"
+            + "<button class='btn bp' type='submit' style='flex:1'>Apply</button>"
+            + "<button class='btn bm' type='submit' name='reset' value='1' style='flex:1'>Reset to .env</button>"
+            + "</div></form></details>"
+        )
+
+    return (
+        "<div class='card' style='padding-bottom:6px'><div class='ct'>Rebalance Triggers</div>"
+        "<div style='font-size:.72em;color:var(--ink3);padding:0 18px 12px;line-height:1.45'>"
+        "Edits apply from the <b>next rebalance</b> &mdash; no rebuild, no restart. "
+        "Values survive a redeploy; Reset drops back to the <code>.env</code> default."
+        "</div></div>"
+        + "".join(cards)
+    )
+
+
 @app.get("/control")
 async def control_page(
     session: Session = Depends(get_db_session),
@@ -4516,6 +4596,11 @@ async def control_page(
     silverm_label   = "RUNNING" if silverm_enabled else "STOPPED"
     silverm_lbl     = "Stop"    if silverm_enabled else "Start"
     silverm_cls     = "br2"     if silverm_enabled else "bg2"
+    # Job subtitles quote live trigger values, not .env — otherwise a retuned
+    # engine would keep advertising the default it no longer uses.
+    from app import hedge_tunables as _ht
+    fmove_tun   = _ht.all_effective(settings, "crudeoilm_fmove")
+    silverm_tun = _ht.all_effective(settings, "silverm")
     pb_enabled    = state.is_partial_booking_enabled(settings.PARTIAL_BOOKING_ENABLED)
     pb_pill       = "pg" if pb_enabled else "pm"
     pb_label      = "ON" if pb_enabled else "OFF"
@@ -4870,11 +4955,11 @@ async def control_page(
         + "<form method='post' action='/control/crude-hedge/toggle' style='margin:0'>"
         + f"<button class='btn {crude_cls}' type='submit'>{crude_lbl}</button></form></div>"
         + f"<div class='mdr'><div class='mdl'>CRUDEOILM F-move Hedge&ensp;<span class='pill {fmove_pill}'>{fmove_label}</span>"
-        + f"<span style='font-size:.70em;color:var(--ink3)'>&ensp;every 1 min (:25) &middot; SELL ATM opt on ±₹{settings.CRUDEOILM_FMOVE_HEDGE_TRIGGER_INR:.0f} F move</span></div>"
+        + f"<span style='font-size:.70em;color:var(--ink3)'>&ensp;every 1 min (:25) &middot; SELL ATM opt on ±₹{fmove_tun['trigger_inr']:.0f} F move</span></div>"
         + "<form method='post' action='/control/crudeoilm-fmove-hedge/toggle' style='margin:0'>"
         + f"<button class='btn {fmove_cls}' type='submit'>{fmove_lbl}</button></form></div>"
         + f"<div class='mdr'><div class='mdl'>SILVERM Hedge&ensp;<span class='pill {silverm_pill}'>{silverm_label}</span>"
-        + f"<span style='font-size:.70em;color:var(--ink3)'>&ensp;every 1 min (:30) &middot; BUY OTM wing on ±₹{settings.SILVERM_HEDGE_TRIGGER_INR:.0f}/kg F move &middot; residual ≤ {settings.SILVERM_HEDGE_MAX_RESIDUAL_KG}kg</span></div>"
+        + f"<span style='font-size:.70em;color:var(--ink3)'>&ensp;every 1 min (:30) &middot; BUY OTM wing on ±₹{silverm_tun['trigger_inr']:.0f}/kg F move &middot; residual ≤ {silverm_tun['max_residual_kg']:g}kg</span></div>"
         + "<form method='post' action='/control/silverm-hedge/toggle' style='margin:0'>"
         + f"<button class='btn {silverm_cls}' type='submit'>{silverm_lbl}</button></form></div>"
         + f"<div class='mdr'><div class='mdl'>Straddle Defense&ensp;<span class='pill {'pg' if sd_enabled else 'pr'}'>{'RUNNING' if sd_enabled else 'STOPPED'}</span>"
@@ -4886,6 +4971,12 @@ async def control_page(
         + "<form method='post' action='/control/straddle-defense/toggle' style='margin:0'>"
         + f"<button class='btn {'br2' if sd_enabled else 'bg2'}' type='submit'>{'Stop' if sd_enabled else 'Start'}</button></form></div></div>"
         + "</div>"
+
+        # rebalance triggers — one drawer per hedge engine, built from the
+        # registry in app/hedge_tunables.py. Sits directly under the job toggles
+        # because the two are read together: the toggle says whether a hedge
+        # runs, these say what makes it fire.
+        + _hedge_tunable_drawers(settings)
 
         # risk params — collapsible drawer; summary shows effective values
         + "<details class='cfgd card'><summary>"
@@ -5387,6 +5478,56 @@ async def update_risk(
         except ValueError:
             pass
     return Response(status_code=302, headers={"Location": "/control"})
+
+
+@app.post("/control/hedge/{slug}")
+async def update_hedge_tunables(
+    slug: str,
+    request: Request,
+    _: None = Depends(_auth_guard),
+    settings: Settings = Depends(get_current_settings),
+) -> Response:
+    """Retune one hedge engine's rebalance thresholds. Applies next rebalance.
+
+    One route for every engine: the form fields are whatever the registry says
+    the engine has, so adding an underlying needs no new route. Values are
+    clamped by `hedge_tunables.coerce` before they are stored — a band of 0 would
+    breach on every tick and drain both the quote bucket and the margin pool, and
+    a hand-posted form is not a trusted input.
+
+    Nothing here touches the running engines directly. They re-resolve their
+    thresholds at the top of each tick, so an edit lands on the next rebalance
+    and never mid-decision.
+    """
+    from app import hedge_tunables
+
+    engine = hedge_tunables.get_engine(slug)
+    if engine is None:
+        return Response(status_code=404, content=f"unknown hedge engine {slug!r}")
+
+    form = await request.form()
+    if str(form.get("reset", "")) == "1":
+        state.clear_hedge_tunables(slug)
+        log.info("[hedge_tunables] %s reset to .env defaults", slug)
+        return Response(status_code=302, headers={"Location": "/control#settings"})
+
+    applied: list[str] = []
+    for tun in engine.tunables:
+        raw = str(form.get(tun.key, "")).strip()
+        if not raw:
+            continue
+        val = hedge_tunables.coerce(slug, tun.key, raw)
+        if val is None:
+            continue
+        # An input matching the .env default clears the override rather than
+        # pinning it, so /control keeps showing where the value comes from.
+        if val == tun.coerce(getattr(settings, tun.env_attr)):
+            state.set_hedge_tunable(slug, tun.key, None)
+        else:
+            state.set_hedge_tunable(slug, tun.key, val)
+            applied.append(f"{tun.key}={val}")
+    log.info("[hedge_tunables] %s updated: %s", slug, ", ".join(applied) or "(no changes)")
+    return Response(status_code=302, headers={"Location": "/control#settings"})
 
 
 # ── Voice proxy — dashboard-auth'd wrappers so browser needs no token ─────────

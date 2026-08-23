@@ -264,8 +264,16 @@ def test_bad_futures_price_falls_back_to_static(both):
 
 
 def test_missing_notional_falls_back_to_static(both):
-    _, crude = _build_specs(both)
+    """The notional now rides on the spec, not on settings.
+
+    Each engine resolves its own notional in `build_spec()` (so NG and crude can
+    be retuned independently), which means the zeroing has to happen before the
+    spec is built — reading it off `settings` inside the tick is exactly the
+    coupling the split removed.
+    """
     cfg = both.model_copy(update={"HEDGE_BAND_NOTIONAL_INR": 0.0})
+    _, crude = _build_specs(cfg)
+    assert crude.band_notional_inr == 0.0
     assert _notional_band_base(crude, F_CRUDE, cfg) == (crude.band_base, "STATIC")
 
 
@@ -409,12 +417,33 @@ def test_matches_real_symbol_shapes():
 # ── Band scaling is unit-agnostic ────────────────────────────────────────────
 
 def test_size_scaling_applies_to_crude_in_barrels(both):
-    _, crude = _build_specs(both)
-    crude_base, _ = _notional_band_base(crude, F_CRUDE, both)
-    small, _ = _compute_band(crude_base, crude.ref_lots, "UNKNOWN", 0, both, crude)
-    large, _ = _compute_band(crude_base, crude.ref_lots * 3, "UNKNOWN", 0, both, crude)
+    """The 2/3 size law, in barrels.
+
+    Needs headroom above the ceiling to be observable: the live
+    CRUDEOILM_HEDGE_BAND_MAX of 22 bbl clips a 3x book (see the next test), so
+    the law is exercised against a raised ceiling and the clip is asserted
+    separately.
+    """
+    cfg = both.model_copy(update={"CRUDEOILM_HEDGE_BAND_MAX": 1_000.0})
+    _, crude = _build_specs(cfg)
+    crude_base, _ = _notional_band_base(crude, F_CRUDE, cfg)
+    small, _ = _compute_band(crude_base, crude.ref_lots, "UNKNOWN", 0, cfg, crude)
+    large, _ = _compute_band(crude_base, crude.ref_lots * 3, "UNKNOWN", 0, cfg, crude)
     assert small == pytest.approx(crude_base)
     assert 2.0 < large / small < 2.2          # same 2/3 law, barrels instead of mmBtu
+
+
+def test_live_crude_ceiling_clips_a_tripled_book(both):
+    """Production tuning, made explicit: at BAND_MAX=22 bbl a 3x book is capped.
+
+    Not a bug — it is the ceiling doing its job — but it means crude's band stops
+    scaling with size well before NG's does, so the ceiling is the knob to raise
+    if crude ever runs a much larger book.
+    """
+    _, crude = _build_specs(both)
+    crude_base, _ = _notional_band_base(crude, F_CRUDE, both)
+    large, parts = _compute_band(crude_base, crude.ref_lots * 3, "UNKNOWN", 0, both, crude)
+    assert large == crude.band_max and parts["clamped"]
 
 
 def test_crude_uses_its_own_clamps_not_ngs(both):

@@ -125,7 +125,7 @@ def run_bnf_hedge_job(settings: Any, session_factory: Any) -> None:
 
 
 def _run_impl(settings: Any, session_factory: Any) -> None:
-    from app import state
+    from app import hedge_tunables, state
     from app.config import IST
     from app.greeks import compute_delta
     from app.kite_session import get_session_manager
@@ -154,6 +154,11 @@ def _run_impl(settings: Any, session_factory: Any) -> None:
         return
 
     now = datetime.now(IST)
+    # Thresholds resolved once per tick, /control override first and .env behind
+    # it. Resolved in one pass so a single hedge decision can never be computed
+    # from two generations of the config (an edit landing mid-tick).
+    tun = hedge_tunables.all_effective(settings, "banknifty")
+
     bnf_opts = [
         p for p in positions
         if p.get("exchange") == _EXCHANGE
@@ -267,7 +272,7 @@ def _run_impl(settings: Any, session_factory: Any) -> None:
             log.warning("%s no leg deltas computed — skipping", _LOG_PREFIX)
             return
 
-        band = float(settings.BNF_HEDGE_BAND_UNITS)
+        band = float(tun["band_units"])
         n_lots_open = sum(abs(int(p["quantity"])) // 30 for p in bnf_opts)
         log.info(
             "%s F=%.2f T=%.3fy(%.1fd) net δ=%+.1f | band=±%.0f | open lots=%d",
@@ -277,7 +282,7 @@ def _run_impl(settings: Any, session_factory: Any) -> None:
         # ── Circuit breakers ────────────────────────────────────────────────
         # Freeze near NSE close — a hedge placed at 15:20 gets marked-to-close
         # 10 min later, paying spread for no benefit.
-        freeze_min = int(getattr(settings, "BNF_HEDGE_FREEZE_BEFORE_MIN", 15))
+        freeze_min = int(tun["freeze_before_min"])
         freeze_bypass = float(getattr(settings, "BNF_HEDGE_FREEZE_BYPASS_MULT", 3.0))
         if freeze_min > 0:
             freeze_from = (
@@ -293,7 +298,7 @@ def _run_impl(settings: Any, session_factory: Any) -> None:
 
         hedge_state = _load_state(settings)
         # Daily hedge cap — spend guardrail against a runaway trend day
-        daily_cap = int(getattr(settings, "BNF_HEDGE_MAX_LOTS_PER_DAY", 8))
+        daily_cap = int(tun["max_hedges_per_day"])
         if daily_cap > 0 and int(hedge_state.get("hedges_today", 0)) >= daily_cap:
             log.info(
                 "%s daily cap reached (%d hedges today) — holding",
@@ -302,7 +307,7 @@ def _run_impl(settings: Any, session_factory: Any) -> None:
             return
 
         # Cooldown — one hedge, then let the move develop
-        cooldown_min = int(getattr(settings, "BNF_HEDGE_COOLDOWN_MIN", 10))
+        cooldown_min = int(tun["cooldown_min"])
         cooldown_bypass = float(getattr(settings, "BNF_HEDGE_COOLDOWN_BYPASS_MULT", 2.0))
         last_hedge = hedge_state.get("last_hedge_at")
         if cooldown_min > 0 and last_hedge:

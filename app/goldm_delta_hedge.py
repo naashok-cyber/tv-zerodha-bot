@@ -100,7 +100,7 @@ def run_goldm_hedge_job(settings: Any, session_factory: Any) -> None:
 
 
 def _run_impl(settings: Any, session_factory: Any) -> None:
-    from app import state
+    from app import hedge_tunables, state
     from app.config import IST
     from app.greeks import compute_delta
     from app.kite_session import get_session_manager
@@ -129,6 +129,11 @@ def _run_impl(settings: Any, session_factory: Any) -> None:
         return
 
     now = datetime.now(IST)
+    # Live thresholds: /control override first, .env default behind it. One pass
+    # per tick so a mid-tick edit cannot split a single hedge decision across two
+    # generations of the config.
+    tun = hedge_tunables.all_effective(settings, "goldm")
+
     goldm_opts = [
         p for p in positions
         if p.get("exchange") == _EXCHANGE
@@ -189,13 +194,13 @@ def _run_impl(settings: Any, session_factory: Any) -> None:
             _telegram(
                 settings,
                 f"<b>[GOLDM hedge]</b> anchored at F=₹{F_now:,.0f}\n"
-                f"Trigger: any ₹{settings.GOLDM_HEDGE_TRIGGER_INR:.0f} move from here",
+                f"Trigger: any ₹{tun['trigger_inr']:.0f} move from here",
             )
             return
 
         # Freeze near MCX close — a hedge placed at 23:15 gets marked to
         # settlement 15 min later, paying spread for nothing.
-        freeze_min = int(getattr(settings, "GOLDM_HEDGE_FREEZE_BEFORE_MIN", 30))
+        freeze_min = int(tun["freeze_before_min"])
         if freeze_min > 0:
             close_h, close_m = (int(x) for x in settings.SESSION_CLOSE_MCX.split(":"))
             freeze_from = (
@@ -210,14 +215,14 @@ def _run_impl(settings: Any, session_factory: Any) -> None:
                 return
 
         # Daily hedge cap
-        daily_cap = int(getattr(settings, "GOLDM_HEDGE_MAX_HEDGES_PER_DAY", 20))
+        daily_cap = int(tun["max_hedges_per_day"])
         if daily_cap > 0 and int(hedge_state.get("hedges_today", 0)) >= daily_cap:
             log.info("%s daily cap %d reached — holding", _LOG_PREFIX, daily_cap)
             return
 
         # Movement check
         move = F_now - F_checkpoint
-        trigger = float(settings.GOLDM_HEDGE_TRIGGER_INR)
+        trigger = float(tun["trigger_inr"])
         log.info(
             "%s F=%.2f checkpoint=%.2f move=%+.2f (trigger ±%.0f)",
             _LOG_PREFIX, F_now, F_checkpoint, move, trigger,
@@ -289,7 +294,7 @@ def _run_impl(settings: Any, session_factory: Any) -> None:
         # ── Solve hedge lots ─────────────────────────────────────────────────
         # Each FUT lot = 1 δ/unit × lot_units = 10 δ units for GOLDM.
         # Target: |δ_after| minimized. lots = round(|δ| / 10), direction opposite.
-        min_delta = float(getattr(settings, "GOLDM_HEDGE_MIN_DELTA_UNITS", 5.0))
+        min_delta = float(tun["min_delta_units"])
         if abs(total_delta) < min_delta:
             log.info(
                 "%s [SKIP] |δ|=%.1f < %.1f threshold — F moved but book is already "
@@ -306,7 +311,7 @@ def _run_impl(settings: Any, session_factory: Any) -> None:
             hedge_state["F_checkpoint"] = F_now
             _save_state(settings, hedge_state)
             return
-        max_lots = int(getattr(settings, "GOLDM_HEDGE_MAX_LOTS_PER_TICK", 5))
+        max_lots = int(tun["max_lots_per_tick"])
         lots = min(lots, max_lots)
 
         side = "SELL" if total_delta > 0 else "BUY"

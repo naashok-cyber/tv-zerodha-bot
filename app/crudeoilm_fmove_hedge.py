@@ -126,7 +126,7 @@ def run_crudeoilm_fmove_hedge_job(settings: Any, session_factory: Any) -> None:
 
 
 def _run_impl(settings: Any, session_factory: Any) -> None:
-    from app import state
+    from app import hedge_tunables, state
     from app.config import IST
     from app.delta_hedge import _limit_then_market
     from app.greeks import compute_delta
@@ -158,6 +158,11 @@ def _run_impl(settings: Any, session_factory: Any) -> None:
         return
 
     now = datetime.now(IST)
+    # Live thresholds: /control override first, .env default behind it. Resolved
+    # in one pass per tick so a mid-tick edit cannot split one hedge decision
+    # across two generations of the config.
+    tun = hedge_tunables.all_effective(settings, "crudeoilm_fmove")
+
     opts = [
         p for p in positions
         if p.get("exchange") == _EXCHANGE
@@ -217,7 +222,7 @@ def _run_impl(settings: Any, session_factory: Any) -> None:
             _telegram(
                 settings,
                 f"<b>[CRUDEOILM fmove-hedge]</b> anchored at F=₹{F_now:,.0f}\n"
-                f"Trigger: any ±₹{settings.CRUDEOILM_FMOVE_HEDGE_TRIGGER_INR:.0f} "
+                f"Trigger: any ±₹{tun['trigger_inr']:.0f} "
                 f"move from here, hedge with SELL ATM option.",
             )
             return
@@ -242,13 +247,13 @@ def _run_impl(settings: Any, session_factory: Any) -> None:
                             _LOG_PREFIX, settings.STRADDLE_SQUAREOFF_TIME)
 
         # Per-day cap
-        daily_cap = int(getattr(settings, "CRUDEOILM_FMOVE_HEDGE_MAX_HEDGES_PER_DAY", 20))
+        daily_cap = int(tun["max_hedges_per_day"])
         if daily_cap > 0 and int(hedge_state.get("hedges_today", 0)) >= daily_cap:
             log.info("%s daily cap %d reached — holding", _LOG_PREFIX, daily_cap)
             return
 
         # Cooldown
-        cooldown_min = int(getattr(settings, "CRUDEOILM_FMOVE_HEDGE_COOLDOWN_MIN", 5))
+        cooldown_min = int(tun["cooldown_min"])
         last_hedge_at = hedge_state.get("last_hedge_at")
         if cooldown_min > 0 and last_hedge_at:
             try:
@@ -263,7 +268,7 @@ def _run_impl(settings: Any, session_factory: Any) -> None:
 
         # Trigger: has F moved trigger threshold from anchor?
         move = F_now - F_anchor
-        trigger = float(settings.CRUDEOILM_FMOVE_HEDGE_TRIGGER_INR)
+        trigger = float(tun["trigger_inr"])
         log.info("%s F=%.2f anchor=%.2f move=%+.2f (trigger ±%.0f)",
                  _LOG_PREFIX, F_now, F_anchor, move, trigger)
         if abs(move) < trigger:
@@ -340,7 +345,7 @@ def _run_impl(settings: Any, session_factory: Any) -> None:
 
         # Near-neutral book — nothing worth hedging. Advance anchor so we
         # don't log the same "over trigger" line every minute.
-        min_delta = float(getattr(settings, "CRUDEOILM_FMOVE_HEDGE_MIN_DELTA_UNITS", 5.0))
+        min_delta = float(tun["min_delta_units"])
         if abs(total_delta) < min_delta:
             log.info("%s [SKIP] |δ|=%.1f < %.1f min — advancing anchor to F=%.2f",
                      _LOG_PREFIX, abs(total_delta), min_delta, F_now)
@@ -396,7 +401,7 @@ def _run_impl(settings: Any, session_factory: Any) -> None:
         # For CE (atm_δ > 0): adds −|atm_δ|×lot_units (negative). Right for δ>0.
         # For PE (atm_δ < 0): adds +|atm_δ|×lot_units (positive). Right for δ<0.
         # Lots to zero out δ: |δ| / (|atm_δ|×lot_units), rounded.
-        max_lots = int(getattr(settings, "CRUDEOILM_FMOVE_HEDGE_MAX_LOTS_PER_TICK", 3))
+        max_lots = int(tun["max_lots_per_tick"])
         raw = abs(total_delta) / (abs(atm_delta_unit) * lot_units)
         lots = max(1, round(raw))
         lots = min(lots, max_lots)

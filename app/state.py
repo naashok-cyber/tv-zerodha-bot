@@ -46,6 +46,13 @@ _CAPITAL_PER_TRADE_OVERRIDE: Optional[float] = None
 _CONSECUTIVE_LOSSES_LIMIT_OVERRIDE: Optional[int] = None
 _ADX_THRESHOLD_OVERRIDE: Optional[float] = None
 
+# Per-engine rebalance thresholds, keyed "<engine_slug>.<tunable_key>" — e.g.
+# "goldm.trigger_inr". A flat dict rather than a global per knob: six engines x
+# ~5 knobs would otherwise be ~30 module globals and five places to forget one.
+# The registry in app/hedge_tunables.py owns the labels, units and clamps; this
+# module only stores. Absent key = use the .env default.
+_HEDGE_TUNABLE_OVERRIDES: dict = {}
+
 
 # ── Persistence ───────────────────────────────────────────────────────────────
 
@@ -81,6 +88,7 @@ def _save_overrides() -> None:
         "capital_per_trade": _CAPITAL_PER_TRADE_OVERRIDE,
         "consecutive_losses_limit": _CONSECUTIVE_LOSSES_LIMIT_OVERRIDE,
         "adx_threshold": _ADX_THRESHOLD_OVERRIDE,
+        "hedge_tunables": dict(_HEDGE_TUNABLE_OVERRIDES),
         # SESSION_INVALID and _EMERGENCY_STOP intentionally omitted — always reset on restart
     }
     try:
@@ -106,6 +114,7 @@ def load_overrides_from_disk() -> None:
     global _STRADDLE_DEFENSE_MODE_OVERRIDE
     global _PARTIAL_BOOKING_ENABLED_OVERRIDE, _ENTRY_WINGS_ENABLED_OVERRIDE
     global _EMA_ANALYZER_ENABLED_OVERRIDE, _EMA_ANALYZER_UNDERLYINGS_OVERRIDE
+    global _HEDGE_TUNABLE_OVERRIDES
 
     if not os.path.exists(_OVERRIDES_PATH):
         return
@@ -175,6 +184,13 @@ def load_overrides_from_disk() -> None:
             _CONSECUTIVE_LOSSES_LIMIT_OVERRIDE = data["consecutive_losses_limit"]
         if "adx_threshold" in data:
             _ADX_THRESHOLD_OVERRIDE = data["adx_threshold"]
+        # Older overrides files predate this key — absent simply means "no
+        # hedge threshold has been retuned yet", which is the correct default.
+        if isinstance(data.get("hedge_tunables"), dict):
+            _HEDGE_TUNABLE_OVERRIDES = {
+                str(k): v for k, v in data["hedge_tunables"].items()
+                if isinstance(v, (int, float)) and not isinstance(v, bool)
+            }
 
     log.info("state: restored overrides from %s", _OVERRIDES_PATH)
 
@@ -754,6 +770,51 @@ def set_adx_threshold(value: Optional[float]) -> None:
         _save_overrides()
 
 
+# ── Hedge rebalance thresholds (see app/hedge_tunables.py for the registry) ──
+# These are read inside every hedge tick, so an edit at /control takes effect on
+# the next rebalance without a rebuild. Values are stored raw; the registry
+# clamps them on the way out, so a hand-edited overrides file cannot arm a
+# zero-width band.
+
+def _tunable_key(slug: str, key: str) -> str:
+    return f"{slug}.{key}"
+
+
+def get_hedge_tunable(slug: str, key: str, env_default):
+    """Override value for one knob, or `env_default` when none is set."""
+    with _lock:
+        val = _HEDGE_TUNABLE_OVERRIDES.get(_tunable_key(slug, key))
+    return val if val is not None else env_default
+
+
+def set_hedge_tunable(slug: str, key: str, value) -> None:
+    """Store one override. Pass None to clear it and fall back to .env."""
+    with _lock:
+        k = _tunable_key(slug, key)
+        if value is None:
+            _HEDGE_TUNABLE_OVERRIDES.pop(k, None)
+        else:
+            _HEDGE_TUNABLE_OVERRIDES[k] = value
+        _save_overrides()
+
+
+def clear_hedge_tunables(slug: Optional[str] = None) -> None:
+    """Reset one engine's thresholds to .env, or every engine's when slug is None."""
+    with _lock:
+        if slug is None:
+            _HEDGE_TUNABLE_OVERRIDES.clear()
+        else:
+            prefix = f"{slug}."
+            for k in [k for k in _HEDGE_TUNABLE_OVERRIDES if k.startswith(prefix)]:
+                del _HEDGE_TUNABLE_OVERRIDES[k]
+        _save_overrides()
+
+
+def get_hedge_tunable_overrides() -> dict:
+    with _lock:
+        return dict(_HEDGE_TUNABLE_OVERRIDES)
+
+
 def get_all_overrides() -> dict:
     """Return current effective override state for display."""
     with _lock:
@@ -786,4 +847,5 @@ def get_all_overrides() -> dict:
             "capital_per_trade": _CAPITAL_PER_TRADE_OVERRIDE,
             "consecutive_losses_limit": _CONSECUTIVE_LOSSES_LIMIT_OVERRIDE,
             "adx_threshold": _ADX_THRESHOLD_OVERRIDE,
+            "hedge_tunables": dict(_HEDGE_TUNABLE_OVERRIDES),
         }

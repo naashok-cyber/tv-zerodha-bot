@@ -670,8 +670,11 @@ def make_scheduler(
             max_instances=1,
         )
         log.info(
+            # .env defaults — the job re-resolves these each tick, so a /control
+            # edit will not be reflected in this line.
             "[scheduler] BNF delta-hedge cron: every 1 min IST, Mon-Fri 09-15 "
-            "(band=±%.0f δ units, cooldown=%dm, min_T=%.1fd, cap=%d/day, enabled=%s via .env)",
+            "(band=±%.0f δ units, cooldown=%dm, min_T=%.1fd, cap=%d/day, enabled=%s "
+            "— .env defaults, retunable at /control)",
             settings.BNF_HEDGE_BAND_UNITS,
             settings.BNF_HEDGE_COOLDOWN_MIN,
             settings.BNF_HEDGE_MIN_T_DAYS,
@@ -698,7 +701,7 @@ def make_scheduler(
         log.info(
             "[scheduler] GOLDM delta-hedge cron: every 5 min IST, Mon-Fri 09-23 "
             "(trigger=±₹%.0f F move, min_δ=%.0f, freeze=%dm before close, "
-            "cap=%d/day, enabled=%s via .env)",
+            "cap=%d/day, enabled=%s — .env defaults, retunable at /control)",
             settings.GOLDM_HEDGE_TRIGGER_INR,
             settings.GOLDM_HEDGE_MIN_DELTA_UNITS,
             settings.GOLDM_HEDGE_FREEZE_BEFORE_MIN,
@@ -729,7 +732,7 @@ def make_scheduler(
         log.info(
             "[scheduler] CRUDEOILM fmove-hedge cron: every 1 min IST, Mon-Fri 09-23 "
             "(trigger=±₹%.0f F move, min_δ=%.0f, cap=%d/tick, "
-            "cooldown=%dm, daily_cap=%d, enabled=%s via .env)",
+            "cooldown=%dm, daily_cap=%d, enabled=%s — .env defaults, retunable at /control)",
             settings.CRUDEOILM_FMOVE_HEDGE_TRIGGER_INR,
             settings.CRUDEOILM_FMOVE_HEDGE_MIN_DELTA_UNITS,
             settings.CRUDEOILM_FMOVE_HEDGE_MAX_LOTS_PER_TICK,
@@ -762,7 +765,7 @@ def make_scheduler(
         log.info(
             "[scheduler] SILVERM hedge cron: every 1 min IST, Mon-Fri 09-23 "
             "(trigger=±₹%.0f/kg F move, max_residual=%.2fkg, cap=%d lots/step, "
-            "cooldown=%dm, daily_cap=%d, enabled=%s via .env)",
+            "cooldown=%dm, daily_cap=%d, enabled=%s — .env defaults, retunable at /control)",
             settings.SILVERM_HEDGE_TRIGGER_INR,
             settings.SILVERM_HEDGE_MAX_RESIDUAL_KG,
             settings.SILVERM_HEDGE_MAX_LOTS_PER_STEP,
