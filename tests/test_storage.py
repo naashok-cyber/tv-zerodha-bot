@@ -43,6 +43,8 @@ EXPECTED_TABLES = {
     "pnl_snapshots",
     "iv_snapshots",
     "hedge_actions",
+    "orderflow_bars",
+    "orderflow_cells",
 }
 
 

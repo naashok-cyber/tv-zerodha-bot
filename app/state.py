@@ -46,6 +46,8 @@ _MAX_OPEN_POSITIONS_OVERRIDE: Optional[int] = None
 _CAPITAL_PER_TRADE_OVERRIDE: Optional[float] = None
 _CONSECUTIVE_LOSSES_LIMIT_OVERRIDE: Optional[int] = None
 _ADX_THRESHOLD_OVERRIDE: Optional[float] = None
+_ORDERFLOW_ENABLED_OVERRIDE: Optional[bool] = None  # None = use .env ORDERFLOW_ENABLED
+_ORDERFLOW_SYMBOLS_OVERRIDE: Optional[list] = None  # None = use .env ORDERFLOW_SYMBOLS
 
 # Per-engine rebalance thresholds, keyed "<engine_slug>.<tunable_key>" — e.g.
 # "goldm.trigger_inr". A flat dict rather than a global per knob: six engines x
@@ -89,6 +91,8 @@ def _save_overrides() -> None:
         "capital_per_trade": _CAPITAL_PER_TRADE_OVERRIDE,
         "consecutive_losses_limit": _CONSECUTIVE_LOSSES_LIMIT_OVERRIDE,
         "adx_threshold": _ADX_THRESHOLD_OVERRIDE,
+        "orderflow_enabled": _ORDERFLOW_ENABLED_OVERRIDE,
+        "orderflow_symbols": _ORDERFLOW_SYMBOLS_OVERRIDE,
         "hedge_tunables": dict(_HEDGE_TUNABLE_OVERRIDES),
         # SESSION_INVALID and _EMERGENCY_STOP intentionally omitted — always reset on restart
     }
@@ -115,6 +119,7 @@ def load_overrides_from_disk() -> None:
     global _STRADDLE_DEFENSE_MODE_OVERRIDE
     global _PARTIAL_BOOKING_ENABLED_OVERRIDE, _ENTRY_WINGS_ENABLED_OVERRIDE
     global _EMA_ANALYZER_ENABLED_OVERRIDE, _EMA_ANALYZER_UNDERLYINGS_OVERRIDE
+    global _ORDERFLOW_ENABLED_OVERRIDE, _ORDERFLOW_SYMBOLS_OVERRIDE
     global _HEDGE_TUNABLE_OVERRIDES
 
     if not os.path.exists(_OVERRIDES_PATH):
@@ -187,6 +192,10 @@ def load_overrides_from_disk() -> None:
             _CONSECUTIVE_LOSSES_LIMIT_OVERRIDE = data["consecutive_losses_limit"]
         if "adx_threshold" in data:
             _ADX_THRESHOLD_OVERRIDE = data["adx_threshold"]
+        if "orderflow_enabled" in data:
+            _ORDERFLOW_ENABLED_OVERRIDE = data["orderflow_enabled"]
+        if isinstance(data.get("orderflow_symbols"), list):
+            _ORDERFLOW_SYMBOLS_OVERRIDE = [str(x) for x in data["orderflow_symbols"]]
         # Older overrides files predate this key — absent simply means "no
         # hedge threshold has been retuned yet", which is the correct default.
         if isinstance(data.get("hedge_tunables"), dict):
@@ -679,6 +688,57 @@ def toggle_ema_analyzer_underlying(symbol: str, env_default: list, allowed: list
         extras = [s for s in current if s not in allowed and s in members]
         new_list = ordered + extras
         _EMA_ANALYZER_UNDERLYINGS_OVERRIDE = new_list
+        _save_overrides()
+        return list(new_list)
+
+
+# ── Order-flow recorder (tick-stream footprint; see app/orderflow.py) ────────
+
+def is_orderflow_enabled(env_default: bool) -> bool:
+    with _lock:
+        return (_ORDERFLOW_ENABLED_OVERRIDE
+                if _ORDERFLOW_ENABLED_OVERRIDE is not None else env_default)
+
+
+def set_orderflow_enabled(value: Optional[bool]) -> None:
+    global _ORDERFLOW_ENABLED_OVERRIDE
+    with _lock:
+        _ORDERFLOW_ENABLED_OVERRIDE = value
+        _save_overrides()
+
+
+def toggle_orderflow_enabled(env_default: bool) -> bool:
+    global _ORDERFLOW_ENABLED_OVERRIDE
+    with _lock:
+        current = (_ORDERFLOW_ENABLED_OVERRIDE
+                   if _ORDERFLOW_ENABLED_OVERRIDE is not None else env_default)
+        _ORDERFLOW_ENABLED_OVERRIDE = not current
+        _save_overrides()
+        return _ORDERFLOW_ENABLED_OVERRIDE
+
+
+def get_orderflow_symbols(env_default: list) -> list:
+    """Scrips the recorder tracks. Override (chosen at /control) wins over .env."""
+    with _lock:
+        val = _ORDERFLOW_SYMBOLS_OVERRIDE
+        return list(val) if val is not None else list(env_default)
+
+
+def toggle_orderflow_symbol(symbol: str, env_default: list, allowed: list) -> list:
+    """Flip one scrip's membership in the recorded set; returns the new list."""
+    global _ORDERFLOW_SYMBOLS_OVERRIDE
+    symbol = (symbol or "").strip().upper()
+    with _lock:
+        current = list(
+            _ORDERFLOW_SYMBOLS_OVERRIDE
+            if _ORDERFLOW_SYMBOLS_OVERRIDE is not None else env_default
+        )
+        if symbol not in allowed:
+            return current
+        members = set(current)
+        members.discard(symbol) if symbol in members else members.add(symbol)
+        new_list = [s for s in allowed if s in members]
+        _ORDERFLOW_SYMBOLS_OVERRIDE = new_list
         _save_overrides()
         return list(new_list)
 

@@ -1162,10 +1162,26 @@ async def lifespan(app: FastAPI):
         session_factory=_SessionFactory,
         kite_fetcher=get_session_manager().get_kite,
     )
+    # Order-flow recorder shares the one tick stream with trailing SL. Trailing
+    # runs FIRST and the recorder's own on_ticks swallows its exceptions, so a
+    # footprint bug can never delay an SL update.
+    from app.orderflow import OrderFlowRecorder, set_recorder
+    _orderflow = OrderFlowRecorder(
+        session_factory=_SessionFactory,
+        settings=get_settings(),
+        enabled_fn=lambda: state.is_orderflow_enabled(get_settings().ORDERFLOW_ENABLED),
+        symbols_fn=lambda: state.get_orderflow_symbols(get_settings().ORDERFLOW_SYMBOLS),
+    )
+    set_recorder(_orderflow)
+
+    def _fan_out_ticks(ticks: list[dict]) -> None:
+        _trailing_manager.on_ticks(ticks)
+        _orderflow.on_ticks(ticks)
+
     _watcher = OrderWatcher(
         on_entry_filled=_on_entry_filled,
         on_gtt_filled=_on_gtt_filled,
-        on_tick_callback=_trailing_manager.on_ticks,
+        on_tick_callback=_fan_out_ticks,
     )
     # Order matters: load_overrides_from_disk() FIRST so module-default
     # globals are replaced by persisted values. set_trade_mode() triggers a
@@ -1178,9 +1194,14 @@ async def lifespan(app: FastAPI):
         if _watcher is not None:
             _watcher.restart(api_key=api_key, access_token=access_token)
 
+    def _watcher_subscribe_full(tokens: list[int]) -> None:
+        if _watcher is not None:
+            _watcher.subscribe_full(tokens)
+
     _scheduler = make_scheduler(
         session_factory=_SessionFactory,
         watcher_restart_fn=_watcher_restart,
+        watcher_subscribe_full_fn=_watcher_subscribe_full,
     )
     _scheduler.start()
     daily_session_check(now=datetime.now(IST))
@@ -4315,6 +4336,234 @@ async def history(
     )
 
 
+_ORDERFLOW_CSS = """
+.ofwrap{overflow-x:auto;-webkit-overflow-scrolling:touch;padding:2px 0 10px}
+.ofgrid{display:flex;gap:3px;min-width:min-content;align-items:stretch}
+.ofax{position:sticky;left:0;z-index:2;background:var(--bg);display:flex;
+ flex-direction:column;padding-right:4px;box-shadow:2px 0 6px -4px rgba(0,0,0,.4)}
+.ofcol{display:flex;flex-direction:column;min-width:96px}
+.ofhd{font-size:10px;color:var(--ink3);text-align:center;padding:3px 0;
+ white-space:nowrap;letter-spacing:.02em}
+.ofpx{font-size:10px;color:var(--ink3);display:flex;align-items:center;
+ justify-content:flex-end;font-variant-numeric:tabular-nums;padding:0 4px}
+.ofc{display:flex;align-items:center;justify-content:center;gap:4px;
+ font-size:10px;font-variant-numeric:tabular-nums;border-radius:3px;
+ background:var(--card);color:var(--ink3);white-space:nowrap}
+.ofc b{font-weight:600}
+.ofc .l{color:var(--bd,#ef5350)}
+.ofc .r{color:var(--ok,#26a69a)}
+.ofc.bi{background:rgba(38,166,154,.22);color:var(--ink)}
+.ofc.si{background:rgba(239,83,80,.22);color:var(--ink)}
+.ofc.poc{outline:1px solid rgba(255,179,0,.75);outline-offset:-1px}
+.ofc.e{background:transparent}
+.offt{font-size:10px;text-align:center;padding:3px 0;font-weight:600;
+ font-variant-numeric:tabular-nums}
+.ofsum{display:flex;gap:14px;flex-wrap:wrap;padding:10px 18px 12px;
+ font-size:12px;color:var(--ink3)}
+.ofsum b{font-variant-numeric:tabular-nums}
+"""
+
+
+def _of_num(v: float) -> str:
+    a = abs(v)
+    if a >= 1e7:
+        return f"{v / 1e7:.2f}Cr"
+    if a >= 1e5:
+        return f"{v / 1e5:.2f}L"
+    if a >= 1000:
+        return f"{v / 1000:.1f}K"
+    return f"{v:.0f}"
+
+
+def _orderflow_grid(bars: list[dict], max_rows: int = 34) -> str:
+    """Render the footprint as a horizontally scrollable price-aligned grid.
+
+    Rows are shared across every bar so the ladder lines up; when the session
+    range needs more rows than fit, adjacent rows are merged rather than
+    windowed, so nothing disappears off the top or bottom.
+    """
+    if not bars:
+        return ("<div style='padding:24px 18px;color:var(--ink3);font-size:13px'>"
+                "No bars recorded yet. The recorder writes one bar a minute while "
+                "the market is open and the WebSocket is connected.</div>")
+
+    row_size = bars[-1]["row_size"] or 0.05
+    lo = min(r["row"] for b in bars for r in b["rows"])
+    hi = max(r["row"] for b in bars for r in b["rows"])
+    span = hi - lo + 1
+    group = max(1, -(-span // max_rows))          # ceil division
+    n_rows = -(-span // group)
+
+    # bar index -> {display row -> [bid, ask, buy_imb, sell_imb, is_poc]}
+    grids: list[dict[int, list]] = []
+    for bar in bars:
+        g: dict[int, list] = {}
+        for r in bar["rows"]:
+            d = (r["row"] - lo) // group
+            cell = g.setdefault(d, [0.0, 0.0, False, False, False])
+            cell[0] += r["bid"]
+            cell[1] += r["ask"]
+            cell[2] = cell[2] or r["buy_imb"]
+            cell[3] = cell[3] or r["sell_imb"]
+            cell[4] = cell[4] or r["poc"]
+        grids.append(g)
+
+    px_h = 18
+    axis = ["<div class='ofax'><div class='ofhd'>&nbsp;</div>"]
+    for d in range(n_rows - 1, -1, -1):
+        price = (lo + d * group) * row_size
+        axis.append(f"<div class='ofpx' style='height:{px_h}px'>{price:g}</div>")
+    axis.append("<div class='ofhd'>&Delta;</div></div>")
+
+    cols = []
+    for bar, g in zip(bars, grids):
+        col = [f"<div class='ofcol'><div class='ofhd'>{bar['ts'].strftime('%H:%M')}</div>"]
+        for d in range(n_rows - 1, -1, -1):
+            cell = g.get(d)
+            if cell is None:
+                col.append(f"<div class='ofc e' style='height:{px_h}px'></div>")
+                continue
+            bid, ask, bi, si, poc = cell
+            cls = "ofc" + (" bi" if bi else "") + (" si" if si else "") + (" poc" if poc else "")
+            col.append(
+                f"<div class='{cls}' style='height:{px_h}px'>"
+                f"<span class='l'>{_of_num(bid)}</span>"
+                f"<span class='r'>{_of_num(ask)}</span></div>"
+            )
+        delta = bar["delta"]
+        col.append(
+            f"<div class='offt' style='color:{'var(--ok)' if delta >= 0 else 'var(--bd)'}'>"
+            f"{'+' if delta >= 0 else '−'}{_of_num(abs(delta))}</div></div>"
+        )
+        cols.append("".join(col))
+
+    return ("<div class='ofwrap'><div class='ofgrid'>"
+            + "".join(axis) + "".join(cols) + "</div></div>")
+
+
+@app.get("/orderflow")
+async def orderflow_page(
+    session: Session = Depends(get_db_session),
+    _: None = Depends(_auth_guard),
+    settings: Settings = Depends(get_current_settings),
+    symbol: str = Query(default=""),
+    bars: int = Query(default=14, ge=1, le=60),
+) -> Response:
+    """Footprint reconstructed from the live Kite tick stream (app/orderflow.py)."""
+    from app.orderflow import load_footprint, session_stats, stacked_levels
+
+    tracked = state.get_orderflow_symbols(settings.ORDERFLOW_SYMBOLS)
+    active = (symbol or (tracked[0] if tracked else "NATURALGAS")).upper()
+    enabled = state.is_orderflow_enabled(settings.ORDERFLOW_ENABLED)
+
+    rows = load_footprint(
+        session, active, limit=bars,
+        imbalance_ratio=settings.ORDERFLOW_IMBALANCE_RATIO,
+        min_cell_pct=settings.ORDERFLOW_IMBALANCE_MIN_PCT,
+    )
+    stats = session_stats(session, active)
+    levels = stacked_levels(rows, stack_len=settings.ORDERFLOW_STACK_LEN)
+
+    picker = "<div style='display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px'>" + "".join(
+        f"<a href='/orderflow?symbol={s}&amp;bars={bars}' class='btn "
+        f"{'bp' if s == active else 'bm'}' style='text-decoration:none'>{s}</a>"
+        for s in (tracked or [active])
+    ) + "</div>"
+
+    if not enabled:
+        banner = ("<div class='card' style='padding:11px 18px;margin-bottom:12px;"
+                  "font-size:12px;color:var(--ink3)'>Recorder is <b>OFF</b> — no new bars "
+                  "are being written. Turn it on under Settings &rarr; Background Jobs.</div>")
+    else:
+        banner = ""
+
+    d = stats["delta"]
+    summary = (
+        "<div class='ofsum'>"
+        f"<span>session &Delta; <b style='color:{'var(--ok)' if d >= 0 else 'var(--bd)'}'>"
+        f"{'+' if d >= 0 else '−'}{_of_num(abs(d))}</b></span>"
+        f"<span>buy <b>{_of_num(stats['buy'])}</b></span>"
+        f"<span>sell <b>{_of_num(stats['sell'])}</b></span>"
+        f"<span>bars <b>{stats['bars']}</b></span>"
+        + (f"<span>last <b>{stats['last_price']:g}</b></span>" if stats["last_price"] else "")
+        + (f"<span>updated <b>{stats['updated'].strftime('%H:%M')}</b></span>"
+           if stats["updated"] else "")
+        + "</div>"
+    )
+
+    lv_html = ""
+    if levels:
+        lv_html = (
+            "<div class='card'><div class='ct'>Stacked imbalances</div>"
+            "<table><thead><tr><th>Time</th><th>Side</th><th>Zone</th>"
+            "<th class='tr'>Rows</th></tr></thead><tbody>"
+            + "".join(
+                f"<tr><td>{lv['ts'].strftime('%H:%M')}</td>"
+                f"<td class=\"{'ok' if lv['side'] == 'buy' else 'bd'}\">{lv['side'].upper()}</td>"
+                f"<td>{lv['low']:g} – {lv['high']:g}</td>"
+                f"<td class='tr'>{lv['rows']}</td></tr>"
+                for lv in reversed(levels[-12:])
+            )
+            + "</tbody></table></div>"
+        )
+
+    legend = (
+        "<div style='padding:0 18px 14px;font-size:11px;color:var(--ink3);line-height:1.6'>"
+        "Each cell is <span style='color:var(--bd)'>bid</span> &times; "
+        "<span style='color:var(--ok)'>ask</span> — volume that hit the bid vs lifted "
+        "the ask, classified by comparing each print against the live book. "
+        "Green/red tint = 3&times; diagonal imbalance, amber outline = bar POC."
+        "</div>"
+    )
+
+    content = (
+        "<style>" + _ORDERFLOW_CSS + "</style>"
+        + picker + banner
+        + "<div class='card'><div class='ct'>Footprint &mdash; " + active
+        + f" &middot; {settings.ORDERFLOW_BAR_SECONDS}s bars</div>"
+        + summary + _orderflow_grid(rows) + legend + "</div>"
+        + lv_html
+    )
+    return Response(
+        content=_shell("more", content, settings, wide=True, refresh=True),
+        media_type="text/html",
+    )
+
+
+@app.get("/api/orderflow/{underlying}")
+async def orderflow_api(
+    underlying: str,
+    session: Session = Depends(get_db_session),
+    _: None = Depends(_auth_guard),
+    settings: Settings = Depends(get_current_settings),
+    bars: int = Query(default=14, ge=1, le=120),
+) -> dict:
+    """JSON footprint — same shape the page renders, for charts or export."""
+    from app.orderflow import load_footprint, session_stats
+
+    rows = load_footprint(
+        session, underlying, limit=bars,
+        imbalance_ratio=settings.ORDERFLOW_IMBALANCE_RATIO,
+        min_cell_pct=settings.ORDERFLOW_IMBALANCE_MIN_PCT,
+    )
+    stats = session_stats(session, underlying)
+    return {
+        "underlying": underlying.upper(),
+        "enabled": state.is_orderflow_enabled(settings.ORDERFLOW_ENABLED),
+        "bar_seconds": settings.ORDERFLOW_BAR_SECONDS,
+        "session": {
+            "bars": stats["bars"], "buy": stats["buy"], "sell": stats["sell"],
+            "delta": stats["delta"], "cvd": stats["cvd"],
+            "last_price": stats["last_price"],
+            "updated": stats["updated"].isoformat() if stats["updated"] else None,
+        },
+        "bars": [
+            {**b, "ts": b["ts"].isoformat()}
+            for b in rows
+        ],
+    }
+
+
 @app.get("/gtts")
 async def gtts_page(
     session: Session = Depends(get_db_session),
@@ -4720,6 +4969,22 @@ async def control_page(
         for _sym in settings.EMA_ANALYZER_ALLOWED_UNDERLYINGS
     )
 
+    of_enabled    = state.is_orderflow_enabled(settings.ORDERFLOW_ENABLED)
+    of_pill       = "pg" if of_enabled else "pm"
+    of_label      = "RECORDING" if of_enabled else "STOPPED"
+    of_lbl        = "Stop" if of_enabled else "Start"
+    of_cls        = "br2" if of_enabled else "bg2"
+    of_active     = state.get_orderflow_symbols(settings.ORDERFLOW_SYMBOLS)
+    of_chips = "".join(
+        "<form method='post' action='/control/orderflow/symbols' "
+        "style='margin:0;display:inline-block'>"
+        f"<input type='hidden' name='symbol' value='{_sym}'>"
+        f"<button class='btn {'ba' if _sym in of_active else 'bg2'}' type='submit' "
+        "style='padding:7px 12px;font-size:.78em;min-height:38px'>"
+        f"{'✓ ' if _sym in of_active else ''}{_sym}</button></form>"
+        for _sym in settings.ORDERFLOW_ALLOWED_SYMBOLS
+    )
+
     def src(key: str) -> str:
         return (
             " <span style='color:#f0a500;font-size:.72em'>(overridden)</span>"
@@ -5074,6 +5339,15 @@ async def control_page(
         + "<button class='btn bn' type='submit'>Mode</button></form>"
         + "<form method='post' action='/control/straddle-defense/toggle' style='margin:0'>"
         + f"<button class='btn {'br2' if sd_enabled else 'bg2'}' type='submit'>{'Stop' if sd_enabled else 'Start'}</button></form></div></div>"
+        + f"<div class='mdr'><div class='mdl'>Order Flow Recorder&ensp;<span class='pill {of_pill}'>{of_label}</span>"
+        + f"<span style='font-size:.70em;color:var(--ink3)'>&ensp;rides the tick socket (no Kite quota) &middot; "
+        + f"{settings.ORDERFLOW_BAR_SECONDS}s footprint bars &middot; <a href='/orderflow' style='color:inherit'>view</a></span></div>"
+        + "<form method='post' action='/control/orderflow/toggle' style='margin:0'>"
+        + f"<button class='btn {of_cls}' type='submit'>{of_lbl}</button></form></div>"
+        + "<div style='display:flex;flex-wrap:wrap;gap:6px;padding:2px 0 6px'>"
+        + f"<span style='font-size:.70em;color:var(--ink3);width:100%'>Recording (tap to toggle) — {', '.join(of_active) if of_active else 'none selected'}</span>"
+        + of_chips
+        + "</div>"
         + "</div>"
 
         # rebalance triggers — one drawer per hedge engine, built from the
@@ -5151,6 +5425,7 @@ async def control_page(
         ("/orders", "Orders", "Placed trades, fills, live P&amp;L per order"),
         ("/gtts", "GTTs", "Live stop-loss / target OCO orders"),
         ("/history", "History", "Closed trades, performance, scorecard"),
+        ("/orderflow", "Order Flow", "Live bid&times;ask footprint from the tick stream"),
         ("/dashboard", "Alerts", "Raw TradingView webhook log"),
         ("/commodity-agents/dashboard", "Agents", "Commodity AI recommendations"),
         ("/commodity-agents/desk", "Desk", "Commodity agents trading desk"),
@@ -5298,6 +5573,49 @@ async def toggle_ema_analyzer_underlying_route(
         settings.EMA_ANALYZER_ALLOWED_UNDERLYINGS,
     )
     log.info("EMA analyzer scrips now %s (toggled %s)", new_list, symbol)
+    return Response(status_code=302, headers={"Location": "/control#settings"})
+
+
+@app.post("/control/orderflow/toggle")
+async def toggle_orderflow(
+    _: None = Depends(_auth_guard),
+    settings: Settings = Depends(get_current_settings),
+) -> Response:
+    """Start/stop the order-flow recorder.
+
+    Read-only feature — it records the tick stream and never places an order,
+    so unlike the hedge toggles this one does not push a Telegram alert.
+    """
+    new_val = state.toggle_orderflow_enabled(settings.ORDERFLOW_ENABLED)
+    log.info("Order-flow recorder toggled to %s via /control", new_val)
+    if new_val and _watcher is not None and _SessionFactory is not None:
+        # Subscribe immediately rather than waiting for the next :10 flush, so
+        # the first bar lands within a minute of the tap.
+        try:
+            from app.orderflow import get_recorder
+            recorder = get_recorder()
+            if recorder is not None:
+                with _SessionFactory() as sess:
+                    tokens = recorder.resolve_tokens(sess)
+                if tokens:
+                    _watcher.subscribe_full(tokens)
+        except Exception as exc:
+            log.warning("Order-flow: immediate subscribe failed: %s", exc)
+    return Response(status_code=302, headers={"Location": "/control#settings"})
+
+
+@app.post("/control/orderflow/symbols")
+async def toggle_orderflow_symbol_route(
+    symbol: str = Form(...),
+    _: None = Depends(_auth_guard),
+    settings: Settings = Depends(get_current_settings),
+) -> Response:
+    new_list = state.toggle_orderflow_symbol(
+        symbol,
+        settings.ORDERFLOW_SYMBOLS,
+        settings.ORDERFLOW_ALLOWED_SYMBOLS,
+    )
+    log.info("Order-flow scrips now %s (toggled %s)", new_list, symbol)
     return Response(status_code=302, headers={"Location": "/control#settings"})
 
 

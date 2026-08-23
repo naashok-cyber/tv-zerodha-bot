@@ -1,5 +1,10 @@
 # Pine Script: Alert Emitter Library & EMA Strategy
 
+> Order-flow indicators (footprint, imbalances, cumulative delta) live in
+> `orderflow_footprint.pine` / `orderflow_cvd.pine` — see [ORDERFLOW.md](ORDERFLOW.md).
+> They are analysis-only and do not send webhooks.
+
+
 ## 1. Publish the library to TradingView
 
 1. Open the Pine Script editor in TradingView.

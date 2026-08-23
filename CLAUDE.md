@@ -11,6 +11,7 @@ Production algo-trading bot: TradingView webhooks + voice commands → Zerodha K
 | `delta_hedge.py` / `hedge_core.py` / `*_delta_hedge.py` / `hedge_tunables.py` (band formula, dispatcher, live thresholds, granularity rule, why BANKNIFTY is excluded) | `docs/claude/delta-hedge.md` |
 | `scheduled_straddle.py`, `straddle_defense.py`, `entry_wings.py`, `partial_booking.py` | `docs/claude/straddles.md` |
 | `ema_analyzer.py` | `docs/claude/ema-analyzer.md` |
+| `orderflow.py`, `/orderflow`, tick-stream footprint (quote-rule classification, diagonal imbalances, why it costs no REST quota) | `docs/claude/orderflow.md` |
 | `paper_trading.py` / anything touching `dry_run` scoping | `docs/claude/paper-trading.md` |
 | `/control` UI, `_shell`, `_SWIPE_JS`, CSS | `docs/claude/trade-desk.md` |
 | Routes, scheduled jobs, ORM models, config params, state overrides, security, auto-login, deployment | `docs/claude/reference.md` |
@@ -47,6 +48,7 @@ app/
   crudeoilm_delta_hedge.py — CRUDEOILM band-hedge spec
   ng_fmove_hedge.py  — NG 2nd trigger: F-move → SELL ATM (own cron :55)
   hedge_tunables.py  — Registry of live-editable rebalance thresholds (drives /control)
+  orderflow.py       — Tick-stream bid×ask footprint recorder (read-only; /orderflow)
   scheduled_straddle.py — Automated short straddles (CRUDEOILM + NATURALGAS)
   straddle_defense.py — 1-min short-straddle monitor: IV alerts + wing hedging
   webauthn_routes.py — Dashboard login (password → session cookie)

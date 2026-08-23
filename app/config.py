@@ -559,6 +559,23 @@ class Settings(BaseSettings):
     GOLDM_HEDGE_MAX_HEDGES_PER_DAY: int = 20
     GOLDM_HEDGE_STATE_PATH: str = "data/goldm_hedge_state.json"
 
+    # ── Order-flow recorder (footprint from the live tick stream) ────────────
+    # Rides the OrderWatcher WebSocket — no REST quota, no second connection.
+    # Volume is split buy/sell by the quote rule (trade price vs best bid/ask),
+    # binned into price rows, flushed to SQLite once a minute. Read at
+    # /orderflow. Default OFF; live-toggleable at /control.
+    ORDERFLOW_ENABLED: bool = False
+    ORDERFLOW_SYMBOLS: list[str] = ["NATURALGAS", "CRUDEOILM"]
+    ORDERFLOW_ALLOWED_SYMBOLS: list[str] = [   # menu shown in the /control picker
+        "NATURALGAS", "CRUDEOILM", "GOLDM", "SILVERM", "NIFTY", "BANKNIFTY",
+    ]
+    ORDERFLOW_BAR_SECONDS: int = 60           # footprint bar width
+    ORDERFLOW_ROW_TICKS: int = 5              # price row = tick_size x this
+    ORDERFLOW_RETENTION_DAYS: int = 5         # nightly prune; cells are bulky
+    ORDERFLOW_IMBALANCE_RATIO: float = 3.0    # diagonal ask/bid ratio
+    ORDERFLOW_IMBALANCE_MIN_PCT: float = 1.0  # min cell size as % of bar volume
+    ORDERFLOW_STACK_LEN: int = 3              # consecutive rows = a stacked level
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

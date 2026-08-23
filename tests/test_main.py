@@ -370,6 +370,50 @@ def test_straddle_defense_hedge_decision_route_bad_id(client) -> None:
     assert resp.status_code == 302
 
 
+def test_orderflow_page_and_api_render_without_bars(client) -> None:
+    """/orderflow is read-only and must survive an empty recorder — the page falls
+    back to an empty state, the JSON keeps its shape."""
+    c, _ = client
+    resp = c.get("/orderflow")
+    assert resp.status_code == 200
+    assert "Footprint" in resp.text
+
+    resp = c.get("/api/orderflow/NATURALGAS")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["underlying"] == "NATURALGAS"
+    assert body["bars"] == []
+    for key in ("enabled", "bar_seconds", "session"):
+        assert key in body
+
+
+def test_orderflow_toggle_and_symbol_routes(client, monkeypatch, tmp_path) -> None:
+    """Recorder on/off and the scrip chips persist through state overrides."""
+    import app.state as state
+
+    c, _ = client
+    monkeypatch.setattr(state, "_OVERRIDES_PATH", str(tmp_path / "ovr.json"))
+    state.set_orderflow_enabled(None)
+    try:
+        resp = c.post("/control/orderflow/toggle", follow_redirects=False)
+        assert resp.status_code == 302
+        assert state.is_orderflow_enabled(False) is True
+
+        resp = c.post(
+            "/control/orderflow/symbols", data={"symbol": "GOLDM"}, follow_redirects=False,
+        )
+        assert resp.status_code == 302
+        assert "GOLDM" in state.get_orderflow_symbols(["NATURALGAS"])
+
+        # not in ORDERFLOW_ALLOWED_SYMBOLS — silently ignored, never subscribed
+        before = list(state.get_orderflow_symbols(["NATURALGAS"]))
+        c.post("/control/orderflow/symbols", data={"symbol": "RELIANCE"}, follow_redirects=False)
+        assert state.get_orderflow_symbols(["NATURALGAS"]) == before
+    finally:
+        state.set_orderflow_enabled(None)
+        state._ORDERFLOW_SYMBOLS_OVERRIDE = None
+
+
 def test_control_summary_endpoint_shape(client) -> None:
     c, _ = client
     with patch("app.main.get_session_manager") as mock_factory:

@@ -47,6 +47,7 @@ class OrderWatcher:
         self._ticker_factory = ticker_factory or _default_ticker_factory
         self._ticker: Any = None
         self._subscribed_tokens: set[int] = set()
+        self._full_mode_tokens: set[int] = set()
         self._watched_order_ids: set[str] = set()
         self._pending_timers: dict[str, threading.Timer] = {}
         self._lock = threading.Lock()
@@ -154,8 +155,32 @@ class OrderWatcher:
     def unsubscribe(self, instrument_tokens: list[int]) -> None:
         for token in instrument_tokens:
             self._subscribed_tokens.discard(token)
+            self._full_mode_tokens.discard(token)
         if self._ticker is not None:
             self._ticker.unsubscribe(instrument_tokens)
+
+    def subscribe_full(self, instrument_tokens: list[int]) -> None:
+        """Subscribe in FULL mode — adds 5-level market depth to each tick.
+
+        Needed by the order-flow recorder, which classifies volume by comparing
+        the traded price against the prevailing best bid/ask. Full mode is a
+        superset of quote mode, so every existing consumer (trailing SL) keeps
+        working; the only cost is a fatter packet (184 B vs 44 B).
+        """
+        if not instrument_tokens:
+            return
+        self._full_mode_tokens.update(instrument_tokens)
+        self.subscribe(instrument_tokens)
+        self._apply_full_mode()
+
+    def _apply_full_mode(self) -> None:
+        if self._ticker is None or not self._full_mode_tokens:
+            return
+        try:
+            mode = getattr(self._ticker, "MODE_FULL", "full")
+            self._ticker.set_mode(mode, list(self._full_mode_tokens))
+        except Exception:
+            log.exception("Could not set FULL mode on %d token(s)", len(self._full_mode_tokens))
 
     # ── KiteTicker callbacks ──────────────────────────────────────────────────
 
@@ -163,6 +188,7 @@ class OrderWatcher:
         log.info("Ticker connected")
         if self._subscribed_tokens:
             self._ticker.subscribe(list(self._subscribed_tokens))
+        self._apply_full_mode()
 
     def on_close(self, ws: Any, code: Any, reason: Any) -> None:
         log.info("Ticker closed: code=%s reason=%s", code, reason)
@@ -174,6 +200,7 @@ class OrderWatcher:
         log.warning("Ticker reconnecting, attempt %d", attempts_count)
         if self._subscribed_tokens and self._ticker is not None:
             self._ticker.subscribe(list(self._subscribed_tokens))
+            self._apply_full_mode()
 
     def on_noreconnect(self, ws: Any) -> None:
         log.error("Ticker gave up reconnecting")

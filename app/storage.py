@@ -339,6 +339,63 @@ class WebSession(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class OrderFlowBar(Base):
+    """One completed order-flow bar — the per-bar totals of a footprint.
+
+    Written by app/orderflow.py from live Kite ticks. Volume is split into
+    buy/sell by the quote rule (trade price vs the prevailing best bid/ask),
+    which is how order flow is derived for NSE/MCX — neither exchange
+    publishes an aggressor flag.
+    """
+
+    __tablename__ = "orderflow_bars"
+    __table_args__ = (
+        UniqueConstraint("instrument_token", "bucket_ts", name="uq_of_bar_token_ts"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    instrument_token: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    tradingsymbol: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    underlying: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    exchange: Mapped[str] = mapped_column(String(8), nullable=False)
+    bucket_ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    bar_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
+    row_size: Mapped[float] = mapped_column(Float, nullable=False)
+    open: Mapped[float] = mapped_column(Float, nullable=False)
+    high: Mapped[float] = mapped_column(Float, nullable=False)
+    low: Mapped[float] = mapped_column(Float, nullable=False)
+    close: Mapped[float] = mapped_column(Float, nullable=False)
+    buy_qty: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    sell_qty: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    # running-delta extremes inside the bar — the Δmax/Δmin of a real footprint
+    max_delta: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    min_delta: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    poc_price: Mapped[float | None] = mapped_column(Float)
+    tick_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    cells: Mapped[list[OrderFlowCell]] = relationship(
+        "OrderFlowCell", back_populates="bar", cascade="all, delete-orphan",
+    )
+
+    @property
+    def delta(self) -> float:
+        return (self.buy_qty or 0.0) - (self.sell_qty or 0.0)
+
+
+class OrderFlowCell(Base):
+    """One price row of one order-flow bar: bid (sell) × ask (buy) quantity."""
+
+    __tablename__ = "orderflow_cells"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    bar_id: Mapped[int] = mapped_column(ForeignKey("orderflow_bars.id"), nullable=False, index=True)
+    price: Mapped[float] = mapped_column(Float, nullable=False)   # lower bound of the row
+    bid_qty: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    ask_qty: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+
+    bar: Mapped[OrderFlowBar] = relationship("OrderFlowBar", back_populates="cells")
+
+
 # ── Shared session factory (set by main.py lifespan; used by webauthn_routes) ─
 
 _factory: Any = None

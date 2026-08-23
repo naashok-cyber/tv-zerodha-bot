@@ -360,6 +360,7 @@ def make_scheduler(
     settings: Any = None,
     session_factory: Any = None,
     watcher_restart_fn: Callable[[str, str], None] | None = None,
+    watcher_subscribe_full_fn: Callable[[list[int]], None] | None = None,
 ) -> BackgroundScheduler:
     if settings is None:
         settings = get_settings()
@@ -653,6 +654,49 @@ def make_scheduler(
             settings.NG_DELTA_HEDGE_THRESHOLD,
             settings.NG_DELTA_HEDGE_LIMIT_WAIT_SEC,
             settings.NG_DELTA_HEDGE_ENABLED,
+        )
+
+        # Order-flow flush — writes the minute's completed footprint bars to
+        # SQLite and keeps the WebSocket subscription current. second=10 is one
+        # of the two slots nothing else uses; the offset is bookkeeping only,
+        # since this job makes no Kite REST calls at all (the data arrives on
+        # the streaming socket) and so never touches the quote bucket.
+        from app.orderflow import orderflow_flush_job, orderflow_prune_job
+        scheduler.add_job(
+            orderflow_flush_job,
+            trigger="cron",
+            day_of_week="mon-fri",
+            hour="9-23",
+            minute="*",
+            second=10,
+            kwargs={
+                "settings": settings,
+                "session_factory": session_factory,
+                "subscribe_fn": watcher_subscribe_full_fn,
+            },
+            id="orderflow_flush",
+            misfire_grace_time=30,
+            max_instances=1,
+        )
+        scheduler.add_job(
+            orderflow_prune_job,
+            trigger="cron",
+            hour=2,
+            minute=20,
+            kwargs={"settings": settings, "session_factory": session_factory},
+            id="orderflow_prune",
+            misfire_grace_time=3600,
+            max_instances=1,
+        )
+        log.info(
+            "[scheduler] order-flow recorder: flush every 1 min Mon-Fri 09-23 IST "
+            "(bar=%ds, row=%d ticks, scrips=%s, retention=%dd, enabled=%s via .env "
+            "default, live-controllable at /control)",
+            settings.ORDERFLOW_BAR_SECONDS,
+            settings.ORDERFLOW_ROW_TICKS,
+            settings.ORDERFLOW_SYMBOLS,
+            settings.ORDERFLOW_RETENTION_DAYS,
+            settings.ORDERFLOW_ENABLED,
         )
 
         # BANKNIFTY delta hedge — NSE hours only (09:15–15:30). second=40 keeps

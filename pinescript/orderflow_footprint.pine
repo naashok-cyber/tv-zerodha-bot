@@ -1,0 +1,395 @@
+//@version=6
+// ═══════════════════════════════════════════════════════════════════════════
+//  Order Flow · Footprint  (Bid × Ask · Imbalance · POC / Value Area · Δ)
+// ═══════════════════════════════════════════════════════════════════════════
+//  WHAT THIS IS
+//  A footprint / order-flow chart rebuilt from the only order-flow-ish data
+//  TradingView exposes to Pine: intrabar (lower-timeframe) OHLCV, pulled with
+//  request.security_lower_tf().  Every intrabar's volume is classified as
+//  buy-side ("ask") or sell-side ("bid") and binned into price rows, which is
+//  how Sierra/ATAS/Bookmap-style footprints are drawn — except those use the
+//  real trade tape (aggressor flags at the actual bid/ask).
+//
+//  WHAT IT IS NOT
+//  There is no bid/ask tape in Pine.  Classification is an INFERENCE:
+//    · Tick rule      — uptick = buy, downtick = sell (Lee-Ready, no midpoint)
+//    · Bar polarity   — intrabar close > open = buy
+//    · Proportional   — split by close position inside the intrabar range
+//  On liquid instruments the tick rule tracks the real delta closely; on thin
+//  books or wide spreads it will differ.  Treat numbers as relative, not
+//  literal bid/ask prints.  See pinescript/README.md for the full caveat list.
+// ═══════════════════════════════════════════════════════════════════════════
+
+indicator("Order Flow · Footprint", "OF Footprint", overlay = true,
+     max_boxes_count = 500, max_labels_count = 500, max_lines_count = 500)
+
+// ─────────────────────────────────────────────────────────────── inputs ────
+G_ENG = "① Data engine"
+G_ROW = "② Price rows"
+G_DSP = "③ Display"
+G_IMB = "④ Imbalances"
+G_LVL = "⑤ Levels"
+G_COL = "⑥ Colours"
+
+ltfMode = input.string("Auto", "Intrabar resolution", options = ["Auto", "Manual"], group = G_ENG,
+     tooltip = "Auto picks the finest resolution your plan can serve for the current chart TF. " +
+     "Seconds resolutions need a paid TradingView plan; fall back to Manual '1' if rows come out empty.")
+ltfMan  = input.timeframe("1", "    ↳ manual", group = G_ENG)
+clsMode = input.string("Tick rule", "Buy/sell classification", group = G_ENG,
+     options = ["Tick rule", "Bar polarity", "Proportional"],
+     tooltip = "Tick rule = closest to a real aggressor split. Proportional = smoothest. " +
+     "Bar polarity = crudest but most literal.")
+spreadV = input.bool(true, "Spread intrabar volume across its range", group = G_ENG,
+     tooltip = "ON: volume is shared over every row the intrabar touched. OFF: all of it lands on the close row.")
+
+rowMode    = input.string("Auto", "Row height", options = ["Auto", "Manual (ticks)"], group = G_ROW)
+rowTicksIn = input.int(10, "    ↳ ticks per row", minval = 1, group = G_ROW)
+rowsTarget = input.int(11, "    ↳ auto: target rows per bar", minval = 3, maxval = 40, group = G_ROW)
+maxRows    = input.int(18, "Hard cap on rows per bar", minval = 4, maxval = 40, group = G_ROW)
+
+barsBack = input.int(10, "Bars to draw", minval = 1, maxval = 30, group = G_DSP,
+     tooltip = "Drawing objects are capped at 500 each by Pine. 10 bars × 18 rows is the safe ceiling " +
+     "with the histogram on; turn the histogram off to roughly double it.")
+cellMode = input.string("Bid × Ask", "Cell text", options = ["Bid × Ask", "Delta", "Volume", "None"], group = G_DSP)
+rowStyle = input.string("Histogram", "Row background", options = ["Histogram", "Heat map", "None"], group = G_DSP)
+txtSize  = input.string("Tiny", "Text size", options = ["Tiny", "Small", "Normal"], group = G_DSP)
+showFoot = input.bool(true, "Per-bar Δ footer", group = G_DSP)
+showTbl  = input.bool(true, "Stats table", group = G_DSP)
+
+imbRatio  = input.float(3.0, "Diagonal imbalance ratio", minval = 1.2, step = 0.1, group = G_IMB,
+     tooltip = "Ask[row] vs Bid[row-1] (buy) and Bid[row] vs Ask[row+1] (sell). 3× is the industry default.")
+imbMinPct = input.float(1.0, "Minimum cell size (% of bar volume)", minval = 0.0, step = 0.25, group = G_IMB,
+     tooltip = "Kills imbalances printed by one lonely lot at the tails.")
+stackLen  = input.int(3, "Stacked imbalance = N in a row", minval = 2, maxval = 8, group = G_IMB)
+showStack = input.bool(true, "Extend stacked-imbalance levels", group = G_IMB)
+stackExt  = input.int(20, "    ↳ extend by N bars", minval = 1, group = G_IMB)
+
+showPOC   = input.bool(true, "Bar POC", group = G_LVL)
+showVA    = input.bool(true, "Bar value area", group = G_LVL)
+vaPct     = input.float(70, "    ↳ value area %", minval = 30, maxval = 95, step = 5, group = G_LVL) / 100
+showUnfin = input.bool(true, "Unfinished auction marks", group = G_LVL,
+     tooltip = "Both sides traded on the extreme row — the auction did not finish there. Magnet for later price.")
+
+cBull  = input.color(#26a69a, "Buy / ask", group = G_COL)
+cBear  = input.color(#ef5350, "Sell / bid", group = G_COL)
+cNeut  = input.color(#b2b5be, "Neutral text", group = G_COL)
+cPOC   = input.color(#ffb300, "POC", group = G_COL)
+cVA    = input.color(#787b86, "Value area", group = G_COL)
+histTr = input.int(72, "Histogram transparency", minval = 0, maxval = 95, group = G_COL)
+
+// ───────────────────────────────────────────────── lower-timeframe feed ────
+_tfs   = timeframe.in_seconds(timeframe.period)
+autoLtf = _tfs <= 60 ? "1S" : _tfs <= 300 ? "5S" : _tfs <= 900 ? "15S" : _tfs <= 3600 ? "1" : _tfs <= 14400 ? "5" : _tfs <= 86400 ? "15" : "60"
+ltf     = ltfMode == "Auto" ? autoLtf : ltfMan
+
+aO = request.security_lower_tf(syminfo.tickerid, ltf, open,   true)
+aH = request.security_lower_tf(syminfo.tickerid, ltf, high,   true)
+aL = request.security_lower_tf(syminfo.tickerid, ltf, low,    true)
+aC = request.security_lower_tf(syminfo.tickerid, ltf, close,  true)
+aV = request.security_lower_tf(syminfo.tickerid, ltf, volume, true)
+
+// ────────────────────────────────────────────────────────────── helpers ────
+f_num(float v) =>
+    float a = math.abs(v)
+    a >= 1e9 ? str.tostring(v / 1e9, "#.##") + "B" : a >= 1e6 ? str.tostring(v / 1e6, "#.##") + "M" : a >= 1000 ? str.tostring(v / 1000, "#.#") + "K" : str.tostring(math.round(v), "#")
+
+f_pad(string s, int w, bool padLeft) =>
+    string o = s
+    while str.length(o) < w
+        o := padLeft ? " " + o : o + " "
+    o
+
+// Value area: expand row-by-row from the POC until vaPct of volume is covered.
+f_va(array<float> tot, int poc, float pct) =>
+    int   n      = array.size(tot)
+    float target = array.sum(tot) * pct
+    float acc    = array.get(tot, poc)
+    int   up     = poc
+    int   dn     = poc
+    while acc < target and (up < n - 1 or dn > 0)
+        float uv = up < n - 1 ? array.get(tot, up + 1) : -1.0
+        float dv = dn > 0     ? array.get(tot, dn - 1) : -1.0
+        if uv >= dv
+            up  += 1
+            acc += uv
+        else
+            dn  -= 1
+            acc += dv
+    [dn, up]
+
+txtSz = txtSize == "Tiny" ? size.tiny : txtSize == "Small" ? size.small : size.normal
+
+// ─────────────────────────────────────────────────────── row geometry ──────
+atrV      = ta.atr(50)
+autoTicks = math.max(1, math.round(nz(atrV, syminfo.mintick * 20) / syminfo.mintick / rowsTarget))
+rowTicks  = rowMode == "Auto" ? autoTicks : rowTicksIn
+float rowSize = rowTicks * syminfo.mintick
+barRange = high - low
+if barRange / rowSize > maxRows
+    rowSize := math.ceil(barRange / maxRows / syminfo.mintick) * syminfo.mintick
+
+gridLow = math.floor(low / rowSize) * rowSize
+nRows   = math.max(1, math.min(maxRows + 2, int(math.floor((high - gridLow) / rowSize + 1e-9)) + 1))
+
+inWin = last_bar_index - bar_index < barsBack
+
+// ───────────────────────────────────────────── intrabar classification ─────
+var float prevC   = na
+var int   lastDir = 1
+
+bidA = array.new<float>(inWin ? nRows : 1, 0.0)   // sell-side / "bid" volume
+askA = array.new<float>(inWin ? nRows : 1, 0.0)   // buy-side  / "ask" volume
+
+float bBuy  = 0.0
+float bSell = 0.0
+float runD  = 0.0
+float maxD  = 0.0
+float minD  = 0.0
+
+nIB = array.size(aV)
+
+if nIB > 0
+    for i = 0 to nIB - 1
+        float c = array.get(aC, i)
+        float o = array.get(aO, i)
+        float h = array.get(aH, i)
+        float l = array.get(aL, i)
+        float v = array.get(aV, i)
+        if not na(v) and v > 0 and not na(c)
+            float buy  = 0.0
+            float sell = 0.0
+            if clsMode == "Tick rule"
+                int d = na(prevC) ? (c >= o ? 1 : -1) : c > prevC ? 1 : c < prevC ? -1 : lastDir
+                lastDir := d
+                buy  := d > 0 ? v : 0.0
+                sell := d > 0 ? 0.0 : v
+            else if clsMode == "Bar polarity"
+                buy  := c > o ? v : c < o ? 0.0 : v * 0.5
+                sell := v - buy
+            else
+                float rr = h - l
+                float f  = rr > 0 ? (c - l) / rr : (c >= o ? 1.0 : 0.0)
+                buy  := v * f
+                sell := v - buy
+            prevC := c
+            bBuy  += buy
+            bSell += sell
+            runD  += buy - sell
+            maxD  := math.max(maxD, runD)
+            minD  := math.min(minD, runD)
+            if inWin
+                if spreadV
+                    int r1 = math.max(0, math.min(nRows - 1, int(math.floor((l - gridLow) / rowSize + 1e-9))))
+                    int r2 = math.max(0, math.min(nRows - 1, int(math.floor((h - gridLow) / rowSize + 1e-9))))
+                    float bs = buy  / (r2 - r1 + 1)
+                    float ss = sell / (r2 - r1 + 1)
+                    for r = r1 to r2
+                        array.set(askA, r, array.get(askA, r) + bs)
+                        array.set(bidA, r, array.get(bidA, r) + ss)
+                else
+                    int rc = math.max(0, math.min(nRows - 1, int(math.floor((c - gridLow) / rowSize + 1e-9))))
+                    array.set(askA, rc, array.get(askA, rc) + buy)
+                    array.set(bidA, rc, array.get(bidA, rc) + sell)
+
+// Fallback: no intrabar data (plan limits / illiquid symbol) — use the chart bar.
+if nIB == 0 and volume > 0
+    float rr = high - low
+    float f  = rr > 0 ? (close - low) / rr : 0.5
+    bBuy  := volume * f
+    bSell := volume - bBuy
+    runD  := bBuy - bSell
+    maxD  := math.max(0, runD)
+    minD  := math.min(0, runD)
+    if inWin
+        int rc = math.max(0, math.min(nRows - 1, int(math.floor((close - gridLow) / rowSize + 1e-9))))
+        array.set(askA, rc, bBuy)
+        array.set(bidA, rc, bSell)
+
+barDelta = bBuy - bSell
+barVol   = bBuy + bSell
+
+var float cvd = 0.0
+if timeframe.change("D")
+    cvd := 0.0
+cvd += barDelta
+
+// ─────────────────────────────────────────────────── drawing bookkeeping ───
+// NOTE: `var` scalars are rolled back on every realtime tick but array
+// mutations are NOT — so the redraw counters must live inside arrays too,
+// otherwise the live bar leaks a fresh set of boxes on every single tick.
+var array<box>   bxs  = array.new<box>()
+var array<label> lbs  = array.new<label>()
+var array<line>  lns  = array.new<line>()
+var array<int>   ctr  = array.new<int>(3, 0)      // boxes / labels / lines drawn for the current bar
+var array<int>   mark = array.new<int>(1, -1)     // bar_index the counters belong to
+
+if array.get(mark, 0) == bar_index
+    int nb = math.min(array.get(ctr, 0), array.size(bxs))
+    if nb > 0
+        for i = 1 to nb
+            box.delete(array.pop(bxs))
+    int nl = math.min(array.get(ctr, 1), array.size(lbs))
+    if nl > 0
+        for i = 1 to nl
+            label.delete(array.pop(lbs))
+    int nn = math.min(array.get(ctr, 2), array.size(lns))
+    if nn > 0
+        for i = 1 to nn
+            line.delete(array.pop(lns))
+array.set(ctr, 0, 0)
+array.set(ctr, 1, 0)
+array.set(ctr, 2, 0)
+array.set(mark, 0, bar_index)
+
+szB0 = array.size(bxs)
+szL0 = array.size(lbs)
+szN0 = array.size(lns)
+
+// ───────────────────────────────────────────────────────────── drawing ─────
+bool sigStackBuy  = false
+bool sigStackSell = false
+bool sigUnfin     = false
+float pocPrice    = na
+
+if inWin and barVol > 0
+    int   xL = time
+    int   xR = time_close
+    int   xC = xL + int((xR - xL) / 2)
+    int   hw = int((xR - xL) * 0.46)
+
+    // per-row totals, POC, scale
+    totA = array.new<float>(nRows, 0.0)
+    float maxSide = 0.0
+    float pocV    = -1.0
+    int   poc     = 0
+    for r = 0 to nRows - 1
+        float b = array.get(bidA, r)
+        float a = array.get(askA, r)
+        array.set(totA, r, b + a)
+        maxSide := math.max(maxSide, math.max(a, b))
+        if b + a > pocV
+            pocV := b + a
+            poc  := r
+    maxSide := math.max(maxSide, syminfo.mintick)
+    pocPrice := gridLow + (poc + 0.5) * rowSize
+
+    float minCell = barVol * imbMinPct / 100
+
+    int runBuy  = 0
+    int runSell = 0
+
+    for r = 0 to nRows - 1
+        float b   = array.get(bidA, r)
+        float a   = array.get(askA, r)
+        float tot = array.get(totA, r)
+        float bot = gridLow + r * rowSize
+        float top = bot + rowSize
+        float mid = bot + rowSize / 2
+
+        // diagonal imbalances
+        float bDiag = r > 0          ? array.get(bidA, r - 1) : na
+        float aDiag = r < nRows - 1  ? array.get(askA, r + 1) : na
+        bool  bImb  = not na(bDiag) and a >= minCell and (bDiag <= 0 ? a > 0 : a / bDiag >= imbRatio)
+        bool  sImb  = not na(aDiag) and b >= minCell and (aDiag <= 0 ? b > 0 : b / aDiag >= imbRatio)
+
+        runBuy  := bImb ? runBuy  + 1 : 0
+        runSell := sImb ? runSell + 1 : 0
+
+        if showStack and runBuy == stackLen
+            array.push(lns, line.new(xL, bot, xR + (xR - xL) * stackExt, bot, xloc = xloc.bar_time,
+                 color = cBull, width = 2))
+            sigStackBuy := true
+        if showStack and runSell == stackLen
+            array.push(lns, line.new(xL, top, xR + (xR - xL) * stackExt, top, xloc = xloc.bar_time,
+                 color = cBear, width = 2))
+            sigStackSell := true
+
+        // row background
+        if rowStyle == "Histogram"
+            if b > 0
+                array.push(bxs, box.new(xC - int(hw * b / maxSide), top, xC, bot, xloc = xloc.bar_time,
+                     border_color = color.new(cBear, 100), bgcolor = color.new(cBear, histTr)))
+            if a > 0
+                array.push(bxs, box.new(xC, top, xC + int(hw * a / maxSide), bot, xloc = xloc.bar_time,
+                     border_color = color.new(cBull, 100), bgcolor = color.new(cBull, histTr)))
+        else if rowStyle == "Heat map"
+            array.push(bxs, box.new(xL, top, xR, bot, xloc = xloc.bar_time,
+                 border_color = color.new(color.gray, 90),
+                 bgcolor = color.from_gradient(a - b, -maxSide, maxSide,
+                     color.new(cBear, histTr), color.new(cBull, histTr))))
+
+        // cell text
+        if cellMode != "None"
+            string txt = cellMode == "Bid × Ask" ? f_pad(f_num(b), 6, true) + " × " + f_pad(f_num(a), 6, false) : cellMode == "Delta" ? (a - b >= 0 ? "+" : "−") + f_num(math.abs(a - b)) : f_num(tot)
+            color tc = bImb ? cBull : sImb ? cBear : r == poc ? cPOC : cNeut
+            color bg = bImb ? color.new(cBull, 78) : sImb ? color.new(cBear, 78) : color.new(color.black, 100)
+            array.push(lbs, label.new(xC, mid, txt, xloc = xloc.bar_time, style = label.style_label_center,
+                 color = bg, textcolor = tc, size = txtSz, text_font_family = font.family_monospace))
+
+    // POC line
+    if showPOC
+        array.push(lns, line.new(xL, pocPrice, xR, pocPrice, xloc = xloc.bar_time, color = cPOC, width = 2))
+
+    // value area
+    if showVA
+        [vaLo, vaHi] = f_va(totA, poc, vaPct)
+        array.push(bxs, box.new(xL, gridLow + (vaHi + 1) * rowSize, xR, gridLow + vaLo * rowSize,
+             xloc = xloc.bar_time, border_color = cVA, border_style = line.style_dotted, bgcolor = na))
+
+    // unfinished auction — both sides traded on an extreme row
+    if showUnfin
+        float bTop = array.get(bidA, nRows - 1)
+        float aTop = array.get(askA, nRows - 1)
+        float bBot = array.get(bidA, 0)
+        float aBot = array.get(askA, 0)
+        if bTop > 0 and aTop > 0
+            array.push(lbs, label.new(xC, high, "◆", xloc = xloc.bar_time, style = label.style_label_down,
+                 color = color.new(color.black, 100), textcolor = cBear, size = size.tiny))
+            sigUnfin := true
+        if bBot > 0 and aBot > 0
+            array.push(lbs, label.new(xC, low, "◆", xloc = xloc.bar_time, style = label.style_label_up,
+                 color = color.new(color.black, 100), textcolor = cBull, size = size.tiny))
+            sigUnfin := true
+
+    // Δ footer
+    if showFoot
+        array.push(lbs, label.new(xC, gridLow - rowSize * 0.8, (barDelta >= 0 ? "+" : "−") + f_num(math.abs(barDelta)),
+             xloc = xloc.bar_time, style = label.style_none,
+             textcolor = barDelta >= 0 ? cBull : cBear, size = txtSz, text_font_family = font.family_monospace))
+
+array.set(ctr, 0, array.size(bxs) - szB0)
+array.set(ctr, 1, array.size(lbs) - szL0)
+array.set(ctr, 2, array.size(lns) - szN0)
+
+// keep well inside Pine's 500-object ceilings
+while array.size(bxs) > 480
+    box.delete(array.shift(bxs))
+while array.size(lbs) > 480
+    label.delete(array.shift(lbs))
+while array.size(lns) > 470
+    line.delete(array.shift(lns))
+
+// ─────────────────────────────────────────────────────────────── table ─────
+var table t = table.new(position.top_right, 2, 9, bgcolor = color.new(color.black, 20),
+     border_color = color.new(color.gray, 60), border_width = 1, frame_color = color.new(color.gray, 40), frame_width = 1)
+
+f_cell(int row, string k, string v, color vc) =>
+    table.cell(t, 0, row, k, text_color = color.new(color.white, 25), text_size = size.tiny, text_halign = text.align_left)
+    table.cell(t, 1, row, v, text_color = vc, text_size = size.tiny, text_halign = text.align_right)
+
+if barstate.islast and showTbl
+    f_cell(0, "intrabar TF", nIB > 0 ? ltf + "  (" + str.tostring(nIB) + ")" : "NO DATA", nIB > 0 ? cNeut : cBear)
+    f_cell(1, "row size", str.tostring(rowSize / syminfo.mintick, "#.#") + " ticks", cNeut)
+    f_cell(2, "bar Δ", (barDelta >= 0 ? "+" : "−") + f_num(math.abs(barDelta)), barDelta >= 0 ? cBull : cBear)
+    f_cell(3, "Δ / volume", barVol > 0 ? str.tostring(barDelta / barVol * 100, "#.#") + " %" : "—", barDelta >= 0 ? cBull : cBear)
+    f_cell(4, "Δ max / min", "+" + f_num(maxD) + " / −" + f_num(math.abs(minD)), cNeut)
+    f_cell(5, "buy / sell", f_num(bBuy) + " / " + f_num(bSell), cNeut)
+    f_cell(6, "bar POC", na(pocPrice) ? "—" : str.tostring(pocPrice, format.mintick), cPOC)
+    f_cell(7, "session CVD", (cvd >= 0 ? "+" : "−") + f_num(math.abs(cvd)), cvd >= 0 ? cBull : cBear)
+    f_cell(8, "classifier", clsMode, cNeut)
+
+// ────────────────────────────────────────────────────────────── alerts ─────
+alertcondition(sigStackBuy,  "Stacked buy imbalance",  "Order flow: {{ticker}} stacked BUY imbalance on {{interval}}")
+alertcondition(sigStackSell, "Stacked sell imbalance", "Order flow: {{ticker}} stacked SELL imbalance on {{interval}}")
+alertcondition(sigUnfin,     "Unfinished auction",     "Order flow: {{ticker}} unfinished auction at a bar extreme")
+alertcondition(ta.cross(barDelta, 0), "Bar delta flip", "Order flow: {{ticker}} bar delta flipped sign")
