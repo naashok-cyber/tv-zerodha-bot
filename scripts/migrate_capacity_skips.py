@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import sys
 
+from sqlalchemy.orm import Session
+
 from app.commodity_agents.storage import AgentRun, CommodityRecommendation
 from app.storage import init_db
 
@@ -23,8 +25,8 @@ _PREFIX = "Capacity gate:"
 
 
 def main(apply: bool) -> int:
-    factory = init_db()
-    with factory() as session:
+    engine = init_db()
+    with Session(engine) as session:
         rows = (
             session.query(AgentRun, CommodityRecommendation)
             .join(CommodityRecommendation,
