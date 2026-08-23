@@ -370,7 +370,10 @@ def make_scheduler(
         scheduler.add_job(
             auto_login_job,
             trigger="cron",
-            day_of_week="mon-fri",
+            # Runs daily incl. weekends — Kite tokens expire ~20h after issue,
+            # so a Fri-only login leaves Sunday evening + Monday pre-open
+            # without a valid session. Weekend logins burn one Kite API call
+            # per day but keep the token continuously fresh.
             hour=al_h,
             minute=al_m,
             kwargs={"watcher_restart_fn": watcher_restart_fn},
@@ -378,7 +381,7 @@ def make_scheduler(
             misfire_grace_time=300,  # run even if up to 5 min late (scheduler thread busy)
         )
         log.info(
-            "[scheduler] auto-login scheduled at %s IST",
+            "[scheduler] auto-login scheduled at %s IST (daily incl. weekends)",
             settings.KITE_AUTO_LOGIN_TIME,
         )
 
