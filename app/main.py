@@ -4591,6 +4591,11 @@ async def control_page(
     fmove_label   = "RUNNING" if fmove_enabled else "STOPPED"
     fmove_lbl     = "Stop"    if fmove_enabled else "Start"
     fmove_cls     = "br2"     if fmove_enabled else "bg2"
+    ngfm_enabled  = state.is_ng_fmove_hedge_enabled(settings.NG_FMOVE_HEDGE_ENABLED)
+    ngfm_pill     = "pg" if ngfm_enabled else "pr"
+    ngfm_label    = "RUNNING" if ngfm_enabled else "STOPPED"
+    ngfm_lbl      = "Stop"    if ngfm_enabled else "Start"
+    ngfm_cls      = "br2"     if ngfm_enabled else "bg2"
     silverm_enabled = state.is_silverm_hedge_enabled(settings.SILVERM_HEDGE_ENABLED)
     silverm_pill    = "pg" if silverm_enabled else "pr"
     silverm_label   = "RUNNING" if silverm_enabled else "STOPPED"
@@ -4600,6 +4605,7 @@ async def control_page(
     # engine would keep advertising the default it no longer uses.
     from app import hedge_tunables as _ht
     fmove_tun   = _ht.all_effective(settings, "crudeoilm_fmove")
+    ngfm_tun    = _ht.all_effective(settings, "ng_fmove")
     silverm_tun = _ht.all_effective(settings, "silverm")
     pb_enabled    = state.is_partial_booking_enabled(settings.PARTIAL_BOOKING_ENABLED)
     pb_pill       = "pg" if pb_enabled else "pm"
@@ -4950,6 +4956,13 @@ async def control_page(
         + "<span style='font-size:.70em;color:var(--ink3)'>&ensp;every 2 min (odd) &middot; incl. half-exit, BNF SL, straddle ladder</span></div>"
         + "<form method='post' action='/control/ng-hedge/toggle' style='margin:0'>"
         + f"<button class='btn {hedge_cls}' type='submit'>{hedge_lbl}</button></form></div>"
+        + f"<div class='mdr'><div class='mdl'>NG F-move Hedge&ensp;<span class='pill {ngfm_pill}'>{ngfm_label}</span>"
+        + (" <span class='pill pa'>DOUBLE-HEDGING</span>" if (ngfm_enabled and hedge_enabled) else "")
+        + f"<span style='font-size:.70em;color:var(--ink3)'>&ensp;every 1 min (:55) &middot; SELL ATM opt on ±₹{ngfm_tun['trigger_inr']:.2f}/mmBtu F move &middot; min |δ| {ngfm_tun['min_delta_units']:g}"
+        + ("<br><b>both NG engines on — same book hedged twice, no shared state</b>" if (ngfm_enabled and hedge_enabled) else "")
+        + "</span></div>"
+        + "<form method='post' action='/control/ng-fmove-hedge/toggle' style='margin:0'>"
+        + f"<button class='btn {ngfm_cls}' type='submit'>{ngfm_lbl}</button></form></div>"
         + f"<div class='mdr'><div class='mdl'>CRUDEOILM Delta Hedge&ensp;<span class='pill {crude_pill}'>{crude_label}</span>"
         + "<span style='font-size:.70em;color:var(--ink3)'>&ensp;every 5 min (:02) &middot; band in barrels</span></div>"
         + "<form method='post' action='/control/crude-hedge/toggle' style='margin:0'>"
@@ -5238,6 +5251,36 @@ async def toggle_crude_hedge(
         )
     except Exception as exc:
         log.warning("CRUDEOILM delta-hedge toggle: telegram notify failed: %s", exc)
+    return Response(status_code=302, headers={"Location": "/control"})
+
+
+@app.post("/control/ng-fmove-hedge/toggle")
+async def toggle_ng_fmove_hedge(
+    _: None = Depends(_auth_guard),
+    settings: Settings = Depends(get_current_settings),
+) -> Response:
+    """Start/stop the NATURALGAS F-move-triggered SELL-options hedge.
+
+    NG's second trigger. Distinct from /control/ng-hedge/toggle, which runs the
+    band engine (and gates half-exit, BNF SL and the straddle ladder). The two
+    share no state, so running both hedges the same book twice — the Telegram
+    line and the /control row both say so when that happens.
+    """
+    from app.commodity_agents.notify import send_telegram
+
+    new_val = state.toggle_ng_fmove_hedge_enabled(settings.NG_FMOVE_HEDGE_ENABLED)
+    both = new_val and state.is_ng_hedge_enabled(settings.NG_DELTA_HEDGE_ENABLED)
+    log.warning("NATURALGAS fmove-hedge toggled to %s via /control (band engine also on: %s)",
+                new_val, both)
+    try:
+        send_telegram(
+            settings,
+            f"⚡ NG F-move Hedge {'STARTED' if new_val else 'STOPPED'} via /control"
+            + ("\n⚠️ NG band hedge is also RUNNING — same book will be hedged by "
+               "both engines, on separate state." if both else ""),
+        )
+    except Exception as exc:
+        log.warning("NG fmove-hedge toggle: telegram notify failed: %s", exc)
     return Response(status_code=302, headers={"Location": "/control"})
 
 

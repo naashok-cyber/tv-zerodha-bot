@@ -91,6 +91,7 @@ state override (data/state_overrides.json)  →  Settings attr (.env)  →  clam
 | slug | engine | first two knobs |
 |---|---|---|
 | `ng` | NATURALGAS δ band | band notional ₹, vol factor |
+| `ng_fmove` | `app/ng_fmove_hedge.py` | F-move trigger ₹/mmBtu, min &#124;δ&#124; |
 | `crudeoilm_band` | CRUDEOILM δ band | band notional ₹, vol factor |
 | `crudeoilm_fmove` | `app/crudeoilm_fmove_hedge.py` | F-move trigger ₹/bbl, min &#124;δ&#124; |
 | `banknifty` | `app/bnf_delta_hedge.py` | δ band units, cooldown |
@@ -106,6 +107,25 @@ Rules that matter:
 - `band_notional_inr` floors at **0**, not at a sane minimum: 0 is the documented sentinel for "ignore the formula, use the static `*_BAND_BASE`". Small-but-nonzero values are caught by the band floor anyway.
 - Posting a value equal to the `.env` default **clears** the override rather than pinning it, so the orange "overridden" marker keeps meaning something.
 - Non-trigger knobs (state paths, enable flags, SILVERM's wing OI/δ filters, BNF's bypass multipliers and `MIN_T_DAYS`) stay `.env`-only.
+
+## Two triggers per underlying — band vs F-move
+
+NG and CRUDEOILM each have **two independent engines**, on two different philosophies:
+
+| | δ band | F-move |
+|---|---|---|
+| NG | `ng_delta_hedge.py` + `hedge_core.py`, on the dispatcher tick | `ng_fmove_hedge.py`, own cron at `:55` |
+| CRUDEOILM | `crudeoilm_delta_hedge.py`, same dispatcher tick | `crudeoilm_fmove_hedge.py`, own cron at `:25` |
+| Fires on | `\|net δ\|` escaping a price-derived band | `\|F − anchor\| ≥ trigger` **and** `\|δ\|` growing |
+| Anchor | none — it is a level check | re-anchors on every hedge and every skip |
+| Quiet tape | can still fire (δ drifts on theta/vega) | cannot — needs price travel |
+| Instrument | SELL/roll per the order ladder | SELL ATM |
+
+**They share no state.** Different files, different cooldowns, different daily counters, and neither reads the other's. Running both on the same underlying hedges the same book twice on different clocks. `/control` shows a `DOUBLE-HEDGING` pill and the toggle's Telegram message says so, but nothing in code prevents it — that is deliberate, since the combination is occasionally what you want during a fast trend.
+
+**NG's F-move engine has a granularity floor the crude one does not need.** One NG lot is 1250 mmBtu, so one ATM lot carries ~625 mmBtu of δ, and the lot solver rounds toward zeroing δ. `NG_FMOVE_HEDGE_MIN_DELTA_UNITS` defaults to exactly 625 (one ATM lot) so the engine never fires on a breach a single lot would overshoot and sign-flip. Crude needs no such care — its ratio is 3.2 against NG's 0.56. Lowering NG's floor re-opens the ping-pong.
+
+Trigger sizing, from crude's ₹100/bbl on F=7963 (1.26% of F): notional parity gives NG ₹3.46/mmBtu, volatility parity `× (2.0%/3.5%)` gives ₹1.98. The default ₹3.00 sits near the midpoint — the same way `CRUDEOILM_HEDGE_VOL_FACTOR=1.32` was picked between the same two anchors.
 
 ## Granularity rule
 

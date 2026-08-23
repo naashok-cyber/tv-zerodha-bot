@@ -22,6 +22,7 @@
 | POST | `/control/ema-analyzer/underlyings` | Toggle one scrip in the analyzer's active set (chip picker) |
 | POST | `/control/straddle-defense/{toggle,mode,hedge,hedge/decision,unwind}` | Straddle defense controls |
 | POST | `/control/hedge/{slug}` | Retune one hedge engine's rebalance thresholds (`reset=1` reverts to .env). Slugs and fields come from `app/hedge_tunables.py`; applies from the next rebalance |
+| POST | `/control/{ng-hedge,ng-fmove-hedge,crude-hedge,crudeoilm-fmove-hedge,silverm-hedge}/toggle` | Start/stop one hedge engine. NG and CRUDEOILM each have a band and an F-move engine; enabling both on one underlying double-hedges it |
 | GET | `/kite/login` | Start Kite OAuth flow |
 | GET | `/kite/callback` | Exchange request_token → access_token |
 | GET | `/healthz` | Health check (returns session status) |

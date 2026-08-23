@@ -347,6 +347,29 @@ class Settings(BaseSettings):
     NG_HEDGE_INTERVAL_MIN: int = 2            # :01 :03 :05 … :59
     NG_HEDGE_PHASE_MIN: int = 1
 
+    # ── NATURALGAS F-move delta hedge (the SECOND NG trigger) ────────────────
+    # Fires on futures-price travel from the last hedge fill, not on |δ| leaving
+    # a band. Mirror of the CRUDEOILM F-move engine; see app/ng_fmove_hedge.py.
+    # ENABLE ONE OR THE OTHER: this and the band engine share no state, so with
+    # both on they hedge the same book twice on different clocks.
+    #
+    # Trigger sizing, against crude's ₹100/bbl on F=7963 (= 1.26% of F):
+    #   notional parity   0.0126 x 275            = ₹3.46/mmBtu
+    #   volatility parity 3.46 x (2.0% / 3.5%)    = ₹1.98/mmBtu
+    # ₹3.00 is near the midpoint, matching how CRUDEOILM's vol_factor (1.32) was
+    # picked between the same two anchors. Re-derive if NG re-rates materially.
+    NG_FMOVE_HEDGE_ENABLED: bool = False        # live-toggleable at /control
+    NG_FMOVE_HEDGE_TRIGGER_INR: float = 3.0     # ₹/mmBtu move from anchor
+    # 625 mmBtu = delta of ONE ATM lot (0.5 x 1250). Below this a single lot
+    # overshoots and flips the sign of δ — NG's granularity ratio is 0.56 where
+    # crude's is 3.2. The band engine still catches sub-lot drift. Do not lower
+    # without re-reading the granularity rule in docs/claude/delta-hedge.md.
+    NG_FMOVE_HEDGE_MIN_DELTA_UNITS: float = 625.0
+    NG_FMOVE_HEDGE_MAX_LOTS_PER_TICK: int = 3
+    NG_FMOVE_HEDGE_COOLDOWN_MIN: int = 5
+    NG_FMOVE_HEDGE_MAX_HEDGES_PER_DAY: int = 20
+    NG_FMOVE_HEDGE_STATE_PATH: str = "data/ng_fmove_hedge_state.json"
+
     # ── CRUDEOILM delta hedge ─────────────────────────────────────────────────
     # Band bounds are in BARRELS, not mmBtu — CRUDEOILM lots are 10 bbl against
     # NG's 1250 mmBtu. Calibrated at F_ng=275, F_crude=7963 against NG's 350

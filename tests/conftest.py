@@ -38,6 +38,7 @@ def reset_app_state():
         state._NG_HEDGE_ENABLED_OVERRIDE = None
         state._CRUDE_HEDGE_ENABLED_OVERRIDE = None
         state._CRUDEOILM_FMOVE_HEDGE_ENABLED_OVERRIDE = None
+        state._NG_FMOVE_HEDGE_ENABLED_OVERRIDE = None
         state._SILVERM_HEDGE_ENABLED_OVERRIDE = None
 
     _clear()

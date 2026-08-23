@@ -33,6 +33,7 @@ _WINDOW_STRADDLE_ENABLED: bool = False
 _NG_HEDGE_ENABLED_OVERRIDE: Optional[bool] = None  # None = use .env NG_DELTA_HEDGE_ENABLED
 _CRUDE_HEDGE_ENABLED_OVERRIDE: Optional[bool] = None  # None = use .env CRUDEOILM_HEDGE_ENABLED
 _CRUDEOILM_FMOVE_HEDGE_ENABLED_OVERRIDE: Optional[bool] = None  # None = use .env CRUDEOILM_FMOVE_HEDGE_ENABLED
+_NG_FMOVE_HEDGE_ENABLED_OVERRIDE: Optional[bool] = None  # None = use .env NG_FMOVE_HEDGE_ENABLED
 _SILVERM_HEDGE_ENABLED_OVERRIDE: Optional[bool] = None  # None = use .env SILVERM_HEDGE_ENABLED
 _STRADDLE_DEFENSE_ENABLED_OVERRIDE: Optional[bool] = None  # None = use .env STRADDLE_DEFENSE_ENABLED
 _STRADDLE_DEFENSE_MODE_OVERRIDE: Optional[str] = None  # ALERT/SEMI_AUTO/AUTO; None = use .env
@@ -109,7 +110,7 @@ def load_overrides_from_disk() -> None:
     global _MAX_OPEN_POSITIONS_OVERRIDE, _CAPITAL_PER_TRADE_OVERRIDE
     global _CONSECUTIVE_LOSSES_LIMIT_OVERRIDE, _ADX_THRESHOLD_OVERRIDE
     global _NG_HEDGE_ENABLED_OVERRIDE, _CRUDE_HEDGE_ENABLED_OVERRIDE, _STRADDLE_DEFENSE_ENABLED_OVERRIDE
-    global _CRUDEOILM_FMOVE_HEDGE_ENABLED_OVERRIDE
+    global _CRUDEOILM_FMOVE_HEDGE_ENABLED_OVERRIDE, _NG_FMOVE_HEDGE_ENABLED_OVERRIDE
     global _SILVERM_HEDGE_ENABLED_OVERRIDE
     global _STRADDLE_DEFENSE_MODE_OVERRIDE
     global _PARTIAL_BOOKING_ENABLED_OVERRIDE, _ENTRY_WINGS_ENABLED_OVERRIDE
@@ -160,6 +161,8 @@ def load_overrides_from_disk() -> None:
             _CRUDE_HEDGE_ENABLED_OVERRIDE = data["crude_hedge_enabled"]
         if "crudeoilm_fmove_hedge_enabled" in data:
             _CRUDEOILM_FMOVE_HEDGE_ENABLED_OVERRIDE = data["crudeoilm_fmove_hedge_enabled"]
+        if "ng_fmove_hedge_enabled" in data:
+            _NG_FMOVE_HEDGE_ENABLED_OVERRIDE = data["ng_fmove_hedge_enabled"]
         if "silverm_hedge_enabled" in data:
             _SILVERM_HEDGE_ENABLED_OVERRIDE = data["silverm_hedge_enabled"]
         if "straddle_defense_enabled" in data:
@@ -514,6 +517,33 @@ def toggle_crudeoilm_fmove_hedge_enabled(env_default: bool) -> bool:
         return _CRUDEOILM_FMOVE_HEDGE_ENABLED_OVERRIDE
 
 
+# ── NATURALGAS F-move (SELL-only, price-triggered) delta hedge ────────────────
+# The second NG trigger, alongside the band engine on the delta_hedge tick.
+# They share no state — enabling both hedges the same book twice.
+
+def is_ng_fmove_hedge_enabled(env_default: bool) -> bool:
+    with _lock:
+        return (_NG_FMOVE_HEDGE_ENABLED_OVERRIDE
+                if _NG_FMOVE_HEDGE_ENABLED_OVERRIDE is not None else env_default)
+
+
+def set_ng_fmove_hedge_enabled(value: bool) -> None:
+    global _NG_FMOVE_HEDGE_ENABLED_OVERRIDE
+    with _lock:
+        _NG_FMOVE_HEDGE_ENABLED_OVERRIDE = value
+        _save_overrides()
+
+
+def toggle_ng_fmove_hedge_enabled(env_default: bool) -> bool:
+    global _NG_FMOVE_HEDGE_ENABLED_OVERRIDE
+    with _lock:
+        current = (_NG_FMOVE_HEDGE_ENABLED_OVERRIDE
+                   if _NG_FMOVE_HEDGE_ENABLED_OVERRIDE is not None else env_default)
+        _NG_FMOVE_HEDGE_ENABLED_OVERRIDE = not current
+        _save_overrides()
+        return _NG_FMOVE_HEDGE_ENABLED_OVERRIDE
+
+
 # ── SILVERM F-move (BUY-wing, price-triggered) delta hedge ────────────────────
 
 def is_silverm_hedge_enabled(env_default: bool) -> bool:
@@ -835,6 +865,7 @@ def get_all_overrides() -> dict:
             "ng_hedge_enabled": _NG_HEDGE_ENABLED_OVERRIDE,
             "crude_hedge_enabled": _CRUDE_HEDGE_ENABLED_OVERRIDE,
             "crudeoilm_fmove_hedge_enabled": _CRUDEOILM_FMOVE_HEDGE_ENABLED_OVERRIDE,
+            "ng_fmove_hedge_enabled": _NG_FMOVE_HEDGE_ENABLED_OVERRIDE,
             "silverm_hedge_enabled": _SILVERM_HEDGE_ENABLED_OVERRIDE,
             "straddle_defense_enabled": _STRADDLE_DEFENSE_ENABLED_OVERRIDE,
             "straddle_defense_mode": _STRADDLE_DEFENSE_MODE_OVERRIDE,

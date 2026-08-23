@@ -741,6 +741,39 @@ def make_scheduler(
             settings.CRUDEOILM_FMOVE_HEDGE_ENABLED,
         )
 
+        # NATURALGAS F-move-triggered SELL-options delta hedge — NG's SECOND
+        # trigger, alongside the band engine on the delta_hedge dispatcher.
+        # They share no state, so enabling both hedges the same book twice on
+        # different clocks; the /control cards say so. second=55 is the last
+        # free slot among the 1-min crons (hedge :05, EMA :15, paper :20,
+        # crude fmove :25, SILVERM :30, partial :35, BNF :40, GOLDM :45,
+        # defense :50). Guarded by state.is_ng_fmove_hedge_enabled so it is a
+        # cheap no-op when off; live-toggleable at /control.
+        from app.ng_fmove_hedge import run_ng_fmove_hedge_job
+        scheduler.add_job(
+            run_ng_fmove_hedge_job,
+            trigger="cron",
+            day_of_week="mon-fri",
+            hour="9-23",
+            minute="*",
+            second=55,
+            kwargs={"settings": settings, "session_factory": session_factory},
+            id="ng_fmove_hedge",
+            misfire_grace_time=30,
+            max_instances=1,
+        )
+        log.info(
+            "[scheduler] NATURALGAS fmove-hedge cron: every 1 min IST, Mon-Fri 09-23 "
+            "(trigger=±₹%.2f/mmBtu F move, min_δ=%.0f, cap=%d/tick, "
+            "cooldown=%dm, daily_cap=%d, enabled=%s — .env defaults, retunable at /control)",
+            settings.NG_FMOVE_HEDGE_TRIGGER_INR,
+            settings.NG_FMOVE_HEDGE_MIN_DELTA_UNITS,
+            settings.NG_FMOVE_HEDGE_MAX_LOTS_PER_TICK,
+            settings.NG_FMOVE_HEDGE_COOLDOWN_MIN,
+            settings.NG_FMOVE_HEDGE_MAX_HEDGES_PER_DAY,
+            settings.NG_FMOVE_HEDGE_ENABLED,
+        )
+
         # SILVERM F-move-triggered BUY-wing delta hedge. Wakes every minute,
         # only acts when front-month FUT has moved ±SILVERM_HEDGE_TRIGGER_INR
         # from the last hedge fill. Buys OTM CE/PE wings (never futures — 5-kg

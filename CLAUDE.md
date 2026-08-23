@@ -45,6 +45,7 @@ app/
   hedge_core.py      — Shared band engine: process_underlying, band formula, order ladder
   ng_delta_hedge.py  — NG spec + NG-gated one-shots (half-exit, BNF SL, straddle ladder)
   crudeoilm_delta_hedge.py — CRUDEOILM band-hedge spec
+  ng_fmove_hedge.py  — NG 2nd trigger: F-move → SELL ATM (own cron :55)
   hedge_tunables.py  — Registry of live-editable rebalance thresholds (drives /control)
   scheduled_straddle.py — Automated short straddles (CRUDEOILM + NATURALGAS)
   straddle_defense.py — 1-min short-straddle monitor: IV alerts + wing hedging
@@ -81,7 +82,7 @@ POST /webhook → AlertPayload validation → IP + HMAC check → idempotency de
 3. **Routing**: NATURALGAS/NATGASMINI → MCX **futures**, not options — unless the payload carries an explicit `option_type` (EMA analyzer does), which routes to options.
 4. **Paper/live isolation**: real squareoff/hedge jobs must filter `Order.dry_run == False`; guards and analytics are mode-scoped on `ClosedTrade.dry_run`. Never let one mode touch the other's rows.
 5. **Kite rate limits**: 1 req/sec quotes — the five 1-min crons are offset by `second=` (hedge `:05`, ema `:15`, paper `:20`, partial `:35`, defense `:50`); route new quote/ltp calls through `app.orders.throttled_quote_call`.
-6. **Delta hedge is ONE dispatcher job** — the *code* is split per scrip (`ng_delta_hedge.py` / `crudeoilm_delta_hedge.py` over `hedge_core.py`), the *tick* is not; never add a second cron (jobs would race the quote bucket + margin). Leg filtering must use `_matches_underlying` (substring matches the wrong book: `"CRUDEOIL"` prefixes `"CRUDEOILM…"`).
+6. **The *band* delta hedge is ONE dispatcher job** — the *code* is split per scrip (`ng_delta_hedge.py` / `crudeoilm_delta_hedge.py` over `hedge_core.py`), the *tick* is not; never add a second band cron (jobs would race the quote bucket + margin). F-move engines (`ng_fmove` :55, `crudeoilm_fmove` :25, `goldm` :45, `silverm` :30) *are* separate crons — that's fine only because each is offset by `second=` and no-ops instantly when disabled. Leg filtering must use `_matches_underlying` (substring matches the wrong book: `"CRUDEOIL"` prefixes `"CRUDEOILM…"`).
 7. **Partial booking** uses `orders.place_entry` for the reducing order, not `square_off` (its 30s per-symbol dedup would swallow a real exit right after); GTT resized **before** the reducing order goes out.
 8. **Entry wings** record `HedgeAction(trigger="entry")` — that value excludes them from straddle_defense's proposals and timed unwinds.
 9. **`AlertPayload.symbol` caps at 20 chars** — long option tradingsymbols (BANKNIFTY monthly) fail validation when routed as EXIT symbols.
@@ -89,6 +90,7 @@ POST /webhook → AlertPayload validation → IP + HMAC check → idempotency de
 11. **/control UI**: tab bar markup renders **before** `.wrap` content in `_shell()` (inline JS can't see later DOM); `_status_strip` renders on every page.
 12. **Runtime overrides** live in `data/state_overrides.json` via `app/state.py` getters — check there first when behavior contradicts `.env`. Orange dot on /control = override active.
 13. **Hedge thresholds resolve per tick** via `app/hedge_tunables.py` (`/control` override → `.env` → clamped on read). Resolve once per tick with `all_effective()` and thread it through — never at scheduler-registration time, never twice in one decision.
+14. **NG and CRUDEOILM each have two hedge engines** (band + F-move) with **separate state files, cooldowns and daily counters**. Enabling both on one underlying hedges the same book twice — allowed on purpose, flagged with a `DOUBLE-HEDGING` pill on /control and in the toggle's Telegram. NG's F-move floor `NG_FMOVE_HEDGE_MIN_DELTA_UNITS=625` is one ATM lot; below it a single 1250-mmBtu lot overshoots and flips δ's sign.
 
 ## Debugging quick map
 
