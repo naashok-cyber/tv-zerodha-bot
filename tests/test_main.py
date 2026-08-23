@@ -278,9 +278,10 @@ def test_control_page_renders_swipe_carousel(client) -> None:
     assert "/control/straddle-defense/mode" in html
     assert "mode ALERT" in html
 
-    # Markets panel: volatility monitor + commodity intelligence
-    assert "id='vm-chart'" in html
-    assert "id='ca-grid'" in html
+    # Markets panel: one volatility tile per configured scrip, agent verdict
+    # folded in. The standalone Commodity Intelligence card is gone.
+    assert "id='vg-grid'" in html
+    assert "id='ca-grid'" not in html
 
     # Settings panel: schedule, mode, risk controls, kite session,
     # background jobs, collapsible risk-params drawer

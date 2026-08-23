@@ -2534,14 +2534,10 @@ _CSS = (
     ".feed .fe{flex:1;color:var(--ink);overflow-wrap:anywhere}"
     ".fdim{color:var(--ink3)}"
 
-    # ── Commodity intelligence cards ──────────────────────────────────────────
-    ".cagrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));"
-    "gap:10px;padding:12px 18px 16px}"
-    ".cacard{background:var(--surface2);border:1px solid var(--line-soft);"
-    "border-radius:12px;padding:11px 12px}"
-    ".cacard .cah{display:flex;justify-content:space-between;align-items:center;"
-    "margin-bottom:6px;gap:6px}"
-    ".cacard .cah b{font-size:13px}"
+    # ── Commodity intelligence — key/value + action rows ──────────────────────
+    # The standalone Commodity Intelligence card is gone; these two classes are
+    # reused inside an expanded volatility tile (see .vgt below), which now
+    # carries the agent verdict for the same six scrips it charts.
     ".cakv{display:grid;grid-template-columns:1fr auto;gap:2px 10px;font-size:11.5px;"
     "color:var(--ink3)}"
     ".cakv span:nth-child(even){color:var(--ink);text-align:right;"
@@ -2589,32 +2585,56 @@ _CSS = (
     ".seg button.on,.seg a.on{background:var(--surface);color:var(--ink);"
     "box-shadow:0 1px 3px rgba(0,0,0,.14)}"
 
-    # ── Volatility monitor ───────────────────────────────────────────────────
-    ".vm-head{display:flex;align-items:flex-start;gap:12px;flex-wrap:wrap;"
-    "padding:14px 18px 0}"
-    ".vm-controls{display:flex;gap:8px;align-items:center;flex-wrap:wrap}"
-    ".selw{position:relative;display:inline-flex}"
-    ".selw select{"
-    "appearance:none;-webkit-appearance:none;font-family:inherit;font-size:16px;"
-    "font-weight:600;letter-spacing:-.01em;color:var(--ink);background:var(--surface2);"
-    "border:1px solid var(--line);border-radius:9px;padding:9px 32px 9px 12px;"
-    "cursor:pointer}"
-    ".selw::after{content:'';position:absolute;right:12px;top:50%;width:6px;height:6px;"
-    "margin-top:-5px;border-right:1.6px solid var(--ink2);"
-    "border-bottom:1.6px solid var(--ink2);transform:rotate(45deg);pointer-events:none}"
-    ".vm-hero{margin-left:auto;text-align:right}"
-    ".vm-now{font-size:2.1em;font-weight:650;letter-spacing:-.02em;line-height:1;"
+    # ── Volatility grid — every tracked scrip charted at once ────────────────
+    # Small multiples: each tile is a bare trend-coloured sparkline (no axes, so
+    # it stays legible at the ~150px a two-up phone layout allows). Tapping one
+    # expands it in place to the full axed chart with drag-zoom, the stats
+    # readout and that scrip's agent verdict + Approve/Reject.
+    ".vg-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap;"
+    "padding:12px 18px 0}"
+    ".vg-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(146px,1fr));"
+    "gap:10px;padding:12px 18px 4px}"
+    # Phone: pin two columns rather than letting auto-fit decide. At 375px the
+    # track only just fits, so anything that steals a few px — a scrollbar, a
+    # wider safe-area inset — silently drops it to one column and the whole
+    # small-multiples read is gone. 1fr 1fr degrades by narrowing instead.
+    # minmax(0,...) not 1fr: a bare 1fr floors at min-content, so a long badge
+    # like "BUY · APPROVED" widens its column and the two come out uneven.
+    "@media (max-width:420px){.vg-grid{grid-template-columns:minmax(0,1fr) minmax(0,1fr);"
+    "padding:10px 14px 4px;gap:8px}}"
+    ".vgt{background:var(--surface2);border:1px solid var(--line-soft);"
+    "border-radius:12px;padding:9px 10px 7px;cursor:pointer;"
+    "transition:border-color .15s,background .15s}"
+    ".vgt:hover{border-color:var(--line)}"
+    # An expanded tile takes the full row so the axed chart gets real width —
+    # grid-column:1/-1 works whatever column count auto-fit landed on.
+    ".vgt.on{grid-column:1/-1;cursor:default;background:var(--surface);"
+    "border-color:var(--accent)}"
+    # Wraps rather than ellipsising: "BUY · APPROVED" dropping to a second line
+    # is fine, truncating it to "BUY · A…" hides whether the desk already acted.
+    ".vgt-h{display:flex;align-items:center;justify-content:space-between;"
+    "gap:4px 6px;flex-wrap:wrap}"
+    ".vgt-h b{font-size:12.5px;letter-spacing:-.01em}"
+    ".vgt-n{display:flex;align-items:baseline;gap:7px;flex-wrap:wrap;margin-top:3px}"
+    ".vgt-iv{font-size:1.32em;font-weight:650;letter-spacing:-.02em;line-height:1.1;"
     "font-variant-numeric:tabular-nums}"
-    ".vm-state{display:inline-flex;align-items:center;margin-top:6px;"
+    ".vgt.on .vgt-iv{font-size:2.1em}"
+    ".vm-state{display:inline-flex;align-items:center;"
     "font-size:10.5px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;"
     "padding:3px 10px;border-radius:100px}"
     ".vm-exp{color:var(--loss);background:var(--loss-soft)}"
     ".vm-con{color:var(--gain);background:var(--gain-soft)}"
     ".vm-std{color:var(--ink2);background:var(--line-soft)}"
-    ".vm-chartwrap{position:relative;margin:10px 18px 0}"
-    ".vm-chartwrap canvas{display:block;width:100%;height:240px}"
-    "@media (max-width:640px){.vm-chartwrap canvas{height:190px}"
-    ".vm-hero{text-align:left;margin-left:0;width:100%}}"
+    ".vgt-c{position:relative;margin-top:6px}"
+    ".vgt-c canvas{display:block;width:100%;height:62px}"
+    ".vgt.on .vgt-c canvas{height:240px}"
+    "@media (max-width:640px){.vgt.on .vgt-c canvas{height:190px}}"
+    # Expanded-only block: stats, reasoning, actions.
+    ".vgt-x{display:none}"
+    ".vgt.on .vgt-x{display:block;margin-top:10px}"
+    ".vgt-x .cakv{font-size:12px}"
+    ".vgt-sum{font-size:.72em;color:var(--ink3);margin-top:8px;line-height:1.5}"
+    ".vgt-hint{font-size:.68em;color:var(--ink3);margin-top:7px}"
     ".vm-tip{position:absolute;display:none;background:var(--ink);color:var(--bg);"
     "font-size:11.5px;font-weight:600;padding:4px 9px;border-radius:7px;"
     "transform:translate(-50%,-135%);pointer-events:none;white-space:nowrap;"
@@ -2678,7 +2698,10 @@ _CSS = (
     ".seg button{min-height:36px;padding:8px 13px}"
     ".tb-nav a{padding:10px 13px;min-height:44px;display:flex;align-items:center}"
     ".mdr,.pr2{min-height:44px}"
-    ".vm-controls .selw select,.vm-controls .seg button{min-height:40px}"
+    ".vg-head .seg button{min-height:40px}"
+    # A whole tile is the tap target for expand/collapse, so it needs the
+    # 44px floor even though it isn't a <button>.
+    ".vgt{min-height:44px}"
     "}"
     "button,a.btn,.seg button,.fchip{touch-action:manipulation}"
     ".topbar{padding-top:env(safe-area-inset-top)}"
@@ -2796,77 +2819,9 @@ remarkRail();
 var lut=$('lut');if(lut)lut.textContent='Updated '+new Date().toLocaleTimeString();
 }).catch(function(){})}
 
-/* ── commodity intelligence cards ── */
-var CA='/commodity-agents';var caPending={};
-function caBadge(rec){
-if(!rec)return '<span class="pill pm">NO DATA</span>';
-if(rec.risk_vetoed)return '<span class="pill pa">RISK VETO</span>';
-var cls=rec.direction==='SELL'?'pr':(rec.direction==='BUY'?'pg':'pm');
-var txt=rec.direction==='NO_TRADE'?'NO TRADE':rec.direction;
-if(rec.status&&rec.status!=='PROPOSED')txt+=' · '+rec.status;
-return '<span class="pill '+cls+'">'+esc(txt)+'</span>'}
-function caMsg(m){var e=$('ca-msg');if(e){e.textContent=m;
-setTimeout(function(){e.textContent=''},6000)}}
-window.caDecide=function(id,action,btn){
-var body={recommendation_id:id,action:action};
-var p=caPending[id];
-if(p&&p.action===action){body.confirm_token=p.token;body.lots=parseInt(p.lots,10)||1}
-fetch(CA+'/decision',{method:'POST',headers:{'Content-Type':'application/json'},
-body:JSON.stringify(body)})
-.then(function(r){return r.json().then(function(j){return {ok:r.ok,j:j}})})
-.then(function(res){
-if(!res.ok){caMsg(res.j.detail||'error');return}
-if(res.j.status==='confirm_required'){
-caPending[id]={action:action,token:res.j.confirm_token,
-lots:btn.getAttribute('data-lots')||1};
-btn.textContent='CONFIRM '+action.toUpperCase();return}
-delete caPending[id];
-caMsg(action.toUpperCase()+' recorded — '+res.j.status+
-(res.j.note?' ('+res.j.note+')':''));
-loadCommodities()}).catch(function(){caMsg('network error')})};
-function renderCA(coms,d,ivs){
-var g=$('ca-grid');if(!g)return;var out='';
-coms.forEach(function(c,i){
-var rec=(d.recommendations||{})[c];var iv=ivs[i];
-var last=(iv&&iv.points&&iv.points.length)?iv.points[iv.points.length-1]:null;
-var tr=iv&&iv.iv_trend;var arrow='',trTxt='';
-if(tr&&tr.direction==='expanding'){arrow=' ▲';trTxt='expanding'}
-else if(tr&&tr.direction==='contracting'){arrow=' ▼';trTxt='contracting'}
-else if(tr&&tr.direction==='stable'){arrow=' →';trTxt='stable'}
-var kv='<div class="cakv">'+
-'<span>ATM IV</span><span>'+(last?num(last.iv*100,1)+'%'+arrow:'—')+'</span>'+
-(trTxt?'<span>IV trend</span><span>'+trTxt+
-(tr.change_pct!=null?' '+(tr.change_pct>0?'+':'')+tr.change_pct+'%':'')+'</span>':'')+
-'<span>VRP</span><span>'+(last&&last.vrp!=null?
-((last.vrp>0?'+':'')+num(last.vrp*100,1)+' pts'):'—')+'</span>'+
-(rec&&rec.confidence!=null?'<span>Confidence</span><span>'+
-Math.round(rec.confidence*100)+'%</span>':'')+
-(rec&&rec.suggested_lots!=null?'<span>Size</span><span>'+rec.suggested_lots+
-' lot'+(rec.suggested_lots===1?'':'s')+'</span>':'')+
-'</div>';
-var btns='<div class="cabtns">';
-if(rec&&rec.status==='PROPOSED'&&!rec.risk_vetoed&&rec.direction!=='NO_TRADE'){
-btns+='<button class="btn bg2" data-lots="'+(rec.suggested_lots||1)+
-'" onclick="caDecide('+rec.id+',\'approve\',this)">Approve</button>'+
-'<button class="btn br2" onclick="caDecide('+rec.id+',\'reject\',this)">Reject</button>'}
-btns+='<a class="btn bm" style="text-decoration:none" href="'+CA+'/analyze?t='+c+'">Analyze</a></div>';
-var summary=(rec&&rec.reasoning_summary)?
-'<div style="font-size:.7em;color:#636366;margin-top:6px">'+
-esc(rec.reasoning_summary.slice(0,140))+'</div>':'';
-out+='<div class="cacard"><div class="cah"><b>'+esc(c)+'</b>'+caBadge(rec)+'</div>'+
-kv+summary+btns+'</div>'});
-g.innerHTML=out||'<div style="font-size:.78em;color:#8E8E93">No commodities configured.</div>'}
-function loadCommodities(){
-if(!$('ca-grid'))return;
-fetch(CA+'/recommendations').then(function(r){if(!r.ok)throw 0;return r.json()})
-.then(function(d){
-var coms=Object.keys(d.recommendations||{});
-Promise.all(coms.map(function(c){
-return fetch(CA+'/'+c+'/iv-history?limit=40')
-.then(function(r){return r.ok?r.json():null}).catch(function(){return null})}))
-.then(function(ivs){renderCA(coms,d,ivs)})})
-.catch(function(){var g=$('ca-grid');
-if(g)g.innerHTML='<div style="font-size:.78em;color:#8E8E93">Commodity agents unavailable.</div>'})}
+/* commodity intelligence moved into _VOL_GRID_JS — the verdicts now ride on
+   the volatility tiles for the same scrips, so this script no longer fetches
+   /recommendations or iv-history at all. */
 
 /* ── intraday sparkline (Today card) ── */
 function daySpark(){
@@ -2893,7 +2848,6 @@ box.innerHTML=svg}
 
 loadPositions();setInterval(loadPositions,30000);
 poll();setInterval(poll,30000);
-loadCommodities();setInterval(loadCommodities,300000);
 daySpark();remarkRail();setInterval(remarkRail,60000);
 if(window.matchMedia)
 window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change',
@@ -3006,41 +2960,74 @@ window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change',func
 </script>
 """
 
-# ── Volatility monitor — big trend-coloured ATM-IV chart on /control ─────────
-# Data: /commodity-agents/{scrip}/iv-history — LLM-free IV_SAMPLE runs every
-# COMMODITY_AGENTS_IV_SAMPLE_MIN (5 min default) during market hours, plus one
-# richer sample per full debate cycle. The line is coloured by an EMA-slope
-# hysteresis: red while IV expands (hurts short straddles), green while it
-# contracts. Scrip + range persist in localStorage.
-_VOL_MONITOR_JS = r"""
+# ── Volatility grid — every tracked scrip charted at once on /control ────────
+# Display names for the tiles; anything not listed falls back to the raw
+# commodity key, so adding a scrip to COMMODITY_AGENTS_COMMODITIES can never
+# break the grid — it just renders unprettified until a label is added here.
+_VOL_LABELS = {
+    "NATURALGAS": "Natural Gas",
+    "CRUDEOILM": "Crude Oil",
+    "GOLDM": "Gold",
+    "SILVERM": "Silver",
+    "NIFTY": "Nifty",
+    "BANKNIFTY": "Bank Nifty",
+}
+
+# Small multiples + detail-on-demand, replacing the old single-chart monitor
+# with its scrip dropdown. Every configured scrip is drawn at once as a bare
+# trend-coloured sparkline; tapping one expands it in place to the full axed
+# chart with drag-zoom, the stats readout, and that scrip's agent verdict.
+#
+# Data: /commodity-agents/{scrip}/iv-history — the LLM-free IV_SAMPLE run fires
+# every COMMODITY_AGENTS_IV_SAMPLE_MIN (5 min default) during market hours,
+# plus one richer sample per full debate cycle. Line colour comes from an
+# EMA-slope hysteresis: red while IV expands (hurts short straddles), green
+# while it contracts.
+#
+# This script also owns the commodity-agent verdicts that used to live in a
+# separate Commodity Intelligence card — same scrips, same ATM IV / VRP
+# numbers, so keeping them apart meant fetching iv-history twice per scrip.
+_VOL_GRID_JS = r"""
 <script>
 (function(){
 'use strict';
-var canvas=document.getElementById('vm-chart');if(!canvas)return;
-var ctx=canvas.getContext('2d');
-var tip=document.getElementById('vm-tip');
+var grid=document.getElementById('vg-grid');if(!grid)return;
 var CA='/commodity-agents';
 var MO=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-var cache={};
-var cur=localStorage.getItem('vm-scrip')||'NATURALGAS';
 var rangeDays=parseInt(localStorage.getItem('vm-range')||'7',10);
-var zoomRange=null; /* {i0,i1} absolute indices into the range-filtered series, or null = full range */
-var view={pts:[],X:null,Y:null,padL:46,w:0};
+var cache={};    /* scrip -> {pts,at,limit} */
+var recs={};     /* scrip -> recommendation (or null) */
+var pending={};  /* recommendation id -> {action,token,lots} awaiting confirm */
+var tiles=[];
 function $(i){return document.getElementById(i)}
 function tok(n){return getComputedStyle(document.documentElement).getPropertyValue(n).trim()}
-function msg(t){var e=$('vm-msg');if(e)e.textContent=t||''}
+function esc(s){return (s==null?'':String(s)).replace(/[&<>"]/g,function(c){
+return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]})}
+function msg(t){var e=$('vg-msg');if(e)e.textContent=t||''}
+function flash(t){msg(t);setTimeout(function(){msg('')},6000)}
+/* Only pull what the selected range can actually plot. The old single chart
+   always asked for 2000 samples; six tiles doing that on a phone is 12k rows
+   per load, and 7D of 5-min samples over a 14h MCX session is ~1200. */
+function limitFor(d){return d<=1?300:(d<=3?800:(d<=7?1600:2000))}
+
+/* ── data ───────────────────────────────────────────────────────────────── */
 function fetchSeries(scrip,cb){
-var c=cache[scrip];
-if(c&&Date.now()-c.at<240000){cb(c.pts);return}
-fetch(CA+'/'+scrip+'/iv-history?limit=2000')
+var need=limitFor(rangeDays),c=cache[scrip];
+if(c&&c.limit>=need&&Date.now()-c.at<240000){cb(c.pts);return}
+fetch(CA+'/'+scrip+'/iv-history?limit='+need)
 .then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.json()})
 .then(function(d){
 var pts=(d.points||[]).map(function(p){return{
 t:new Date(p.t),iv:p.iv*100,
 rv:p.rv==null?null:p.rv*100,vrp:p.vrp==null?null:p.vrp*100}})
 .filter(function(p){return isFinite(p.iv)&&!isNaN(p.t.getTime())});
-cache[scrip]={pts:pts,at:Date.now()};msg('');cb(pts)})
+cache[scrip]={pts:pts,at:Date.now(),limit:need};cb(pts)})
 .catch(function(){msg('IV history unavailable');cb((c&&c.pts)||[])})}
+function fetchRecs(cb){
+fetch(CA+'/recommendations').then(function(r){if(!r.ok)throw 0;return r.json()})
+.then(function(d){recs=d.recommendations||{};cb()})
+.catch(function(){recs={};cb()})}
+
 /* trend state per point: EMA slope + hysteresis -> clean runs, no flicker */
 function trendStates(pts){
 var st=new Array(pts.length).fill(0);
@@ -3060,30 +3047,37 @@ var cutoff=all[all.length-1].t.getTime()-rangeDays*86400000;
 return all.filter(function(p){return p.t.getTime()>=cutoff})}
 function fmtHM(d){var h=d.getHours(),m=d.getMinutes();
 return (h<10?'0':'')+h+':'+(m<10?'0':'')+m}
-function draw(all){
-var wrap=canvas.parentElement;
+
+/* ── drawing ────────────────────────────────────────────────────────────── */
+/* One renderer, two densities: collapsed tiles drop the axes, grid and date
+   labels entirely (at the ~150px a two-up phone grid allows, chrome would eat
+   the line), expanded tiles get the full chart the old monitor drew. */
+function draw(t){
+var all=(cache[t.c]&&cache[t.c].pts)||[];
+var canvas=t.cv,ctx=t.ctx,big=t.expanded;
 var dpr=window.devicePixelRatio||1;
-var W=wrap.clientWidth,H=canvas.clientHeight||240;
+var W=canvas.parentElement.clientWidth,H=canvas.clientHeight||62;
+if(W<=0)return;
 canvas.width=W*dpr;canvas.height=H*dpr;
 ctx.setTransform(dpr,0,0,dpr,0,0);ctx.clearRect(0,0,W,H);
 /* basePts = range-filtered (trading-hours-only, no calendar gaps to plot);
    pts = basePts further sliced to the active drag-zoom window, if any. The
-   header stats always read basePts (below) so zooming into an older window
-   never makes the "current IV" reading look stale. */
+   stats always read basePts (below) so zooming into an older window never
+   makes the "current IV" reading look stale. */
 var basePts=visible(all);
 var pts=basePts;
-if(zoomRange){
-var zi0=Math.max(0,Math.min(zoomRange.i0,basePts.length-1));
-var zi1=Math.max(zi0,Math.min(zoomRange.i1,basePts.length-1));
-pts=basePts.slice(zi0,zi1+1);
-}
-view={pts:pts,X:null,Y:null,padL:46,w:W};
+if(big&&t.zoom){
+var zi0=Math.max(0,Math.min(t.zoom.i0,basePts.length-1));
+var zi1=Math.max(zi0,Math.min(t.zoom.i1,basePts.length-1));
+pts=basePts.slice(zi0,zi1+1)}
+t.view={pts:pts,X:null,Y:null};
 if(pts.length<2){
-ctx.font='600 12px -apple-system,sans-serif';ctx.fillStyle=tok('--ink3');
-ctx.textAlign='center';ctx.fillText('Not enough IV samples yet',W/2,H/2);
-updateStats(all,basePts,[]);return}
+ctx.font='600 '+(big?12:10)+'px -apple-system,sans-serif';ctx.fillStyle=tok('--ink3');
+ctx.textAlign='center';ctx.textBaseline='middle';
+ctx.fillText(big?'Not enough IV samples yet':'no data',W/2,H/2);
+stats(t,all,basePts,[]);return}
 var st=trendStates(pts);
-var pad={l:46,r:14,t:12,b:24};
+var pad=big?{l:46,r:14,t:12,b:24}:{l:2,r:2,t:7,b:5};
 var iw=W-pad.l-pad.r,ih=H-pad.t-pad.b;
 var lo=Infinity,hi=-Infinity;
 pts.forEach(function(p){if(p.iv<lo)lo=p.iv;if(p.iv>hi)hi=p.iv});
@@ -3093,9 +3087,10 @@ var span=Math.max(.6,hi-lo);lo-=span*.1;hi+=span*.1;
    between trading sessions don't eat most of the chart's width. */
 var X=function(i){return pts.length>1?pad.l+i/(pts.length-1)*iw:pad.l+iw/2};
 var Y=function(v){return pad.t+(1-(v-lo)/(hi-lo))*ih};
-view.X=X;view.Y=Y;
+t.view.X=X;t.view.Y=Y;
 var cGrid=tok('--line-soft'),cInk3=tok('--ink3');
 var cGain=tok('--gain-b'),cLoss=tok('--loss-b'),cNeut=tok('--ink3');
+if(big){
 /* y grid + % labels */
 ctx.font='600 10.5px -apple-system,sans-serif';
 ctx.textAlign='right';ctx.textBaseline='middle';
@@ -3133,7 +3128,7 @@ lastDay=dk;dayIdx++;
 if(i3>0){ctx.strokeStyle=cGrid;
 ctx.beginPath();ctx.moveTo(X(i3),pad.t);ctx.lineTo(X(i3),H-pad.b);ctx.stroke()}
 if(dayIdx%skip===0)
-ctx.fillText(pts[i3].t.getDate()+' '+MO[pts[i3].t.getMonth()],X(i3),H-pad.b+7)}}}
+ctx.fillText(pts[i3].t.getDate()+' '+MO[pts[i3].t.getMonth()],X(i3),H-pad.b+7)}}}}
 /* one quiet area fill under the whole curve */
 ctx.beginPath();ctx.moveTo(X(0),H-pad.b);
 for(var j=0;j<pts.length;j++)ctx.lineTo(X(j),Y(pts[j].iv));
@@ -3147,113 +3142,196 @@ if(k===pts.length||col(k)!==col(i0)){
 var end=Math.min(k,pts.length-1);
 ctx.beginPath();ctx.moveTo(X(i0),Y(pts[i0].iv));
 for(var q=i0+1;q<=end;q++)ctx.lineTo(X(q),Y(pts[q].iv));
-ctx.strokeStyle=col(i0);ctx.lineWidth=2.2;
+ctx.strokeStyle=col(i0);ctx.lineWidth=big?2.2:1.7;
 ctx.lineJoin='round';ctx.lineCap='round';ctx.stroke();
 i0=k}}
 /* endpoint */
 var li=pts.length-1,lx=X(li),ly=Y(pts[li].iv),lc=col(li);
 ctx.globalAlpha=.22;
-ctx.beginPath();ctx.arc(lx,ly,8,0,Math.PI*2);ctx.fillStyle=lc;ctx.fill();
+ctx.beginPath();ctx.arc(lx,ly,big?8:5,0,Math.PI*2);ctx.fillStyle=lc;ctx.fill();
 ctx.globalAlpha=1;
-ctx.beginPath();ctx.arc(lx,ly,3.5,0,Math.PI*2);ctx.fillStyle=lc;ctx.fill();
-/* header stats always reflect the full (unzoomed) range so "current IV"
-   never reads as stale just because the chart is zoomed into an older
-   window */
-updateStats(all,basePts,trendStates(basePts))}
-function updateStats(all,pts,st){
-var now=$('vm-now'),stEl=$('vm-state');
+ctx.beginPath();ctx.arc(lx,ly,big?3.5:2.4,0,Math.PI*2);ctx.fillStyle=lc;ctx.fill();
+/* stats always reflect the full (unzoomed) range so "current IV" never reads
+   as stale just because the chart is zoomed into an older window */
+stats(t,all,basePts,trendStates(basePts))}
+
+function stats(t,all,pts,st){
+var r=t.r;
+function set(k,v){var e=r[k];if(e)e.textContent=v}
 if(!pts.length){
-if(now)now.innerHTML='&mdash;';
-if(stEl){stEl.className='vm-state vm-std';stEl.textContent='no data'}
-['vm-open','vm-rangev','vm-rv','vm-vrp'].forEach(function(id){
-var e=$(id);if(e)e.innerHTML='&mdash;'});
+if(r.iv)r.iv.innerHTML='&mdash;';
+if(r.state){r.state.className='vm-state vm-std';r.state.textContent='no data'}
+['open','rangev','rv','vrp'].forEach(function(k){
+var e=r[k];if(e)e.innerHTML='&mdash;'});
 return}
 var last=pts[pts.length-1];
-if(now)now.textContent=last.iv.toFixed(1)+'%';
+set('iv',last.iv.toFixed(1)+'%');
 /* reference = newest sample at least 24h old (MCX sessions span midnight) */
 var refT=last.t.getTime()-86400000,d0=0;
-for(var r=pts.length-1;r>=0;r--){if(pts[r].t.getTime()<=refT){d0=r;break}}
+for(var i=pts.length-1;i>=0;i--){if(pts[i].t.getTime()<=refT){d0=i;break}}
 var open=pts[d0].iv,delta=last.iv-open;
 var lo=Infinity,hi=-Infinity;
 all.forEach(function(p){if(p.iv<lo)lo=p.iv;if(p.iv>hi)hi=p.iv});
-var e;
-if((e=$('vm-open')))e.textContent=open.toFixed(1)+'%';
-if((e=$('vm-rangev')))e.textContent=lo.toFixed(1)+' – '+hi.toFixed(1)+'%';
-if((e=$('vm-rv')))e.textContent=last.rv==null?'—':last.rv.toFixed(1)+'%';
-if((e=$('vm-vrp')))e.textContent=last.vrp==null?'—':
-((last.vrp>=0?'+':'−')+Math.abs(last.vrp).toFixed(1)+' pts');
+set('open',open.toFixed(1)+'%');
+set('rangev',lo.toFixed(1)+' – '+hi.toFixed(1)+'%');
+set('rv',last.rv==null?'—':last.rv.toFixed(1)+'%');
+set('vrp',last.vrp==null?'—':((last.vrp>=0?'+':'−')+Math.abs(last.vrp).toFixed(1)+' pts'));
 var s=st.length?st[st.length-1]:0;
-var dTxt=(delta>=0?'+':'−')+Math.abs(delta).toFixed(1)+' pts / 24h';
-if(stEl){
-if(s===1){stEl.className='vm-state vm-exp';stEl.textContent='Expanding · '+dTxt}
-else if(s===-1){stEl.className='vm-state vm-con';stEl.textContent='Contracting · '+dTxt}
-else{stEl.className='vm-state vm-std';stEl.textContent='Steady · '+dTxt}}}
-/* hover/tap readout + drag-to-zoom, unified on one pointer gesture:
-   small movement (or none) = tap/hover -> tooltip, as before; movement past
-   a small threshold = drag-select -> zoom into that index window on release.
-   touch-action:none stops the swipeable-tab carousel from also claiming a
-   horizontal drag that starts on the chart. */
-canvas.style.touchAction='none';
-var drag=null; /* {x0,x1,moved} while a pointer is down on the canvas */
+/* A 153px two-up tile can't hold "Contracting · −6.2 pts / 24h" on one line —
+   it wraps and shoves the sparkline down. Collapsed tiles show the 24h delta
+   alone; the pill's colour already carries the trend, and pairing an arrow
+   with a signed number just reads as a double negative. Note the two can
+   legitimately disagree (green "−0.0 pts" = EMA turning up on a flat day),
+   which is exactly why the word only appears when there's room for it. */
+var dTxt=(delta>=0?'+':'−')+Math.abs(delta).toFixed(1)+' pts';
+var word=s===1?'Expanding':(s===-1?'Contracting':'Steady');
+if(r.state){
+r.state.className='vm-state '+(s===1?'vm-exp':(s===-1?'vm-con':'vm-std'));
+r.state.textContent=t.expanded?(word+' · '+dTxt+' / 24h'):dTxt}}
+
+/* ── agent verdict, folded into the tile ────────────────────────────────── */
+function badge(rec){
+if(!rec)return {cls:'pm',txt:'NO DATA'};
+if(rec.risk_vetoed)return {cls:'pa',txt:'RISK VETO'};
+var cls=rec.direction==='SELL'?'pr':(rec.direction==='BUY'?'pg':'pm');
+var txt=rec.direction==='NO_TRADE'?'NO TRADE':rec.direction;
+if(rec.status&&rec.status!=='PROPOSED')txt+=' · '+rec.status;
+return {cls:cls,txt:txt}}
+function applyRec(t){
+var rec=recs[t.c],r=t.r,b=badge(rec);
+if(r.badge){r.badge.className='pill '+b.cls;r.badge.textContent=b.txt}
+function pair(k,vk,show,val){
+var ke=r[k],ve=r[vk];if(!ke||!ve)return;
+ke.hidden=!show;ve.hidden=!show;if(show)ve.textContent=val}
+pair('confk','conf',!!(rec&&rec.confidence!=null),
+rec?Math.round(rec.confidence*100)+'%':'');
+pair('sizek','size',!!(rec&&rec.suggested_lots!=null),
+rec?rec.suggested_lots+' lot'+(rec.suggested_lots===1?'':'s'):'');
+if(r.sum)r.sum.innerHTML=(rec&&rec.reasoning_summary)?
+esc(rec.reasoning_summary.slice(0,220)):'';
+if(r.btns){
+var out='';
+/* Approve/Reject only ever render inside an expanded tile (.vgt-x is
+   display:none otherwise), so a money button is never one stray tap away
+   from a sparkline. The POST still needs a second confirming tap. */
+if(rec&&rec.status==='PROPOSED'&&!rec.risk_vetoed&&rec.direction!=='NO_TRADE'){
+out+='<button class="btn bg2" data-lots="'+(rec.suggested_lots||1)+
+'" onclick="vgDecide('+rec.id+',\'approve\',this)">Approve</button>'+
+'<button class="btn br2" onclick="vgDecide('+rec.id+
+',\'reject\',this)">Reject</button>'}
+out+='<a class="btn bm" style="text-decoration:none" href="'+CA+'/analyze?t='+
+encodeURIComponent(t.c)+'">Analyze</a>';
+r.btns.innerHTML=out}}
+window.vgDecide=function(id,action,btn){
+var body={recommendation_id:id,action:action};
+var p=pending[id];
+if(p&&p.action===action){body.confirm_token=p.token;body.lots=parseInt(p.lots,10)||1}
+fetch(CA+'/decision',{method:'POST',headers:{'Content-Type':'application/json'},
+body:JSON.stringify(body)})
+.then(function(r){return r.json().then(function(j){return {ok:r.ok,j:j}})})
+.then(function(res){
+if(!res.ok){flash(res.j.detail||'error');return}
+if(res.j.status==='confirm_required'){
+pending[id]={action:action,token:res.j.confirm_token,
+lots:btn.getAttribute('data-lots')||1};
+btn.textContent='CONFIRM '+action.toUpperCase();return}
+delete pending[id];
+flash(action.toUpperCase()+' recorded — '+res.j.status+
+(res.j.note?' ('+res.j.note+')':''));
+fetchRecs(function(){tiles.forEach(applyRec)})})
+.catch(function(){flash('network error')})};
+
+/* ── expand / collapse ──────────────────────────────────────────────────── */
+function setOpen(scrip){
+tiles.forEach(function(t){
+var on=t.c===scrip;
+if(t.expanded===on)return;
+t.expanded=on;t.zoom=null;
+t.el.classList.toggle('on',on);
+t.el.setAttribute('aria-expanded',on?'true':'false');
+/* touch-action:none only while expanded — otherwise a horizontal drag that
+   starts over a sparkline would be swallowed instead of swiping the tab
+   carousel. */
+t.cv.style.touchAction=on?'none':'';
+t.tip.style.display='none'});
+var b=$('vg-collapse');if(b)b.style.display=scrip?'inline-flex':'none';
+try{localStorage.setItem('vg-open',scrip||'')}catch(e){}
+/* Redraw synchronously, not via rAF: the .on class change is already applied
+   to layout, so reading clientWidth/Height here yields the new box — while a
+   rAF callback never fires at all if the page isn't compositing, which leaves
+   the expanded tile showing its 62px sparkline bitmap stretched over 190px.
+   Panel height changes too; the ResizeObserver in _SWIPE_JS repins the
+   carousel off that. */
+tiles.forEach(function(t){draw(t)})}
+
+/* ── per-tile pointer handling (tooltip + drag-to-zoom, expanded only) ──── */
 var ZOOM_MIN_PX=10;
-function nearestIdx(mx){
+function bind(t){
+function nearest(mx){
 var best=0,bd=Infinity;
-for(var i=0;i<view.pts.length;i++){
-var d=Math.abs(view.X(i)-mx);if(d<bd){bd=d;best=i}}
+for(var i=0;i<t.view.pts.length;i++){
+var d=Math.abs(t.view.X(i)-mx);if(d<bd){bd=d;best=i}}
 return best}
 function showTip(mx){
-if(!view.pts.length||!view.X)return;
-var idx=nearestIdx(mx),p=view.pts[idx];
-tip.style.display='block';
-tip.style.left=view.X(idx)+'px';
-tip.style.top=view.Y(p.iv)+'px';
-tip.textContent=p.t.getDate()+' '+MO[p.t.getMonth()]+' '+fmtHM(p.t)+' · '+p.iv.toFixed(1)+'%'}
-function updateZoomReset(){
-var b=$('vm-zoom-reset');if(b)b.style.display=zoomRange?'inline-flex':'none'}
-function paintDragBand(x0,x1){
-var c=cache[cur];if(!c)return;
-draw(c.pts);
-var H=canvas.clientHeight||240,lo=Math.min(x0,x1),hi=Math.max(x0,x1);
-ctx.fillStyle=tok('--accent');ctx.globalAlpha=.14;ctx.fillRect(lo,0,hi-lo,H);ctx.globalAlpha=1;
-ctx.strokeStyle=tok('--accent');ctx.lineWidth=1;ctx.setLineDash([4,3]);
-ctx.beginPath();ctx.moveTo(lo,0);ctx.lineTo(lo,H);ctx.moveTo(hi,0);ctx.lineTo(hi,H);ctx.stroke();
-ctx.setLineDash([])}
-canvas.addEventListener('pointerdown',function(ev){
-var r=canvas.getBoundingClientRect();
-drag={x0:ev.clientX-r.left,x1:ev.clientX-r.left,moved:false};
-try{canvas.setPointerCapture(ev.pointerId)}catch(e){}});
-canvas.addEventListener('pointermove',function(ev){
-var r=canvas.getBoundingClientRect();
-var mx=ev.clientX-r.left;
-if(drag){
-drag.x1=mx;
-if(Math.abs(drag.x1-drag.x0)>ZOOM_MIN_PX){
-drag.moved=true;tip.style.display='none';paintDragBand(drag.x0,drag.x1);return}}
+if(!t.view.pts.length||!t.view.X)return;
+var i=nearest(mx),p=t.view.pts[i];
+t.tip.style.display='block';
+t.tip.style.left=t.view.X(i)+'px';
+t.tip.style.top=t.view.Y(p.iv)+'px';
+t.tip.textContent=p.t.getDate()+' '+MO[p.t.getMonth()]+' '+fmtHM(p.t)+
+' · '+p.iv.toFixed(1)+'%'}
+function band(x0,x1){
+draw(t);
+var H=t.cv.clientHeight||240,lo=Math.min(x0,x1),hi=Math.max(x0,x1);
+var c=t.ctx;
+c.fillStyle=tok('--accent');c.globalAlpha=.14;c.fillRect(lo,0,hi-lo,H);c.globalAlpha=1;
+c.strokeStyle=tok('--accent');c.lineWidth=1;c.setLineDash([4,3]);
+c.beginPath();c.moveTo(lo,0);c.lineTo(lo,H);c.moveTo(hi,0);c.lineTo(hi,H);c.stroke();
+c.setLineDash([])}
+t.cv.addEventListener('pointerdown',function(ev){
+if(!t.expanded)return;
+var r=t.cv.getBoundingClientRect();
+t.drag={x0:ev.clientX-r.left,x1:ev.clientX-r.left,moved:false};
+try{t.cv.setPointerCapture(ev.pointerId)}catch(e){}});
+t.cv.addEventListener('pointermove',function(ev){
+if(!t.expanded)return;
+var r=t.cv.getBoundingClientRect(),mx=ev.clientX-r.left;
+if(t.drag){
+t.drag.x1=mx;
+if(Math.abs(t.drag.x1-t.drag.x0)>ZOOM_MIN_PX){
+t.drag.moved=true;t.tip.style.display='none';band(t.drag.x0,t.drag.x1);return}}
 showTip(mx)});
 function endDrag(){
-if(drag&&drag.moved&&view.pts.length>3){
-var i0=nearestIdx(Math.min(drag.x0,drag.x1));
-var i1=nearestIdx(Math.max(drag.x0,drag.x1));
-if(i1-i0>=2){
-var base=zoomRange?zoomRange.i0:0;
-zoomRange={i0:base+i0,i1:base+i1};
-updateZoomReset()}}
-drag=null;redraw()}
-canvas.addEventListener('pointerup',endDrag);
-canvas.addEventListener('pointercancel',endDrag);
-canvas.addEventListener('pointerleave',function(){if(!drag)tip.style.display='none'});
-/* controls */
-var zoomBtn=$('vm-zoom-reset');
-if(zoomBtn)zoomBtn.addEventListener('click',function(){
-zoomRange=null;updateZoomReset();redraw()});
-var sel=$('vm-scrip');
-if(sel){
-sel.value=cur;
-if(sel.value!==cur){cur='NATURALGAS';sel.value=cur}
-sel.addEventListener('change',function(){
-cur=sel.value;localStorage.setItem('vm-scrip',cur);
-zoomRange=null;updateZoomReset();load()})}
-var seg=$('vm-range');
+if(t.drag&&t.drag.moved&&t.view.pts.length>3){
+var i0=nearest(Math.min(t.drag.x0,t.drag.x1));
+var i1=nearest(Math.max(t.drag.x0,t.drag.x1));
+if(i1-i0>=2){var base=t.zoom?t.zoom.i0:0;t.zoom={i0:base+i0,i1:base+i1}}}
+t.drag=null;draw(t)}
+t.cv.addEventListener('pointerup',endDrag);
+t.cv.addEventListener('pointercancel',endDrag);
+t.cv.addEventListener('pointerleave',function(){if(!t.drag)t.tip.style.display='none'});
+/* Collapsed: the whole tile expands. Expanded: only the header collapses, so
+   dragging the chart or reaching for Approve can't fold the tile away. */
+t.el.addEventListener('click',function(ev){
+if(ev.target.closest('button,a'))return;
+if(t.expanded&&!ev.target.closest('.vgt-h'))return;
+setOpen(t.expanded?'':t.c)});
+t.el.addEventListener('keydown',function(ev){
+if(ev.key!=='Enter'&&ev.key!==' ')return;
+if(ev.target!==t.el)return;
+ev.preventDefault();setOpen(t.expanded?'':t.c)})}
+
+/* ── wiring ─────────────────────────────────────────────────────────────── */
+Array.prototype.forEach.call(grid.querySelectorAll('.vgt'),function(el){
+var cv=el.querySelector('[data-r="cv"]');
+var t={c:el.getAttribute('data-c'),el:el,cv:cv,ctx:cv.getContext('2d'),
+tip:el.querySelector('[data-r="tip"]'),expanded:false,zoom:null,drag:null,
+view:{pts:[],X:null,Y:null},r:{}};
+['badge','iv','state','open','rangev','rv','vrp','confk','conf','sizek','size',
+'sum','btns'].forEach(function(k){t.r[k]=el.querySelector('[data-r="'+k+'"]')});
+tiles.push(t);bind(t)});
+
+var seg=$('vg-range');
 if(seg){
 seg.querySelectorAll('button').forEach(function(b){
 b.classList.toggle('on',parseInt(b.getAttribute('data-d'),10)===rangeDays)});
@@ -3262,16 +3340,24 @@ var b=ev.target.closest('button');if(!b)return;
 seg.querySelectorAll('button').forEach(function(x){x.classList.remove('on')});
 b.classList.add('on');
 rangeDays=parseInt(b.getAttribute('data-d'),10);
-localStorage.setItem('vm-range',String(rangeDays));
-zoomRange=null;updateZoomReset();
+try{localStorage.setItem('vm-range',String(rangeDays))}catch(e){}
+tiles.forEach(function(t){t.zoom=null});
 load()})}
-function load(){fetchSeries(cur,draw)}
+var cb=$('vg-collapse');
+if(cb)cb.addEventListener('click',function(){setOpen('')});
+
+function load(){
+tiles.forEach(function(t){fetchSeries(t.c,function(){draw(t)})});
+fetchRecs(function(){tiles.forEach(applyRec)})}
 var raf=null;
 function redraw(){if(raf)cancelAnimationFrame(raf);
-raf=requestAnimationFrame(function(){var c=cache[cur];if(c)draw(c.pts)})}
-if(window.ResizeObserver)new ResizeObserver(redraw).observe(canvas.parentElement);
+raf=requestAnimationFrame(function(){tiles.forEach(draw)})}
+if(window.ResizeObserver)new ResizeObserver(redraw).observe(grid);
 if(window.matchMedia)
 window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change',redraw);
+
+var wasOpen='';try{wasOpen=localStorage.getItem('vg-open')||''}catch(e){}
+if(wasOpen)setOpen(wasOpen);
 load();setInterval(load,300000);
 })();
 </script>
@@ -4787,43 +4873,52 @@ async def control_page(
         + sd_body + "</div>"
     )
 
-    # ── volatility monitor card (chart drawn by _VOL_MONITOR_JS) ─────────────
-    vol_options = "".join(
-        f"<option value='{c}'>{n}</option>" for c, n in [
-            ("NATURALGAS", "Natural Gas"), ("CRUDEOILM", "Crude Oil"),
-            ("GOLDM", "Gold"), ("SILVERM", "Silver"),
-            ("NIFTY", "Nifty"), ("BANKNIFTY", "Bank Nifty"),
-        ]
+    # ── volatility grid — one sparkline per tracked scrip (_VOL_GRID_JS) ─────
+    # Tile skeletons are server-rendered so the panel has its final shape before
+    # any fetch lands; JS only fills values. Driven off the configured commodity
+    # list rather than a literal, so the grid can't drift from what's sampled.
+    vol_scrips = list(settings.COMMODITY_AGENTS_COMMODITIES)
+    vol_tiles = "".join(
+        "<article class='vgt' data-c='{c}' role='button' tabindex='0' "
+        "aria-expanded='false' aria-label='{n} volatility'>"
+        "<div class='vgt-h'><b>{n}</b>"
+        "<span class='pill pm' data-r='badge'>&hellip;</span></div>"
+        "<div class='vgt-n'><span class='vgt-iv' data-r='iv'>&mdash;</span>"
+        "<span class='vm-state vm-std' data-r='state'>loading&hellip;</span></div>"
+        "<div class='vgt-c'><canvas data-r='cv'></canvas>"
+        "<div class='vm-tip' data-r='tip'></div></div>"
+        "<div class='vgt-x'>"
+        "<div class='cakv'>"
+        "<span>24h ago</span><span data-r='open'>&mdash;</span>"
+        "<span>Range</span><span data-r='rangev'>&mdash;</span>"
+        "<span>Realised vol</span><span data-r='rv'>&mdash;</span>"
+        "<span>Premium edge</span><span data-r='vrp'>&mdash;</span>"
+        "<span data-r='confk' hidden>Confidence</span><span data-r='conf' hidden>&mdash;</span>"
+        "<span data-r='sizek' hidden>Size</span><span data-r='size' hidden>&mdash;</span>"
+        "</div>"
+        "<div class='vgt-sum' data-r='sum'></div>"
+        "<div class='cabtns' data-r='btns'></div>"
+        "<div class='vgt-hint'>Drag to zoom &middot; tap a point to inspect &middot; "
+        "only trading-hours samples are plotted</div>"
+        "</div></article>".format(c=c, n=_VOL_LABELS.get(c, c))
+        for c in vol_scrips
     )
     vol_card = (
-        "<div class='card'><div class='ct'>Volatility"
-        "<span id='vm-msg' style='margin-left:auto;text-transform:none;"
+        "<div class='card'><div class='ct'>Volatility &amp; Intelligence"
+        "<span id='vg-msg' style='margin-left:auto;text-transform:none;"
         "letter-spacing:0;color:var(--ink3)'></span></div>"
-        "<div class='vm-head'>"
-        "<div class='vm-controls'>"
-        "<span class='selw'><select id='vm-scrip' aria-label='Instrument'>"
-        + vol_options +
-        "</select></span>"
-        "<span class='seg' id='vm-range' role='group' aria-label='Range'>"
+        "<div class='vg-head'>"
+        "<span class='seg' id='vg-range' role='group' aria-label='Range'>"
         "<button data-d='1'>1D</button><button data-d='3'>3D</button>"
         "<button data-d='7' class='on'>7D</button><button data-d='99'>All</button>"
         "</span>"
-        "<button id='vm-zoom-reset' class='btn bn' type='button' "
-        "style='display:none;font-size:.72em;padding:5px 10px;margin-left:6px;white-space:nowrap'>"
-        "&#8617; Reset zoom</button>"
+        "<button id='vg-collapse' class='btn bn' type='button' "
+        "style='display:none;font-size:.72em;padding:5px 10px;white-space:nowrap'>"
+        "&#8617; Collapse</button>"
         "</div>"
-        "<div class='vm-hero'><div class='vm-now' id='vm-now'>&mdash;</div>"
-        "<span class='vm-state vm-std' id='vm-state'>loading&hellip;</span></div>"
-        "</div>"
-        "<div class='vm-chartwrap'><canvas id='vm-chart'></canvas>"
-        "<div class='vm-tip' id='vm-tip'></div></div>"
-        "<div style='margin:2px 18px 0;font-size:.7em;color:var(--ink3)'>"
-        "Drag to zoom in &middot; tap a point to inspect &middot; only trading-hours samples are plotted</div>"
+        "<div class='vg-grid' id='vg-grid'>" + vol_tiles + "</div>"
         "<div class='vm-foot'>"
-        "<span>24h ago <b id='vm-open'>&mdash;</b></span>"
-        "<span>Range <b id='vm-rangev'>&mdash;</b></span>"
-        "<span>Realised vol <b id='vm-rv'>&mdash;</b></span>"
-        "<span>Premium edge <b id='vm-vrp'>&mdash;</b></span>"
+        "<span>Tap a tile for the full chart, stats and the agent&rsquo;s call</span>"
         "<span class='vm-legend'>"
         "<span><i style='background:var(--loss-b)'></i>rising &mdash; hurts short vol</span>"
         "<span><i style='background:var(--gain-b)'></i>falling &mdash; theta wins</span>"
@@ -4872,18 +4967,14 @@ async def control_page(
         + "</section>"
     )
 
-    # ── Markets panel — volatility + commodity intelligence ──────────────────
+    # ── Markets panel — one card: every scrip's IV chart + its agent verdict ──
+    # Commodity Intelligence used to be a second card here showing ATM IV, IV
+    # trend and VRP for the same six scrips (and re-fetching iv-history to do
+    # it). It's folded into the tiles instead of moved to More: same rows, same
+    # numbers, one fetch. Full agent detail still lives at
+    # /commodity-agents/dashboard, which More links to.
     markets_panel = (
-        "<section class='panel' id='markets'>"
-        + vol_card
-        # commodity intelligence — filled by _CONTROL_LIVE_JS
-        + "<div class='card'><div class='ct'>Commodity Intelligence"
-        + "<span id='ca-msg' style='margin-left:auto;text-transform:none;letter-spacing:0;"
-        + "color:var(--ink2)'></span></div>"
-        + "<div class='cagrid' id='ca-grid'>"
-        + "<div style='font-size:.78em;color:var(--ink3)'>Loading commodity data&hellip;</div>"
-        + "</div></div>"
-        + "</section>"
+        "<section class='panel' id='markets'>" + vol_card + "</section>"
     )
 
     # ── Settings panel — configuration, checked occasionally ─────────────────
@@ -5090,7 +5181,7 @@ async def control_page(
         + f"window.__snaps={json.dumps(snaps)};"
         + "</script>"
         + _CONTROL_LIVE_JS
-        + _VOL_MONITOR_JS
+        + _VOL_GRID_JS
         + _SWIPE_JS
     )
     return Response(content=_shell("home", body, settings, live=True), media_type="text/html")
