@@ -26,7 +26,7 @@ from app.config import get_settings
 from app.storage import get_db_session
 from app.voice.audit import get_audit_logger
 from app.voice.config import is_voice_enabled, load_config
-from app.voice.nlu import build_system_prompt, call_nlu, transcribe_audio
+from app.voice.nlu import resolve_nlu, transcribe_audio
 from app.voice.pending import CONFIRM_TTL_SECONDS, VOICE_DEDUP_SECONDS, get_store
 
 _IST = timezone(timedelta(hours=5, minutes=30))
@@ -176,25 +176,22 @@ async def transcribe(
 
     audit.info(f"TRANSCRIPT ip:{source_ip} text:{transcript!r}")
 
-    # NLU
-    anthropic_key = settings.ANTHROPIC_API_KEY
-    if not anthropic_key:
-        raise HTTPException(status_code=503, detail="ANTHROPIC_API_KEY not configured on server")
-
+    # NLU — backend picked by VOICE_NLU_BACKEND (metered API vs subscription shim)
     try:
-        nlu = call_nlu(
-            transcript,
-            api_key=anthropic_key,
-            model=settings.VOICE_NLU_MODEL,
-            nfo_instruments=list(settings.VOICE_NFO_INSTRUMENTS),
-            mcx_instruments=list(settings.VOICE_MCX_INSTRUMENTS),
-        )
+        nlu, nlu_backend = resolve_nlu(transcript, settings)
+    except ValueError as exc:
+        # Unusable configuration, not a parse failure — 503 so it reads as
+        # "server not set up" rather than "your command was bad".
+        audit.error(f"NLU_UNCONFIGURED ip:{source_ip} error:{exc}")
+        raise HTTPException(status_code=503, detail=str(exc))
     except json.JSONDecodeError as exc:
         audit.error(f"NLU_BAD_JSON ip:{source_ip} error:{exc}")
         raise HTTPException(status_code=500, detail=f"NLU returned invalid JSON: {exc}")
     except Exception as exc:
         audit.error(f"NLU_FAILED ip:{source_ip} transcript:{transcript!r} error:{exc}")
         raise HTTPException(status_code=500, detail=f"NLU call failed: {exc}")
+
+    audit.info(f"NLU_OK ip:{source_ip} backend:{nlu_backend}")
 
     confidence  = float(nlu.get("confidence", 0))
     action      = nlu.get("action", "")

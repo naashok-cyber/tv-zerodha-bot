@@ -1,10 +1,22 @@
 """Claude NLU — voice transcript → structured order JSON.
 
 System prompt is ported verbatim from trading-bot-voice/voice_handler.py.
+
+Two backends produce the same dict: the metered Anthropic API (`call_nlu`) and
+the host's Claude Code CLI over the shim (`call_nlu_shim`). `resolve_nlu`
+picks between them from VOICE_NLU_BACKEND and is what the route calls.
 """
 from __future__ import annotations
 
 import json
+import logging
+
+log = logging.getLogger(__name__)
+
+BACKEND_API = "api"
+BACKEND_SHIM = "shim"
+BACKEND_SHIM_THEN_API = "shim_then_api"
+BACKENDS = (BACKEND_API, BACKEND_SHIM, BACKEND_SHIM_THEN_API)
 
 
 def build_system_prompt(
@@ -133,6 +145,100 @@ def call_nlu(
         if raw.startswith("json"):
             raw = raw[4:]
     return json.loads(raw.strip())
+
+
+def call_nlu_shim(
+    transcript: str,
+    shim_url: str,
+    shim_token: str,
+    model: str,
+    timeout: int,
+    nfo_instruments: list[str],
+    mcx_instruments: list[str],
+) -> dict:
+    """Same contract as `call_nlu`, run on the host's subscription CLI.
+
+    Reuses the commodity agents' ShimClient rather than duplicating the HTTP
+    transport — it already carries the bearer auth, the JSON-fence stripping
+    and a single retry on an unparseable reply. `anthropic` is a runtime import
+    inside LlmClient, so this path pulls in no API dependency.
+    """
+    from app.commodity_agents.llm_shim import ShimClient
+
+    client = ShimClient(
+        url=shim_url,
+        token=shim_token,
+        model=model,
+        enable_web_search=False,   # parsing "buy one lot BANKNIFTY" needs no web
+        timeout=timeout,
+    )
+    return client.run(
+        "voice_nlu",
+        build_system_prompt(nfo_instruments, mcx_instruments),
+        transcript.strip(),
+    )
+
+
+def resolve_nlu(transcript: str, settings) -> tuple[dict, str]:
+    """Parse `transcript` on the configured backend; return (parsed, backend_used).
+
+    Raises ValueError for an unusable configuration — surfaced as a 503 by the
+    route. Deliberately loud rather than silently defaulting to the API: the
+    whole point of the shim is not spending, and a typo'd VOICE_NLU_BACKEND
+    that quietly bills would defeat it.
+    """
+    backend = (getattr(settings, "VOICE_NLU_BACKEND", BACKEND_API) or BACKEND_API).lower()
+    if backend not in BACKENDS:
+        raise ValueError(
+            f"VOICE_NLU_BACKEND={backend!r} is not one of {list(BACKENDS)}"
+        )
+
+    nfo = list(settings.VOICE_NFO_INSTRUMENTS)
+    mcx = list(settings.VOICE_MCX_INSTRUMENTS)
+    shim_ready = bool(settings.COMMODITY_AGENT_SHIM_URL
+                      and settings.COMMODITY_AGENT_SHIM_TOKEN)
+
+    def _api() -> dict:
+        if not settings.ANTHROPIC_API_KEY:
+            raise ValueError("ANTHROPIC_API_KEY not configured on server")
+        return call_nlu(
+            transcript,
+            api_key=settings.ANTHROPIC_API_KEY,
+            model=settings.VOICE_NLU_MODEL,
+            nfo_instruments=nfo,
+            mcx_instruments=mcx,
+        )
+
+    def _shim() -> dict:
+        if not shim_ready:
+            raise ValueError(
+                "VOICE_NLU_BACKEND wants the shim but COMMODITY_AGENT_SHIM_URL/"
+                "_TOKEN are not set"
+            )
+        return call_nlu_shim(
+            transcript,
+            shim_url=settings.COMMODITY_AGENT_SHIM_URL,
+            shim_token=settings.COMMODITY_AGENT_SHIM_TOKEN,
+            model=settings.VOICE_NLU_SHIM_MODEL,
+            timeout=settings.VOICE_NLU_SHIM_TIMEOUT,
+            nfo_instruments=nfo,
+            mcx_instruments=mcx,
+        )
+
+    if backend == BACKEND_API:
+        return _api(), BACKEND_API
+    if backend == BACKEND_SHIM:
+        return _shim(), BACKEND_SHIM
+
+    # shim_then_api. A misconfigured shim is a ValueError and falls through
+    # like any other failure — the order still gets parsed, and the log says
+    # why the free path was skipped.
+    try:
+        return _shim(), BACKEND_SHIM
+    except Exception as exc:
+        log.warning("[voice] shim NLU failed (%s), falling back to the API",
+                    str(exc)[:200])
+        return _api(), BACKEND_API
 
 
 def transcribe_audio(audio_bytes: bytes, filename: str, openai_api_key: str) -> str:

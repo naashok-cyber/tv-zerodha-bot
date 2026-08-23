@@ -197,7 +197,7 @@ def test_transcribe_wrong_token(client: TestClient) -> None:
 
 def test_transcribe_valid_token_reaches_nlu(client: TestClient) -> None:
     nlu = _nlu_response()
-    with patch("app.routes.voice.call_nlu", return_value=nlu):
+    with patch("app.routes.voice.resolve_nlu", return_value=(nlu, "api")):
         resp = client.post(
             "/voice/transcribe",
             json={"text": "buy one lot of NIFTY ATM call"},
@@ -340,7 +340,7 @@ def test_atomic_config_concurrent_writes_all_valid(tmp_path) -> None:
 def test_low_confidence_requires_override(client: TestClient) -> None:
     nlu = _nlu_response(confidence=0.52)
 
-    with patch("app.routes.voice.call_nlu", return_value=nlu):
+    with patch("app.routes.voice.resolve_nlu", return_value=(nlu, "api")):
         r1 = client.post("/voice/transcribe", json={"text": "NIFTY call"}, headers=_vh())
     assert r1.status_code == 200
     token = r1.json()["confirmation_token"]
@@ -377,7 +377,7 @@ def test_exit_all_requires_double_confirm(client: TestClient) -> None:
         confidence=0.96,
     )
 
-    with patch("app.routes.voice.call_nlu", return_value=nlu):
+    with patch("app.routes.voice.resolve_nlu", return_value=(nlu, "api")):
         r1 = client.post(
             "/voice/transcribe",
             json={"text": "exit all BANKNIFTY positions"},
@@ -454,7 +454,7 @@ def test_transcribe_blocked_when_channel_disabled(client: TestClient) -> None:
 def test_confirm_blocked_when_channel_disabled_after_parse(client: TestClient) -> None:
     nlu = _nlu_response()
 
-    with patch("app.routes.voice.call_nlu", return_value=nlu):
+    with patch("app.routes.voice.resolve_nlu", return_value=(nlu, "api")):
         r1 = client.post(
             "/voice/transcribe",
             json={"text": "buy one NIFTY call"},
@@ -478,7 +478,7 @@ def test_confirm_blocked_when_channel_disabled_after_parse(client: TestClient) -
 
 def test_unknown_instrument_rejected(client: TestClient) -> None:
     nlu = _nlu_response(underlying="WIPRO", confidence=0.0)
-    with patch("app.routes.voice.call_nlu", return_value=nlu):
+    with patch("app.routes.voice.resolve_nlu", return_value=(nlu, "api")):
         resp = client.post(
             "/voice/transcribe",
             json={"text": "buy WIPRO call"},

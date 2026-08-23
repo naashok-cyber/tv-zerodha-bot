@@ -69,6 +69,12 @@ async def admin_status(
         "anthropic_key_set"     : bool(settings.ANTHROPIC_API_KEY),
         "openai_key_set"        : bool(settings.OPENAI_API_KEY),
         "nlu_model"             : settings.VOICE_NLU_MODEL,
+        "nlu_backend"           : settings.VOICE_NLU_BACKEND,
+        "nlu_shim_model"        : settings.VOICE_NLU_SHIM_MODEL,
+        # Whether the subscription path is even reachable — a backend of "shim"
+        # with this false means every command 503s.
+        "nlu_shim_configured"   : bool(settings.COMMODITY_AGENT_SHIM_URL
+                                       and settings.COMMODITY_AGENT_SHIM_TOKEN),
         "allowed_instruments"   : list(settings.VOICE_ALLOWED_INSTRUMENTS),
     })
 

@@ -96,8 +96,36 @@ Relationships: Alert → [Order] → Position → ClosedTrade; Order → Gtt
 
 **Voice**
 - `VOICE_AUTH_TOKEN` — required; 401 if missing
-- `VOICE_NLU_MODEL=claude-sonnet-4-6`
+- `VOICE_NLU_MODEL=claude-sonnet-4-6` — API model id, used only on the `api` backend
+- `VOICE_NLU_BACKEND=api` — `api` | `shim` | `shim_then_api`; see below
+- `VOICE_NLU_SHIM_MODEL=sonnet` (CLI alias), `VOICE_NLU_SHIM_TIMEOUT=60`
 - `VOICE_ALLOWED_INSTRUMENTS`, `VOICE_MAX_LOTS=5`, `VOICE_CONFIRM_TTL_SECONDS=60`
+
+### Voice NLU backend (`app/voice/nlu.py:resolve_nlu`)
+
+The transcript→JSON parse can run on the metered Anthropic API or on the host's
+Claude Code CLI through the same shim the commodity agents use — voice is
+human-triggered one command at a time, the property that made the shim
+defensible there. It reuses `COMMODITY_AGENT_SHIM_URL`/`_TOKEN`; there is no
+second host service.
+
+| Value | Behaviour |
+|---|---|
+| `api` | Metered API only (default — an upgrade never silently switches backends) |
+| `shim` | Subscription only. A command **fails** if the shim is busy |
+| `shim_then_api` | Shim first, API on any shim failure — recommended |
+
+Why the fallback matters: `scripts/claude_shim.py` takes a non-blocking lock and
+returns 429 when a run is in flight, and a commodity debate holds it ~150s. On
+`shim` that window turns a spoken order into a 500. Latency also differs — each
+`claude -p` carries ~18.9K tokens of fixed scaffolding, so expect ~10-20s versus
+~1-2s on the API, against a 60s `VOICE_CONFIRM_TTL_SECONDS`.
+
+An unknown `VOICE_NLU_BACKEND` raises rather than defaulting to the API: the
+point of the shim is not spending, and a typo that quietly billed would defeat
+it. `GET /admin/voice/status` reports `nlu_backend` and `nlu_shim_configured`;
+each parse audit-logs `NLU_OK … backend:<which>` so you can see which path
+actually served it.
 
 Straddle/defense/entry-wing/partial-booking params → docs/claude/straddles.md. Delta hedge params → docs/claude/delta-hedge.md. EMA analyzer params → docs/claude/ema-analyzer.md.
 

@@ -462,6 +462,21 @@ class Settings(BaseSettings):
     ANTHROPIC_API_KEY: str = ""         # Required for NLU; 503 if empty
     OPENAI_API_KEY: str = ""            # Optional; needed only when TRANSCRIPTION_MODE=whisper
     VOICE_NLU_MODEL: str = "claude-sonnet-4-6"
+    # Which backend parses the transcript. Voice is human-triggered one command
+    # at a time, so it qualifies for the subscription shim the same way a manual
+    # commodity analysis does — it reuses COMMODITY_AGENT_SHIM_URL/_TOKEN rather
+    # than standing up a second host service.
+    #   "api"           — metered Anthropic API (historical behaviour)
+    #   "shim"          — subscription only; a spoken order fails if the shim is busy
+    #   "shim_then_api" — shim first, API on any shim failure (recommended)
+    # The shim serialises to one CLI run at a time and a commodity debate holds
+    # it for ~150s, so shim-only will occasionally 429 mid-session.
+    VOICE_NLU_BACKEND: str = "api"
+    VOICE_NLU_SHIM_MODEL: str = "sonnet"    # CLI alias, not an API model id
+    # Far below the commodity default of 600: an unparsed order is worthless
+    # once the move is gone, and the API fallback needs room inside the caller's
+    # patience. One `claude -p` on a 2K-token prompt lands well inside this.
+    VOICE_NLU_SHIM_TIMEOUT: int = 60
     VOICE_ALLOWED_INSTRUMENTS: list[str] = [
         "NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX",
         "CRUDEOIL", "GOLD", "SILVER",
