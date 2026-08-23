@@ -1,0 +1,58 @@
+# Trading bot — pinned dependencies
+# Install: pip install -r requirements.txt
+
+# Web framework
+Flask==3.1.3
+flask-cors==6.0.2
+Werkzeug==3.1.8
+
+# Zerodha SDK
+kiteconnect==5.2.0
+
+# NLU — Anthropic Claude (required for voice channel)
+anthropic>=0.25.0
+
+# Audio transcription — OpenAI Whisper (optional; only needed if TRANSCRIPTION_MODE=whisper)
+openai>=1.0.0
+
+# Options math
+scipy==1.17.1
+numpy==2.4.4
+
+# Utilities
+python-dotenv==1.2.2
+requests==2.33.1
+
+# Already present in venv (pinned for reproducibility)
+attrs==26.1.0
+autobahn==19.11.2
+Automat==25.4.16
+blinker==1.9.0
+certifi==2026.4.22
+cffi==2.0.0
+charset-normalizer==3.4.7
+click==8.3.3
+constantly==23.10.4
+cryptography==46.0.7
+h11==0.16.0
+hyperlink==21.0.0
+idna==3.13
+Incremental==24.11.0
+itsdangerous==2.2.0
+Jinja2==3.1.6
+MarkupSafe==3.0.3
+packaging==26.1
+pyasn1==0.6.3
+pyasn1_modules==0.4.2
+pycparser==3.0
+pyOpenSSL==26.0.0
+pyotp==2.9.0
+PySocks==1.7.1
+python-dateutil==2.9.0.post0
+service-identity==24.2.0
+six==1.17.0
+Twisted==25.5.0
+txaio==25.12.2
+typing_extensions==4.15.0
+urllib3==2.6.3
+zope.interface==8.3

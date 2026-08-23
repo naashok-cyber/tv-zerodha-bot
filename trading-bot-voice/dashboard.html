@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Trading Bot — Dashboard</title>
+<style>
+:root{--blue:#007AFF;--green:#34C759;--red:#FF3B30;--orange:#FF9500;--gray:#8E8E93;
+  --bg:#F2F2F7;--card:#fff;--text:#1C1C1E;--sub:#636366}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',sans-serif;
+  background:var(--bg);color:var(--text);padding:16px;-webkit-font-smoothing:antialiased}
+h1{font-size:1.3em;font-weight:700;margin-bottom:16px;color:var(--text)}
+h2{font-size:.95em;font-weight:600;color:var(--sub);text-transform:uppercase;
+  letter-spacing:.04em;margin-bottom:10px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:14px;max-width:1100px;margin:0 auto}
+.card{background:var(--card);border-radius:14px;padding:18px;
+  box-shadow:0 1px 3px rgba(0,0,0,.07)}
+.row{display:flex;justify-content:space-between;align-items:center;
+  padding:6px 0;border-bottom:1px solid #F2F2F7;font-size:.88em}
+.row:last-child{border-bottom:none}
+.lbl{color:var(--sub)}
+.val{font-weight:600;text-align:right}
+.pill{display:inline-block;padding:2px 9px;border-radius:20px;font-size:.75em;font-weight:600}
+.pill-green{background:rgba(52,199,89,.15);color:#1a7a2e}
+.pill-red{background:rgba(255,59,48,.12);color:#c0392b}
+.pill-orange{background:rgba(255,149,0,.15);color:#7a4400}
+.pill-gray{background:#E5E5EA;color:var(--gray)}
+.pill-blue{background:rgba(0,122,255,.12);color:#0a5bbf}
+.btn{display:inline-flex;align-items:center;gap:6px;padding:8px 16px;border:none;
+  border-radius:10px;font-size:.85em;font-weight:600;cursor:pointer;font-family:inherit;
+  transition:opacity .15s,transform .1s}
+.btn:active{transform:scale(.96)}
+.btn-red{background:var(--red);color:#fff}
+.btn-green{background:var(--green);color:#fff}
+.btn-blue{background:var(--blue);color:#fff}
+.btn-gray{background:#E5E5EA;color:var(--text)}
+.btn:disabled{opacity:.45;cursor:default}
+.voice-panel{grid-column:1/-1}
+#voiceHistory{margin-top:12px}
+.cmd-row{display:flex;flex-direction:column;gap:3px;padding:10px 0;
+  border-bottom:1px solid #F2F2F7;font-size:.82em}
+.cmd-row:last-child{border-bottom:none}
+.cmd-meta{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.cmd-transcript{color:var(--text);font-style:italic;margin-top:2px;font-size:.9em}
+.cmd-result{color:var(--sub);font-size:.78em;margin-top:1px}
+.token-input{display:flex;gap:8px;margin-bottom:14px;align-items:center;flex-wrap:wrap}
+.token-input input{flex:1;min-width:200px;padding:8px 12px;border:1px solid #E5E5EA;
+  border-radius:8px;font-size:.85em;font-family:inherit;background:#F9F9F9}
+.token-input input:focus{outline:none;border-color:var(--blue)}
+.notice{padding:10px 14px;border-radius:8px;font-size:.82em;font-weight:500;margin-bottom:10px}
+.notice-warn{background:rgba(255,149,0,.12);color:#7a4400}
+.notice-err{background:rgba(255,59,48,.1);color:#c0392b}
+.ts{color:var(--gray);font-size:.75em}
+#refreshTs{font-size:.75em;color:var(--gray);margin-left:8px}
+.stats-row{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:12px}
+.stat-box{background:#F9F9F9;border-radius:10px;padding:10px 14px;min-width:100px;text-align:center}
+.stat-num{font-size:1.4em;font-weight:700;color:var(--blue)}
+.stat-lbl{font-size:.72em;color:var(--gray);margin-top:2px}
+</style>
+</head>
+<body>
+<h1>⚡ Trading Bot Dashboard <span id="refreshTs"></span></h1>
+
+<div class="token-input">
+  <input type="password" id="adminToken" placeholder="Admin token (X-Admin-Token) — stored in localStorage" oninput="saveToken()">
+  <button class="btn btn-gray" onclick="refresh()">⟳ Refresh</button>
+</div>
+
+<div class="grid">
+
+  <!-- Bot status -->
+  <div class="card">
+    <h2>Bot Status</h2>
+    <div id="botStatus"><div class="lbl ts">Loading…</div></div>
+  </div>
+
+  <!-- Open positions -->
+  <div class="card">
+    <h2>Open Positions</h2>
+    <div id="positions"><div class="lbl ts">Loading…</div></div>
+  </div>
+
+  <!-- Paper P&L -->
+  <div class="card">
+    <h2>Paper P&amp;L</h2>
+    <div id="pnl"><div class="lbl ts">Loading…</div></div>
+  </div>
+
+  <!-- Voice channel -->
+  <div class="card voice-panel">
+    <h2>Voice Channel</h2>
+    <div id="voiceErr" style="display:none"></div>
+
+    <div id="voiceStatus" class="stats-row">
+      <div class="stat-box"><div class="stat-num" id="vEnabled">—</div><div class="stat-lbl">Channel</div></div>
+      <div class="stat-box"><div class="stat-num" id="vPending">—</div><div class="stat-lbl">Pending</div></div>
+      <div class="stat-box"><div class="stat-num" id="vToday">—</div><div class="stat-lbl">Orders Today</div></div>
+      <div class="stat-box"><div class="stat-num" id="vMaxLots">—</div><div class="stat-lbl">Max Lots</div></div>
+    </div>
+
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px">
+      <button class="btn btn-red"   id="btnDisable" onclick="toggleVoice(false)" disabled>Disable Voice</button>
+      <button class="btn btn-green" id="btnEnable"  onclick="toggleVoice(true)"  disabled>Enable Voice</button>
+    </div>
+
+    <h2 style="margin-top:4px">Last 20 Voice Commands</h2>
+    <div id="voiceHistory"><div class="lbl ts">Loading…</div></div>
+  </div>
+
+</div>
+
+<script>
+const BASE = '';   // same origin
+
+function saveToken(){
+  const t = document.getElementById('adminToken').value;
+  if(t) localStorage.setItem('adminToken', t);
+}
+function loadToken(){
+  const t = localStorage.getItem('adminToken') || '';
+  document.getElementById('adminToken').value = t;
+  return t;
+}
+
+async function apiFetch(path, opts={}){
+  const token = loadToken();
+  const headers = {'Content-Type':'application/json', 'X-Admin-Token': token, ...(opts.headers||{})};
+  const r = await fetch(BASE+path, {...opts, headers});
+  return {ok: r.ok, status: r.status, data: await r.json().catch(()=>({}))};
+}
+
+function pill(text, cls){return `<span class="pill pill-${cls}">${text}</span>`}
+
+async function loadBotStatus(){
+  const {ok, data} = await apiFetch('/status');
+  if(!ok){document.getElementById('botStatus').innerHTML='<div class="notice notice-err">Failed to load status</div>';return;}
+  const rows = [
+    ['Mode',      data.paper_trading ? pill('PAPER','orange') : pill('LIVE','red')],
+    ['Orders today', `${data.orders_today} / ${data.max_orders_per_day}`],
+    ['Open positions', data.options_positions],
+    ['Active OCO pairs', data.active_oco_pairs],
+    ['Session P&amp;L', `₹${data.session_pnl}`],
+    ['Win rate', data.paper_win_rate],
+    ['SL / Target', `${data.sl_pct} / ${data.target_pct}`],
+    ['Last update', data.time],
+  ];
+  document.getElementById('botStatus').innerHTML =
+    rows.map(([l,v])=>`<div class="row"><span class="lbl">${l}</span><span class="val">${v}</span></div>`).join('');
+}
+
+async function loadPositions(){
+  const {ok, data} = await apiFetch('/status');
+  if(!ok){document.getElementById('positions').innerHTML='<div class="lbl ts">—</div>';return;}
+  const pos = data.positions_detail || {};
+  const keys = Object.keys(pos);
+  if(!keys.length){
+    document.getElementById('positions').innerHTML='<div class="lbl ts">No open positions</div>';
+    return;
+  }
+  document.getElementById('positions').innerHTML = keys.map(sym=>{
+    const p = pos[sym];
+    return `<div class="row">
+      <div><div style="font-weight:600;font-size:.85em">${sym}</div>
+        <div class="lbl" style="font-size:.75em">${p.underlying} · entry:₹${p.entry_price} · ${p.entry_time}</div></div>
+      <div style="text-align:right">
+        <div style="font-size:.78em">SL ₹${p.sl} → T ₹${p.target}</div>
+        <div class="lbl" style="font-size:.73em">δ ${p.real_delta}</div>
+      </div></div>`;
+  }).join('');
+}
+
+async function loadPnL(){
+  const {ok, data} = await apiFetch('/paper_summary');
+  if(!ok){document.getElementById('pnl').innerHTML='<div class="lbl ts">—</div>';return;}
+  const rows = [
+    ['Session P&amp;L', `₹${data.session_pnl}`],
+    ['Total trades', data.total_trades],
+    ['Winners / Losers', `${data.winners} / ${data.losers}`],
+    ['Win rate', `${data.win_rate_pct}%`],
+  ];
+  document.getElementById('pnl').innerHTML =
+    rows.map(([l,v])=>`<div class="row"><span class="lbl">${l}</span><span class="val">${v}</span></div>`).join('');
+}
+
+async function loadVoiceStatus(){
+  const errEl = document.getElementById('voiceErr');
+  errEl.style.display='none';
+  const {ok, status, data} = await apiFetch('/admin/voice/status');
+  if(!ok){
+    if(status===401){errEl.className='notice notice-warn';errEl.textContent='Enter your admin token above to see voice status.';errEl.style.display='block';}
+    else {errEl.className='notice notice-err';errEl.textContent='Voice status error: '+(data.error||status);errEl.style.display='block';}
+    return;
+  }
+  const enabled = data.voice_channel_enabled;
+  document.getElementById('vEnabled').innerHTML  = enabled ? pill('ON','green')  : pill('OFF','red');
+  document.getElementById('vPending').textContent = data.pending_orders;
+  document.getElementById('vMaxLots').textContent = data.max_voice_lots;
+  document.getElementById('btnDisable').disabled = !enabled;
+  document.getElementById('btnEnable').disabled  = enabled;
+}
+
+async function loadVoiceHistory(){
+  const {ok, data} = await apiFetch('/admin/voice/history?limit=20');
+  if(!ok){document.getElementById('voiceHistory').innerHTML='<div class="lbl ts">Enter admin token to view history.</div>';return;}
+  document.getElementById('vToday').textContent = data.voice_orders_today ?? 0;
+  const items = data.history || [];
+  if(!items.length){document.getElementById('voiceHistory').innerHTML='<div class="lbl ts">No voice commands yet this session.</div>';return;}
+  document.getElementById('voiceHistory').innerHTML = items.map(h=>{
+    const decisionMap = {
+      pending:'gray', approved_executed:'green', approved_failed:'red',
+      rejected:'orange', cancelled:'gray', expired:'gray',
+      channel_disabled:'red', execute_exception:'red',
+      low_confidence_confirmation_required:'orange',
+      second_confirmation_required:'orange',
+    };
+    const cls = decisionMap[h.decision] || 'gray';
+    const conf = h.confidence != null ? `${(h.confidence*100).toFixed(0)}%` : '?';
+    const lowConf = h.low_confidence ? '<span class="pill pill-orange" style="font-size:.7em">LOW CONF</span>' : '';
+    return `<div class="cmd-row">
+      <div class="cmd-meta">
+        <span class="ts">${(h.ts||'').replace('T',' ').substring(0,19)}</span>
+        <span class="pill pill-blue">${h.action||'?'} ${h.underlying||'?'} ×${h.qty||h.quantity||'?'}</span>
+        ${pill(h.decision||'unknown', cls)}
+        ${lowConf}
+        <span class="pill pill-gray">conf ${conf}</span>
+        <span class="ts">${h.source_ip||''}</span>
+      </div>
+      <div class="cmd-transcript">"${h.transcript||''}"</div>
+      ${h.result && h.result.option_symbol ? `<div class="cmd-result">→ ${h.result.option_symbol} entry ₹${h.result.entry_price||'?'}</div>` : ''}
+    </div>`;
+  }).join('');
+}
+
+async function toggleVoice(enable){
+  const btn = enable ? document.getElementById('btnEnable') : document.getElementById('btnDisable');
+  btn.disabled = true;
+  const {ok, data} = await apiFetch('/admin/voice/toggle', {method:'POST', body: JSON.stringify({enabled: enable})});
+  if(!ok){alert('Toggle failed: '+(data.error||'unknown'));btn.disabled=false;return;}
+  await loadVoiceStatus();
+}
+
+async function refresh(){
+  document.getElementById('refreshTs').textContent = 'refreshing…';
+  await Promise.all([loadBotStatus(), loadPositions(), loadPnL(), loadVoiceStatus(), loadVoiceHistory()]);
+  document.getElementById('refreshTs').textContent = 'updated ' + new Date().toLocaleTimeString();
+}
+
+// Init
+loadToken();
+refresh();
+setInterval(refresh, 30000);
+</script>
+</body>
+</html>
