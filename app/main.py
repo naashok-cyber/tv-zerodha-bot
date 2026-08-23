@@ -2985,11 +2985,15 @@ window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change',func
 # Display names for the tiles; anything not listed falls back to the raw
 # commodity key, so adding a scrip to COMMODITY_AGENTS_COMMODITIES can never
 # break the grid — it just renders unprettified until a label is added here.
+# The M suffix is load-bearing: these are the *mini* contracts (CRUDEOILM,
+# GOLDM, SILVERM), which is what the agents sample and what the tile actually
+# charts. Labelling them "Crude Oil"/"Gold"/"Silver" read as the full-size
+# contracts and made the grid look like it was plotting the wrong instrument.
 _VOL_LABELS = {
     "NATURALGAS": "Natural Gas",
-    "CRUDEOILM": "Crude Oil",
-    "GOLDM": "Gold",
-    "SILVERM": "Silver",
+    "CRUDEOILM": "Crude Oil M",
+    "GOLDM": "Gold M",
+    "SILVERM": "Silver M",
     "NIFTY": "Nifty",
     "BANKNIFTY": "Bank Nifty",
 }

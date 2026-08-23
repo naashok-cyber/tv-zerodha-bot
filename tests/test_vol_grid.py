@@ -55,6 +55,17 @@ def test_one_tile_per_configured_commodity(client, cfg):
         assert f"data-c='{c}'" in html
 
 
+def test_mini_contracts_are_labelled_as_mini(client, cfg):
+    """The grid charts CRUDEOILM/GOLDM/SILVERM. Labelling them "Crude Oil",
+    "Gold", "Silver" reads as the full-size contracts — a different lot size,
+    a different tick, and a chart you'd act on wrongly."""
+    for key in ("CRUDEOILM", "GOLDM", "SILVERM"):
+        assert _VOL_LABELS[key].endswith(" M"), key
+    html = _control_html(client)
+    assert "<b>Crude Oil M</b>" in html
+    assert "<b>Crude Oil</b>" not in html
+
+
 def test_tiles_follow_the_config_rather_than_a_literal_list(cfg):
     """Adding or removing a scrip in .env must move the grid with it — the old
     monitor's dropdown was a hardcoded six and could silently disagree."""
