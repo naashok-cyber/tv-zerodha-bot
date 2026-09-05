@@ -15,6 +15,7 @@ Production algo-trading bot: TradingView webhooks + voice commands → Zerodha K
 | `paper_trading.py` / anything touching `dry_run` scoping | `docs/claude/paper-trading.md` |
 | `/control` UI, `_shell`, `_SWIPE_JS`, CSS | `docs/claude/trade-desk.md` |
 | Simplifying `/control` — feature registry, what to retire, usage audit | `docs/claude/control-simplification.md` |
+| Splitting `/control` into two apps (Trade + Lab) — boundary rule, PWA/auth/runtime dependencies | `docs/claude/two-app-split.md` |
 | Routes, scheduled jobs, ORM models, config params, state overrides, security, auto-login, deployment | `docs/claude/reference.md` |
 
 ## Directory Map
