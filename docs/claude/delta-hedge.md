@@ -51,6 +51,18 @@ band = NG_HEDGE_BAND_BASE
 - `NG_DELTA_HEDGE_THRESHOLD=400` — now only the base when the ADX call fails
 - `CRUDEOILM_HEDGE_ENABLED=false`, `CRUDEOILM_HEDGE_BAND_BASE=16.0` **barrels**, `CRUDEOILM_HEDGE_BAND_MIN=11.0`, `MAX=22.0`, `VELOCITY_SAMPLES=2` (2 × 5 min = 10-min trend window). At `MAX=22` the ceiling clips a book ~3× ref size — intended, but it means crude's band stops scaling with size well before NG's does.
 
+## Supertrend-skewed landing (`skew_max_units`)
+
+The **trigger is unchanged** — this only decides where δ *lands* after a rebalance. Lots are whole, so the landings form a ladder spaced one lot's δ apart (≈625 mmBtu for an NG ATM lot), and the old `ceil` solve picked the rung on whichever side of zero rounding dropped it — δ flipped sign on almost every NG rebalance.
+
+With `skew_max_units > 0` (`NG_HEDGE_ST_SKEW_MAX_UNITS=400` mmBtu, `CRUDEOILM_HEDGE_ST_SKEW_MAX_UNITS=8` bbl, live on `/control`), `_skewed_lots` picks the lot count whose landing satisfies `0 ≤ dir × δ_after ≤ cap`, nearest zero; if no rung qualifies it takes the one closest to zero (either side). `cap = min(skew_max_units, band)` — a landing outside the band that just fired would re-breach next tick and ping-pong. δ=+2000, SELL ATM lots: ST up → 3 lots → +125; ST down → 4 lots would be −500 > 400, so 3 lots → +125.
+
+- `dir` is Supertrend(`HEDGE_ST_PERIOD=10`, `HEDGE_ST_MULTIPLIER=3.0`) on the **same 10-min candles the ADX fetch already pulls** (`_ST_CACHE`, written by `_adx_regime_mult`, same 10-min TTL) — no extra `historical_data` call. Recurrence matches TradingView's built-in so the chart and the bot agree.
+- No direction (fetch failed, too few candles, stale cache) or `skew_max_units=0` → the legacy `NG_HEDGE_RESIDUAL_RATIO` solve, logged `[no Supertrend — unskewed]`.
+- Every fallback path (roll / opposite-BUY / futures) re-solves through the same `_solve` closure with its own signed δ-per-lot; the chosen landing is in the `sizing [SKEW]` log line and the Telegram message (`ST UP → lands +125`).
+- NG at cap 400 can't always find a trend-side rung (+1800 → +550 is over the cap → falls back to −75); a cap ≥ one lot's δ guarantees one. Crude's 5-bbl lots always have one.
+- The F-move engines do **not** skew — run alongside the band engine they will pull δ back toward zero.
+
 ## Notional-derived band base
 
 **The band base is derived from live futures price, not a constant.** `F` is already fetched each tick for the delta model, so this is free:

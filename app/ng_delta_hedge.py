@@ -64,6 +64,7 @@ def build_spec(settings: Any) -> HedgeSpec:
         band_max=float(t["band_max"]),
         cooldown_min=int(t["cooldown_min"]),
         max_lots_per_tick=int(t["max_lots_per_tick"]),
+        skew_max_units=float(t["skew_max_units"]),
         ref_lots=int(settings.NG_HEDGE_BAND_REF_LOTS),
         interval_min=int(settings.NG_HEDGE_INTERVAL_MIN),
         phase_min=int(settings.NG_HEDGE_PHASE_MIN),

@@ -90,7 +90,7 @@ def _notional_band_base(spec: HedgeSpec, F: float, settings: Any) -> tuple[float
 
 
 def _adx_regime_mult(
-    kite: Any, futures_inst: Any, spec: HedgeSpec
+    kite: Any, futures_inst: Any, spec: HedgeSpec, settings: Any = None
 ) -> tuple[float, float | None, str]:
     """ADX regime multiplier applied to the band base, plus (adx, regime).
 
@@ -104,6 +104,9 @@ def _adx_regime_mult(
     base is recomputed live each tick, so a moving F is reflected immediately.
 
     Returns (1.0, None, "FALLBACK") on any API or compute error.
+
+    Side effect: refreshes the Supertrend cache (`_ST_CACHE`) from the same
+    candles, so the skewed lot solve costs no extra historical call.
     """
     from app.adx import compute_adx
     from app.config import IST as _IST
@@ -124,7 +127,10 @@ def _adx_regime_mult(
     except Exception as exc:
         log.warning("%s ADX: historical_data failed: %s — regime multiplier 1.0",
                     spec.prefix, exc)
+        _ST_CACHE.pop(spec.name, None)   # no candles → no skew, not a stale one
         return 1.0, None, "FALLBACK"
+
+    _store_supertrend(raw, spec, settings)
 
     adx = compute_adx(raw, period=_ADX_PERIOD)
     if adx is None:
@@ -143,6 +149,23 @@ def _adx_regime_mult(
              spec.prefix, adx, regime, mult)
     _ADX_CACHE[spec.name] = (_time.monotonic(), mult, adx, regime)
     return mult, adx, regime
+
+
+def _store_supertrend(raw: list, spec: HedgeSpec, settings: Any = None) -> None:
+    """Compute Supertrend from the ADX fetch's candles and cache the direction."""
+    from app.supertrend import compute_supertrend
+
+    try:
+        st = compute_supertrend(
+            raw or [], period=int(getattr(settings, "HEDGE_ST_PERIOD", 10)),
+            multiplier=float(getattr(settings, "HEDGE_ST_MULTIPLIER", 3.0)),
+        )
+    except Exception as exc:
+        log.warning("%s Supertrend compute failed: %s — no skew", spec.prefix, exc)
+        st = None
+    _ST_CACHE[spec.name] = (_time.monotonic(), st)
+    log.info("%s Supertrend(10-min) → %s", spec.prefix,
+             {1: "UP", -1: "DOWN"}.get(st, "n/a"))
 
 
 # ── Hedge state: cooldown, daily hedge count, δ history (resets each day) ─────
@@ -280,6 +303,31 @@ def _lots_for(excess: float, delta_per_unit: float, lot_mult: int, cap: int) -> 
     return max(1, min(int(cap), ceil(excess / per_lot)))
 
 
+def _skewed_lots(
+    total_delta: float, added_per_lot: float, cap: int,
+    st_dir: int, skew_max: float,
+) -> tuple[int, bool]:
+    """Lots whose landing sits just past zero on the Supertrend side.
+
+    `added_per_lot` is the signed δ one lot of the chosen order adds (a SELL CE
+    is negative, a BUY CE positive). Each extra lot moves the landing by that
+    much, so the candidates are a ladder spaced one lot apart and at most one
+    rung sits in (0, lot] on any given side. Whole-lot rounding used to pick the
+    side at random — this picks it from the trend.
+
+    Returns (lots, skewed). `skewed` is True when the landing is on the trend
+    side within `skew_max`; otherwise the count whose landing is closest to zero
+    (fewer lots on a tie), which is what "cap the skew" means: rather than sit
+    far out with the trend, accept landing just the other side of zero.
+    """
+    cap = max(1, int(cap))
+    landings = [(n, total_delta + n * added_per_lot) for n in range(1, cap + 1)]
+    trend_side = [(n, d) for n, d in landings if 0 <= st_dir * d <= skew_max]
+    if trend_side:
+        return min(trend_side, key=lambda x: (abs(x[1]), x[0]))[0], True
+    return min(landings, key=lambda x: (abs(x[1]), x[0]))[0], False
+
+
 
 # ── Per-underlying specs ─────────────────────────────────────────────────────
 # Dimensional knobs live here — band bounds are in contract units (mmBtu for NG,
@@ -313,6 +361,7 @@ class HedgeSpec:
     phase_min: int          # ...offset by this many
     velocity_samples: int   # δ samples for the trend confirm
     adx_fallback: float     # band base when the ADX call fails
+    skew_max_units: float = 0.0  # Supertrend landing cap (contract units); 0 = off
 
     @property
     def prefix(self) -> str:
@@ -344,6 +393,19 @@ def _is_due(spec: HedgeSpec, now: datetime, carryover: bool = False) -> bool:
 # against a 3 req/sec bucket. Cache per underlying for the candle duration.
 _ADX_CACHE: dict[str, tuple[float, float, float | None, str]] = {}  # name → (ts, band, adx, regime)
 _ADX_CACHE_TTL_SEC = 600.0
+
+# Supertrend direction rides the same candles and the same TTL — it is written
+# by `_adx_regime_mult` whenever that function actually fetches, so it never
+# costs a historical call of its own.
+_ST_CACHE: dict[str, tuple[float, int | None]] = {}   # name → (ts, +1/-1/None)
+
+
+def _supertrend_dir(spec: HedgeSpec) -> int | None:
+    """Cached Supertrend direction for this underlying, or None if unknown/stale."""
+    cached = _ST_CACHE.get(spec.name)
+    if not cached or (_time.monotonic() - cached[0]) >= _ADX_CACHE_TTL_SEC:
+        return None
+    return cached[1]
 
 
 
@@ -714,7 +776,7 @@ def process_underlying(
         hedge_state["delta_history"] = history[-_DELTA_HISTORY_MAX:]
 
         _raw_base, _base_src = _notional_band_base(spec, F, settings)
-        _adx_mult, _adx_val, _adx_regime = _adx_regime_mult(kite, futures, spec)
+        _adx_mult, _adx_val, _adx_regime = _adx_regime_mult(kite, futures, spec, settings)
         base_band = _raw_base * _adx_mult
         threshold, _band_parts = _compute_band(
             base_band, n_lots, trend, int(hedge_state.get("hedges_today", 0)), settings, spec
@@ -1000,17 +1062,52 @@ def process_underlying(
         # re-breaches on the very next tick — one rebalance billed as 3-4 orders.
         residual_target = float(settings.NG_HEDGE_RESIDUAL_RATIO) * threshold
         excess = abs(total_delta) - residual_target
-        lots = _lots_for(
-            excess, chosen_delta_unit, lot_mult, spec.max_lots_per_tick
+
+        # Supertrend skew: with a cap set and a known direction, pick the lot
+        # count that lands just past zero on the trend side instead of letting
+        # whole-lot rounding pick the side (see `_skewed_lots`). The landing is
+        # also held inside the band that fired, or the next tick re-breaches
+        # and the book ping-pongs. Every fallback path re-solves through this.
+        st_dir = _supertrend_dir(spec) if spec.skew_max_units > 0 else None
+        skew_cap = min(float(spec.skew_max_units), threshold)
+
+        def _solve(
+            added_per_lot: float, delta_unit: float, start: float | None = None
+        ) -> tuple[int, str]:
+            if st_dir is None:
+                return _lots_for(excess, delta_unit, lot_mult, spec.max_lots_per_tick), ""
+            start = total_delta if start is None else start
+            n, skewed = _skewed_lots(
+                start, added_per_lot, spec.max_lots_per_tick, st_dir, skew_cap
+            )
+            note = (
+                f"ST {'UP' if st_dir > 0 else 'DOWN'} → lands "
+                f"{start + n * added_per_lot:+.0f}"
+            )
+            if not skewed:
+                note += f" (no trend-side landing within {skew_cap:.0f} — nearest zero)"
+            return n, note
+
+        lots, _skew_note = _solve(
+            -chosen_inst.lot_size * chosen_delta_unit * lot_mult, chosen_delta_unit
         )
         qty = lots * chosen_inst.lot_size  # MCX option lot_size=1 → qty=lots
-        log.info(
-            "%s sizing: |δ|=%.0f → target residual %.0f (%.2f x band) → excess %.0f "
-            "→ %d lot(s) @ δ_unit=%+.4f (cap=%d)",
-            spec.prefix, abs(total_delta), residual_target,
-            float(settings.NG_HEDGE_RESIDUAL_RATIO), excess, lots, chosen_delta_unit,
-            spec.max_lots_per_tick,
-        )
+        if _skew_note:
+            log.info(
+                "%s sizing [SKEW]: |δ|=%.0f, cap %.0f (min of %.0f, band) → %d lot(s) "
+                "@ δ_unit=%+.4f (max=%d) — %s",
+                spec.prefix, abs(total_delta), skew_cap, spec.skew_max_units, lots,
+                chosen_delta_unit, spec.max_lots_per_tick, _skew_note,
+            )
+        else:
+            log.info(
+                "%s sizing: |δ|=%.0f → target residual %.0f (%.2f x band) → excess %.0f "
+                "→ %d lot(s) @ δ_unit=%+.4f (cap=%d)%s",
+                spec.prefix, abs(total_delta), residual_target,
+                float(settings.NG_HEDGE_RESIDUAL_RATIO), excess, lots, chosen_delta_unit,
+                spec.max_lots_per_tick,
+                " [no Supertrend — unskewed]" if spec.skew_max_units > 0 else "",
+            )
 
         # Projected delta after hedge (SELL adds −1×qty×δ_per_unit×mult)
         added_delta = -qty * chosen_delta_unit * lot_mult
@@ -1028,7 +1125,8 @@ def process_underlying(
                 settings,
                 f"{spec.name} δ-hedge DRY: would SELL {lots} lot {chosen_sym}\n"
                 f"  net δ before: {total_delta:+.0f} mmBtu\n"
-                f"  net δ after (est): {projected_delta:+.0f} mmBtu",
+                f"  net δ after (est): {projected_delta:+.0f} mmBtu"
+                + (f"\n  {_skew_note}" if _skew_note else ""),
             )
             return "IDLE"
 
@@ -1099,9 +1197,13 @@ def process_underlying(
                             atm_delta_unit = atm_res.delta
                         # Re-solve lots: the ATM leg carries more delta per lot
                         # than the OTM leg the original size was computed on.
-                        roll_lots = _lots_for(
-                            excess, atm_delta_unit or chosen_delta_unit, lot_mult,
-                            spec.max_lots_per_tick,
+                        # The buy-back already moved δ (BUY adds +δ_unit per
+                        # unit); land from there, or the skew lands off-target.
+                        closed_delta = otm_inst.lot_size * otm_delta_unit * lot_mult
+                        roll_lots, roll_note = _solve(
+                            -atm_inst.lot_size * (atm_delta_unit or chosen_delta_unit) * lot_mult,
+                            atm_delta_unit or chosen_delta_unit,
+                            start=total_delta + closed_delta,
                         )
                         roll_qty = roll_lots * atm_inst.lot_size
                         roll_oid, roll_mode = _limit_then_market(
@@ -1109,7 +1211,7 @@ def process_underlying(
                         )
                         if roll_oid is not None:
                             roll_added = -roll_qty * (atm_delta_unit or chosen_delta_unit) * lot_mult
-                            roll_projected = total_delta + roll_added
+                            roll_projected = total_delta + closed_delta + roll_added
                             log.info(
                                 "%s [ROLL] success: closed %s + sold %s "
                                 "(δ_unit=%+.4f, added=%+.0f, proj δ=%+.0f)",
@@ -1124,6 +1226,7 @@ def process_underlying(
                             final_qty = roll_qty
                             final_added = roll_added
                             projected_delta = roll_projected
+                            _skew_note = roll_note
                         else:
                             log.warning(
                                 "%s [ROLL] ATM sell %s failed (%s) — falling through to BUY opposite",
@@ -1165,8 +1268,8 @@ def process_underlying(
                 else:
                     # BUY adds +qty × δ_per_unit × mult. δ_PE is negative → reduces +total;
                     # δ_CE is positive → reduces (less-negative) total.
-                    opp_lots = _lots_for(
-                        excess, opp_delta, lot_mult, spec.max_lots_per_tick
+                    opp_lots, opp_note = _solve(
+                        opp_inst.lot_size * opp_delta * lot_mult, opp_delta
                     )
                     opp_qty = opp_lots * opp_inst.lot_size
                     opp_added = opp_qty * opp_delta * lot_mult
@@ -1183,6 +1286,7 @@ def process_underlying(
                         final_qty = opp_qty
                         final_added = opp_added
                         projected_delta = opp_projected
+                        _skew_note = opp_note
 
         # Fallback 2: hedge with front-month NG futures (still needs margin but a
         # single lot may fit if the SELL-option call was blocked due to the
@@ -1204,8 +1308,8 @@ def process_underlying(
                 fut_side = "SELL" if total_delta > 0 else "BUY"
                 # Futures carry δ=1.0/unit — far more per lot than an option, so
                 # size them off the excess directly rather than reusing `lots`.
-                fut_lots = _lots_for(
-                    excess, 1.0, lot_mult, spec.max_lots_per_tick
+                fut_lots, fut_note = _solve(
+                    (-1 if fut_side == "SELL" else 1) * fut_inst.lot_size * lot_mult, 1.0
                 )
                 fut_qty = fut_lots * fut_inst.lot_size  # NG futures lot_size=1
                 fut_added = (-1 if fut_side == "SELL" else 1) * fut_qty * lot_mult
@@ -1222,6 +1326,7 @@ def process_underlying(
                     final_qty = fut_qty
                     final_added = fut_added
                     projected_delta = fut_projected
+                    _skew_note = fut_note
 
         if oid is None:
             log.error(
@@ -1279,7 +1384,8 @@ def process_underlying(
             f"  net δ after (est): {projected_delta:+.0f} mmBtu\n"
             f"  band: ±{threshold:.0f} mmBtu [{_adx_str}, {n_lots} lots, δ {trend.lower()}]\n"
             f"  hedge #{hedge_state['hedges_today']} today\n"
-            f"  order_id: {oid}",
+            + (f"  {_skew_note}\n" if _skew_note else "")
+            + f"  order_id: {oid}",
         )
         return "HEDGED"
 

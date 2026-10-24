@@ -110,6 +110,9 @@ ENGINES: tuple[Engine, ...] = (
                     "int", 0, 240, 1),
             Tunable("max_lots_per_tick", "Max lots / hedge", "lots",
                     "NG_HEDGE_MAX_LOTS_PER_TICK", "int", 1, 50, 1),
+            Tunable("skew_max_units", "Supertrend skew cap", "mmBtu",
+                    "NG_HEDGE_ST_SKEW_MAX_UNITS", "float", 0, 5_000, 25,
+                    note="post-hedge &delta; lands on the Supertrend side, up to this; 0 = off"),
         ),
     ),
     Engine(
@@ -148,6 +151,9 @@ ENGINES: tuple[Engine, ...] = (
                     "int", 0, 240, 1),
             Tunable("max_lots_per_tick", "Max lots / hedge", "lots",
                     "NG_HEDGE_MAX_LOTS_PER_TICK", "int", 1, 50, 1),
+            Tunable("skew_max_units", "Supertrend skew cap", "bbl",
+                    "CRUDEOILM_HEDGE_ST_SKEW_MAX_UNITS", "float", 0, 500, 1,
+                    note="post-hedge &delta; lands on the Supertrend side, up to this; 0 = off"),
         ),
     ),
     Engine(

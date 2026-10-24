@@ -317,6 +317,18 @@ class Settings(BaseSettings):
     NG_HEDGE_RESIDUAL_RATIO: float = 0.4      # aim for |δ| = this x band (0 = hedge to flat)
     NG_HEDGE_MAX_LOTS_PER_TICK: int = 6       # hard cap on a single rebalance
 
+    # Supertrend skew on the *landing*, not the trigger. One NG ATM lot moves
+    # ~625 mmBtu, so the whole-lot solve always lands one side of zero or the
+    # other; plain rounding picked that side at random and δ flipped sign on
+    # almost every rebalance. With a skew cap > 0 the solver picks the lot count
+    # that lands on the Supertrend side (0 < ±δ_after <= cap, and inside the
+    # band that fired), falling back to closest-to-zero when no such count
+    # exists. 0 = off (legacy NG_HEDGE_RESIDUAL_RATIO sizing). Live at /control.
+    NG_HEDGE_ST_SKEW_MAX_UNITS: float = 400.0        # mmBtu
+    CRUDEOILM_HEDGE_ST_SKEW_MAX_UNITS: float = 8.0   # bbl (one ATM lot ≈ 5 bbl)
+    HEDGE_ST_PERIOD: int = 10            # Supertrend ATR period, on the ADX's 10-min candles
+    HEDGE_ST_MULTIPLIER: float = 3.0     # Supertrend band width in ATRs
+
     # Trend awareness: ADX(10-min) lags ~30 min, so confirm with δ velocity too.
     NG_HEDGE_VELOCITY_SAMPLES: int = 3        # consecutive same-direction δ samples = trending
     NG_HEDGE_ADVERSE_MULT: float = 0.7        # tighter band when δ is drifting away from zero
