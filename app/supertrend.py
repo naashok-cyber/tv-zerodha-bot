@@ -20,8 +20,22 @@ def compute_supertrend(
     Requires at least (period + 2) candles: `period` TRs to seed the ATR, then
     at least one bar to walk the bands from.
     """
+    series = supertrend_series(candles, period, multiplier)
+    return series[-1] if series else None
+
+
+def supertrend_series(
+    candles: list[dict], period: int = 10, multiplier: float = 3.0
+) -> list[int | None]:
+    """Direction at every candle (None until warmed up) — one O(n) pass.
+
+    The backtest (`app/skew_backtest.py`) needs the value as-of each bar;
+    re-running `compute_supertrend` on every prefix would be O(n^2).
+    `out[i]` uses candles[0..i] only, so it never looks ahead.
+    """
+    out: list[int | None] = [None] * len(candles)
     if period < 1 or len(candles) < period + 2:
-        return None
+        return out
 
     trs: list[float] = []
     for i in range(1, len(candles)):
@@ -60,5 +74,6 @@ def compute_supertrend(
             direction = 1
         elif direction == 1 and c["close"] < prev_lb:
             direction = -1
+        out[i] = direction
 
-    return direction
+    return out
